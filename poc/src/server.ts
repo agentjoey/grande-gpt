@@ -72,7 +72,10 @@ export function createApp(): Hono {
           remoteUa: c.req.header("user-agent") ?? "",
         });
       })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        if (error instanceof SyntaxError) return; // 非 JSON 请求体：预期内，静默
+        console.error("[observe] 观测日志写入失败", error);
+      });
 
     return response;
   });
