@@ -28,3 +28,6 @@ secrets/
 
 # Logs
 *.log
+
+# SDD 执行台账（本地 scratch）
+.superpowers/

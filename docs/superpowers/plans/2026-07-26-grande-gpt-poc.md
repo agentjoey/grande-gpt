@@ -13,7 +13,8 @@
 以下取自规格 `docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`，**每个任务的要求都隐含包含本节**。
 
 - **POC 代码是一次性的，不进入 S0 代码库。** 全部放在 `poc/`，产出是观察记录 + 对规格的修订。
-- **不实现任何真实逻辑**：无 Gateway、无 Seatbelt、无 worktree、无 git、无 SQLite、无文件系统写入。全部数据在内存中。
+- **不实现任何真实逻辑**：无 Gateway、无 Seatbelt、无 worktree、无 git、无 SQLite。**假仓库与 job 的全部业务状态只存在于内存中**，进程退出即消失。
+  - 唯一允许的磁盘写入是**观测日志** `observe.jsonl`（Task 5 的 `observe.ts`）—— 它是本 POC 的交付物本身，属于仪表而非业务逻辑。除此之外不得有任何文件写入。
 - **九个工具名固定**：`grande_task_open`、`grande_task_status`、`grande_repo_map`、`grande_repo_search`、`grande_repo_read`、`grande_repo_edit`、`grande_diff`、`grande_run`、`grande_run_result`。
 - **`repoId` 由 URL 端点决定，绝不作为工具参数**（规格 D5）。
 - **注解必须如实标注**：六个只读工具 `readOnlyHint: true`；`grande_task_open` / `grande_repo_edit` / `grande_run` 为 `readOnlyHint: false, destructiveHint: false`；**所有工具 `openWorldHint: false`**。
@@ -97,11 +98,11 @@ cd poc
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --experimental-strip-types src/server.ts",
+    "dev": "node src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "report": "node --experimental-strip-types scripts/report.ts"
+    "report": "node scripts/report.ts"
   },
   "dependencies": {
     "@hono/node-server": "1.19.7",
