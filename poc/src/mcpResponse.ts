@@ -32,7 +32,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * 全部返回 null，不是崩溃。
  *
  * jobId 只在 toolName 是 "grande_run" 时提取：grande_run_result 的 jobId 已经
- * 在请求参数（args.jobId）里，不需要从响应里再取一份。
+ * 在请求参数（args.jobId）里，不需要从响应里再取一份。对称地，state 只在
+ * toolName 是 "grande_run_result" 时提取——grande_run 的信封里虽然也有一个
+ * `data.state`（永远是字面量 "running"，见 tools.ts），但那不是我们想要判定
+ * 终态用的字段，提取它只会掩盖「这次调用到底有没有轮询到终态」这个问题。
  */
 export function extractObserveResult(parsed: unknown, toolName: string): ObserveResult {
   const result = isRecord(parsed) && isRecord(parsed.result) ? parsed.result : undefined;
@@ -56,5 +59,13 @@ export function extractObserveResult(parsed: unknown, toolName: string): Observe
       ? envelope.data.jobId
       : null;
 
-  return { isError, ok, errorCode, truncated, jobId };
+  const state =
+    toolName === "grande_run_result" &&
+    envelope?.ok === true &&
+    isRecord(envelope.data) &&
+    typeof envelope.data.state === "string"
+      ? envelope.data.state
+      : null;
+
+  return { isError, ok, errorCode, truncated, jobId, state };
 }

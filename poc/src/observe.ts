@@ -17,6 +17,14 @@ export interface ObserveResult {
   truncated: boolean | null;
   /** 仅对 grande_run 有意义：它在响应里回传的 jobId */
   jobId: string | null;
+  /**
+   * 仅对 grande_run_result 有意义：它在响应里回传的 job state（"running" /
+   * "passed" / "failed"）。C1 修复：report.ts 判定「模型是否自主轮询至终态」
+   * 此前只看轮询间隔，从不看轮询看到的 job 状态——一次 running 中途的轮询和一次
+   * 真正到达终态的轮询，在只看间隔的逻辑下长一个样。这个字段是让 autoPolled 能
+   * 分辨两者的唯一依据。
+   */
+  state: string | null;
 }
 
 export interface ObserveEvent {
