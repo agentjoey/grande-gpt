@@ -3,6 +3,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parseMcpJsonRpcResponse } from "../src/mcpResponse.ts";
 import { createApp } from "../src/server.ts";
 
 const SECRET = "test-secret";
@@ -12,23 +13,7 @@ beforeEach(() => {
 });
 
 /**
- * MCP 端点的响应可能是纯 JSON，也可能是 SSE 帧（`event: message\ndata: {...}`），
- * 取决于 SDK 内部选择。两种都尝试解析。
- */
-function parseMcpJsonRpcResponse(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const dataLine = text.split("\n").find((line) => line.startsWith("data: "));
-    if (!dataLine) {
-      throw new Error(`无法解析 MCP 响应：既不是 JSON，也找不到 SSE data 行。原始内容：${text.slice(0, 200)}`);
-    }
-    return JSON.parse(dataLine.slice("data: ".length));
-  }
-}
-
-/**
- * 观测日志写入是 fire-and-forget（server.ts 中 `void cloned.json().then(...)`），
+ * 观测日志写入是 fire-and-forget（server.ts 中 `void clonedReq.json().then(...)`），
  * app.request() resolve 时不保证日志已经落盘。轮询直到文件出现或超时，
  * 避免用固定 sleep 赌时间导致 CI 偶发失败。
  */
@@ -44,6 +29,28 @@ async function waitForFileContent(path: string, timeoutMs = 2000, intervalMs = 2
       }
       await new Promise((resolve) => setTimeout(resolve, intervalMs));
     }
+  }
+}
+
+/**
+ * 同上是轮询而非固定 sleep，但等待的是「至少 N 行」而不是「文件存在」——
+ * 用于一个用例里连续发两次 tools/call 的场景：文件在第一次写入后就已存在，
+ * 若只等「存在」，第二次的 fire-and-forget 写入可能还没落盘就被读到。
+ */
+async function waitForLineCount(path: string, count: number, timeoutMs = 2000, intervalMs = 20): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    let lines: string[] = [];
+    try {
+      lines = readFileSync(path, "utf8").trim().split("\n").filter(Boolean);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (lines.length >= count) return lines;
+    if (Date.now() >= deadline) {
+      throw new Error(`等待观测日志写满 ${count} 行超时（${timeoutMs}ms 内只有 ${lines.length} 行）：${path}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
 
@@ -203,5 +210,53 @@ describe("观测日志", () => {
     const lines = raw.trim().split("\n").filter(Boolean);
     expect(lines).toHaveLength(1);
     expect(JSON.parse(lines[0]!).tool).toBe("grande_task_open");
+  });
+
+  it("grande_run 调用记录的日志行带有响应摘要，jobId 非空（根治 I1：日志此前只记参数不记响应）", async () => {
+    const app = createApp();
+    await initialize(app);
+
+    const openRes = await app.request(`/${SECRET}/mcp/demo-app`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "grande_task_open", arguments: { goal: "写一个测试" } },
+      }),
+    });
+    const openBody = parseMcpJsonRpcResponse(await openRes.text()) as {
+      result?: { structuredContent?: { taskId?: unknown } };
+    };
+    const taskId = openBody.result?.structuredContent?.taskId;
+    expect(typeof taskId).toBe("string");
+    await waitForFileContent(logPath); // 确保 grande_task_open 这一行先落盘，再发下一个请求
+
+    const runRes = await app.request(`/${SECRET}/mcp/demo-app`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "grande_run", arguments: { taskId, profile: "unit" } },
+      }),
+    });
+    expect(runRes.status).toBe(200);
+
+    const lines = await waitForLineCount(logPath, 2);
+    expect(lines).toHaveLength(2);
+
+    const openEvent = JSON.parse(lines[0]!);
+    expect(openEvent.tool).toBe("grande_task_open");
+    // jobId 只对 grande_run 有意义，其它工具即便响应里出现类似字段也不应被提取。
+    expect(openEvent.result.jobId).toBeNull();
+
+    const runEvent = JSON.parse(lines[1]!);
+    expect(runEvent.tool).toBe("grande_run");
+    expect(runEvent.result).toMatchObject({ isError: false, ok: true, errorCode: null });
+    expect(typeof runEvent.result.jobId).toBe("string");
+    expect(runEvent.result.jobId).toMatch(/^job_/);
   });
 });
