@@ -11,8 +11,13 @@ const HUMAN_GAP_MS = 60_000;
  * 模型抢跑连开两个 run 时，晚到的第一个 run 的轮询会被位置法错配给第二个 run，
  * 能把从未被轮询过的 run 伪造成 autoPolled:true。
  *
- * jobId 为 null 表示这次 grande_run 的日志行没有响应摘要（Task 6 修复前写入的
- * 旧格式日志，或响应解析失败）——此时这次 run 无法归属任何轮询，polls 恒为空。
+ * 只有拿到了 jobId 的 grande_run 才会在这里出现一个 episode：没拿到 jobId 的调用
+ * （业务失败、MCP 协议级拒绝，或 Task 6 修复前写入的旧格式日志缺响应摘要）从未
+ * 真正开始过一个可轮询的任务，说明不了模型会不会轮询，因此整体不进入 episode
+ * 集合，只计入 Analysis.failedRunCalls——否则一次业务错误就能把 P-1 拖成假 FAIL
+ * （详见「重要发现」修复）。jobId 的类型仍保留 `| null`，只是为了让 renderMarkdown
+ * 对手工构造的 Analysis（例如测试里直接给的 fixture）也能防御性渲染；analyze()
+ * 本身不会再产出 jobId 为 null 的 episode。
  */
 export interface RunEpisode {
   jobId: string | null;
@@ -27,6 +32,13 @@ export interface Analysis {
   totalToolCalls: number;
   byTool: Record<string, number>;
   episodes: RunEpisode[];
+  /**
+   * grande_run 调用中没有拿到 jobId 的次数——业务失败（如 PROFILE_NOT_FOUND）、
+   * MCP 协议级拒绝，或旧格式日志缺响应摘要。这些调用从未开始过一个可轮询的任务，
+   * 不构成「没有被轮询」的证据，因此被排除在 episodes 之外、不参与 P-1 判定；
+   * 这里如实计数，P-1 小节的文案里同样如实报告，不静默丢弃。
+   */
+  failedRunCalls: number;
   /** grande_run_result 的 args.jobId 未匹配到任何已知 episode 的次数（不再被静默丢弃） */
   orphanPolls: number;
   /** 响应 errorCode === "TASK_NOT_FOUND" 的次数——taskId 丢失的直接信号 */
@@ -73,21 +85,31 @@ export function analyze(events: ObserveEvent[]): Analysis {
     }
   }
 
-  // P-1：episode 的身份是 grande_run 响应里的 jobId。grande_run_result 按它
-  // 请求参数里的 jobId（args.jobId，工具的必填入参，不需要看响应）归属到对应
-  // episode；匹配不到任何已知 jobId 的轮询计为孤立轮询，如实报告而不是静默丢弃。
+  // P-1：episode 的身份是 grande_run 响应里的 jobId。没拿到 jobId 的调用（业务
+  // 失败、MCP 协议级拒绝，或旧格式日志缺响应摘要）从未真正开始过一个可轮询的
+  // 任务，整体不生成 episode——只计入 failedRunCalls，避免一次失败调用把 P-1
+  // 拖成假 FAIL（重要发现修复）。grande_run_result 按它请求参数里的 jobId
+  // （args.jobId，工具的必填入参，不需要看响应）归属到对应 episode；匹配不到
+  // 任何已知 jobId 的轮询计为孤立轮询，如实报告而不是静默丢弃。
   interface EpisodeBuilder {
-    jobId: string | null;
+    jobId: string;
     runAt: number;
     polls: number[];
   }
 
-  const builders: EpisodeBuilder[] = sorted
-    .filter((e) => e.tool === "grande_run")
-    .map((e) => ({ jobId: e.result?.jobId ?? null, runAt: e.ts, polls: [] }));
+  const runCalls = sorted.filter((e) => e.tool === "grande_run");
+  const failedRunCalls = runCalls.filter((e) => typeof e.result?.jobId !== "string").length;
+  const builders: EpisodeBuilder[] = runCalls
+    .filter((e) => typeof e.result?.jobId === "string")
+    .map((e) => ({ jobId: e.result?.jobId as string, runAt: e.ts, polls: [] }));
 
   const byJobId = new Map<string, EpisodeBuilder>();
-  for (const b of builders) if (b.jobId !== null) byJobId.set(b.jobId, b);
+  for (const b of builders) {
+    // jobId 由 job_${randomUUID().slice(0,8)} 生成，POC 规模下撞车概率可忽略不计；
+    // 但 Map.set 撞车会静默覆盖，让先到的 run 冻结在零轮询、伪造出一次假 FAIL
+    // （Minor 发现 2）。保留先到的 builder、丢弃后到的重复 key——代价更小的一侧。
+    if (!byJobId.has(b.jobId)) byJobId.set(b.jobId, b);
+  }
 
   let orphanPolls = 0;
   for (const e of sorted) {
@@ -127,6 +149,7 @@ export function analyze(events: ObserveEvent[]): Analysis {
     totalToolCalls: sorted.length,
     byTool,
     episodes,
+    failedRunCalls,
     orphanPolls,
     taskIdLossEvents,
     distinctTaskIds,
@@ -149,8 +172,11 @@ function p5Verdict(a: Analysis): string {
 
 export function renderMarkdown(a: Analysis): string {
   const autoPolledCount = a.episodes.filter((e) => e.autoPolled).length;
-  // 空真守卫：零 episode 不能算「全部自主轮询」为真——一次 grande_run 都没有
-  // 发生过，就没有证据支持 PASS，必须是 FAIL。
+  const totalRunCalls = a.episodes.length + a.failedRunCalls;
+  // 空真守卫：零 episode 不能算「全部自主轮询」为真——不管是压根没调用过
+  // grande_run，还是调用过但全部失败、一个 jobId 都没拿到（3 次 grande_run
+  // 全部失败也一样落在这里），都没有「模型确实轮询过」的证据，必须是 FAIL，
+  // 不能空真地判 PASS。
   const p1Pass = a.episodes.length > 0 && autoPolledCount === a.episodes.length;
 
   const lines: string[] = [
@@ -168,7 +194,7 @@ export function renderMarkdown(a: Analysis): string {
     "",
     `## P-1 模型是否自主轮询 —— ${verdict(p1Pass)}`,
     "",
-    `共 ${a.episodes.length} 次 \`grande_run\`，其中 ${autoPolledCount} 次由模型自主轮询至终态。` +
+    `共 ${totalRunCalls} 次 \`grande_run\` 调用，其中 ${a.failedRunCalls} 次未能拿到 jobId（调用失败或旧格式日志缺响应摘要，已排除、不计入下表与本节判定），剩余 ${a.episodes.length} 次真正开始的 run 里有 ${autoPolledCount} 次由模型自主轮询至终态。` +
       (a.orphanPolls > 0
         ? ` 另有 ${a.orphanPolls} 次 \`grande_run_result\` 轮询的 jobId 未匹配到任何已知 run（孤立轮询，不计入下表，也不参与本节判定）。`
         : ""),
