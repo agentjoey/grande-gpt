@@ -29,8 +29,13 @@ export interface ObserveEvent {
   durationMs: number;
   remoteUa: string;
   /**
-   * 可选：Task 6 修复前写入的日志行没有这个字段。report.ts 必须能在缺失时
-   * 优雅降级（视作「无法判定」），而不是崩溃。
+   * 可选，且缺失有两种截然不同的成因，日志行本身无法区分二者：
+   * (1) Task 6 修复前写入的旧格式日志行，本来就没有这个字段；
+   * (2) 当前调用里 server.ts 的 summarizeResponse 吞掉了响应解析异常、返回了
+   *     undefined——此时原始响应（包括真实的 jobId）依然正常送回给了模型，只是
+   *     这一条日志的响应摘要没能记录下来，不代表这次调用本身有任何问题。
+   * report.ts 不能把「缺失」当成「已确认失败」，必须视作「无法判定」保守处理
+   * （详见 report.ts 里 RunEpisode / Analysis 的相关注释）。
    */
   result?: ObserveResult;
 }

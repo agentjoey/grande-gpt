@@ -21,6 +21,16 @@ function errResult(errorCode: string): ObserveResult {
   return { isError: false, ok: false, errorCode, truncated: null, jobId: null };
 }
 
+/**
+ * 「无法观测」状态：result 字段整个缺失——不是 errResult() 描述的「确认失败」。
+ * 两种可能成因（旧格式日志 / summarizeResponse 吞掉了响应解析异常，见
+ * observe.ts 对 result 字段的注释）都是这个形状，不能混同为「已知失败」。
+ * 命名为函数而不是直接省略第四个参数，是为了让调用点自解释意图。
+ */
+function unobservable(): undefined {
+  return undefined;
+}
+
 const T0 = 1_800_000_000_000;
 
 describe("analyze()", () => {
@@ -52,15 +62,21 @@ describe("analyze()", () => {
     expect(a.episodes[0]!.autoPolled).toBe(false);
   });
 
-  it("旧格式日志缺响应摘要时优雅降级：不崩溃，也不生成 episode，改记入 failedRunCalls（重要发现修复后的新语义——拿不到 jobId 就说明不了轮询行为，不能进 episode 集合）", () => {
-    // 不带 result 参数：模拟 Task 6 修复前写入的旧格式日志行。这次 run 到底有没有
-    // 拿到 jobId 已经无从判断，视同「没拿到」处理——不能被当成不利于 P-1 的证据。
-    const a = analyze([ev("grande_run", T0, { taskId: "task_1", profile: "unit" })]);
-    expect(a.episodes).toHaveLength(0);
-    expect(a.failedRunCalls).toBe(1);
+  it("result 整个缺失（无法观测）时不崩溃，生成一个 jobId:null 的 fail-safe episode，不计入确认失败（Important 发现修复：无法观测是「不知道」，不是「确认失败」，不能从证据里消失）", () => {
+    // 无法观测：可能是 Task 6 修复前写入的旧格式日志，也可能是当前调用里
+    // summarizeResponse 吞掉了响应解析异常（模型收到的原始响应可能完全正常，
+    // jobId 也许真的创建了）。两种成因日志行里长一个样子，report.ts 都无法
+    // 区分，也不需要区分——统一保守处理为「未被证明自主轮询」。
+    const a = analyze([ev("grande_run", T0, { taskId: "task_1", profile: "unit" }, unobservable())]);
+    expect(a.episodes).toHaveLength(1);
+    expect(a.episodes[0]!.jobId).toBeNull();
+    expect(a.episodes[0]!.polls).toHaveLength(0);
+    expect(a.episodes[0]!.autoPolled).toBe(false);
+    expect(a.confirmedFailedRunCalls).toBe(0);
+    expect(a.unobservableRunCalls).toBe(1);
   });
 
-  it("业务失败（PROFILE_NOT_FOUND，jobId null）的 grande_run 同样不生成 episode、改记入 failedRunCalls，且不影响同批次里真正开始的 run（重要发现：失败的 run 不是「未被轮询的证据」）", () => {
+  it("业务失败（PROFILE_NOT_FOUND，jobId null）的 grande_run 同样不生成 episode、改记入 confirmedFailedRunCalls，且不影响同批次里真正开始的 run（重要发现：确认失败的 run 不是「未被轮询的证据」）", () => {
     const a = analyze([
       ev("grande_run", T0, { taskId: "t", profile: "integration" }, errResult("PROFILE_NOT_FOUND")),
       ev("grande_run", T0 + 1_000, { taskId: "t", profile: "unit" }, runResult("job_a")),
@@ -69,7 +85,8 @@ describe("analyze()", () => {
     expect(a.episodes).toHaveLength(1);
     expect(a.episodes[0]!.jobId).toBe("job_a");
     expect(a.episodes[0]!.autoPolled).toBe(true);
-    expect(a.failedRunCalls).toBe(1);
+    expect(a.confirmedFailedRunCalls).toBe(1);
+    expect(a.unobservableRunCalls).toBe(0);
   });
 
   it("两次 grande_run 撞了同一个 jobId 时保留先到的 builder，轮询归属先到者，不被后到者静默覆盖（Minor 发现 2 回归）", () => {
@@ -187,7 +204,7 @@ describe("renderMarkdown()", () => {
     expect(md).toMatch(/P-1.*\*\*FAIL\*\*/s);
   });
 
-  it("一次失败的 grande_run（PROFILE_NOT_FOUND，jobId null）加两次完美自主轮询 ⇒ P-1 仍是 PASS，且排除的调用数在文案中可见（重要发现回归：失败调用不能拖累判定，也不能被悄悄藏起来）", () => {
+  it("一次确认失败的 grande_run（PROFILE_NOT_FOUND，jobId null）加两次完美自主轮询 ⇒ P-1 仍是 PASS，且排除的调用数在文案中可见（重要发现回归：确认失败的调用不能拖累判定，也不能被悄悄藏起来）", () => {
     const md = renderMarkdown(
       analyze([
         ev("grande_run", T0, { taskId: "t", profile: "integration" }, errResult("PROFILE_NOT_FOUND")),
@@ -198,10 +215,23 @@ describe("renderMarkdown()", () => {
       ]),
     );
     expect(md).toMatch(/P-1.*\*\*PASS\*\*/s);
-    expect(md).toContain("1 次未能拿到 jobId");
+    expect(md).toContain("1 次确认失败");
   });
 
-  it("grande_run 全部失败（0 次真正开始的 run）⇒ P-1 仍是 FAIL，不因为排除了失败调用就矫枉过正变成空真 PASS", () => {
+  it("一次响应无法观测的 grande_run 加两次完美自主轮询 ⇒ P-1 仍是 FAIL，不能因为其余都自主轮询了就把无法观测的那次当成已确认（假 PASS 回归防护——本次修复里最关键的一条：真的创建了 job、模型真的没轮询，但日志侧没能记下响应摘要时，这条负面证据绝不能悄悄消失）", () => {
+    const md = renderMarkdown(
+      analyze([
+        ev("grande_run", T0, { taskId: "t", profile: "unit" }, unobservable()),
+        ev("grande_run", T0 + 1_000, { taskId: "t", profile: "unit" }, runResult("job_a")),
+        ev("grande_run_result", T0 + 11_000, { taskId: "t", jobId: "job_a" }),
+        ev("grande_run", T0 + 20_000, { taskId: "t", profile: "unit-file" }, runResult("job_b")),
+        ev("grande_run_result", T0 + 30_000, { taskId: "t", jobId: "job_b" }),
+      ]),
+    );
+    expect(md).toMatch(/P-1.*\*\*FAIL\*\*/s);
+  });
+
+  it("grande_run 全部确认失败（0 次真正开始的 run）⇒ P-1 仍是 FAIL，不因为排除了确认失败的调用就矫枉过正变成空真 PASS", () => {
     const md = renderMarkdown(
       analyze([
         ev("grande_run", T0, { taskId: "t", profile: "integration" }, errResult("PROFILE_NOT_FOUND")),
@@ -210,7 +240,35 @@ describe("renderMarkdown()", () => {
       ]),
     );
     expect(md).toMatch(/P-1.*\*\*FAIL\*\*/s);
-    expect(md).toContain("3 次未能拿到 jobId");
+    expect(md).toContain("3 次确认失败");
+  });
+
+  it("确认失败的调用与一次真实但从未被轮询的 episode 共存时仍是 FAIL（本次修复的 Minor 2：排除确认失败不能连带稀释掉另一个真正未被自主轮询的 episode，两者独立判定）", () => {
+    const md = renderMarkdown(
+      analyze([
+        ev("grande_run", T0, { taskId: "t", profile: "integration" }, errResult("PROFILE_NOT_FOUND")),
+        ev("grande_run", T0 + 1_000, { taskId: "t", profile: "unit" }, runResult("job_a")),
+        // job_a 故意没有任何 grande_run_result：一个真实拿到 jobId、但从未被轮询的 episode。
+      ]),
+    );
+    expect(md).toMatch(/P-1.*\*\*FAIL\*\*/s);
+  });
+
+  it("渲染文案把「确认失败」与「无法观测」分开报告为两个独立的数字，读者不会把无法观测误读成确认的模型失败（重要发现修复的核心要求）", () => {
+    const md = renderMarkdown(
+      analyze([
+        ev("grande_run", T0, { taskId: "t", profile: "integration" }, errResult("PROFILE_NOT_FOUND")),
+        ev("grande_run", T0 + 1_000, { taskId: "t", profile: "unit" }, unobservable()),
+        ev("grande_run", T0 + 2_000, { taskId: "t", profile: "unit-file" }, runResult("job_a")),
+        ev("grande_run_result", T0 + 12_000, { taskId: "t", jobId: "job_a" }),
+      ]),
+    );
+    expect(md).toContain("1 次确认失败");
+    expect(md).toContain("1 次响应无法观测");
+    // 无法观测那次仍以「未知」出现在下表——jobId ?? "未知" 的兜底现在由真实的
+    // analyze() 输出触发，而不只是手工构造的 fixture。
+    expect(md).toContain("`未知`");
+    expect(md).toMatch(/P-1.*\*\*FAIL\*\*/s);
   });
 
   it("孤立轮询的次数出现在渲染文案里，而不只是 analyze() 的数据里（Minor 发现 1）", () => {
@@ -229,14 +287,15 @@ describe("renderMarkdown()", () => {
     expect(md).toContain("`job_xyz`");
   });
 
-  it("jobId 缺失时表格用「未知」兜底（Minor 发现 1；直接构造 Analysis——修复后 analyze() 不会再产出 jobId 为 null 的 episode，这条兜底只服务于手工构造的输入）", () => {
+  it("jobId 缺失时表格用「未知」兜底（Minor 发现 1；这里继续直接构造 Analysis 来单独锁定 renderMarkdown 的渲染契约——这个 fixture 现在也正是 analyze() 对「无法观测」调用的真实产出形状，另见上面 unobservable() 相关用例）", () => {
     const a: Analysis = {
       totalToolCalls: 1,
       byTool: { grande_run: 1 },
       episodes: [
         { jobId: null, runAt: T0, polls: [], gapsMs: [], maxGapMs: Number.POSITIVE_INFINITY, autoPolled: false },
       ],
-      failedRunCalls: 0,
+      confirmedFailedRunCalls: 0,
+      unobservableRunCalls: 1,
       orphanPolls: 0,
       taskIdLossEvents: 0,
       distinctTaskIds: 0,
