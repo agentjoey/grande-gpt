@@ -7,10 +7,12 @@ export interface TaskContext {
 export interface Envelope<T> {
   ok: true;
   taskId: string | null;
-  data: T;
+  // truncated / nextCursor / hint 声明在 data 之前，对应 ok() 里实际的构造顺序
+  // （从而也是 JSON.stringify 的键序）——见 ok() 内的注释（I3 修复）。
   truncated: boolean;
   nextCursor: string | null;
   hint: string;
+  data: T;
   taskContext: TaskContext | null;
 }
 
@@ -36,10 +38,16 @@ export function ok<T>(args: {
   return {
     ok: true,
     taskId: args.taskId ?? null,
-    data: args.data,
+    // I3 修复：truncated / nextCursor / hint 排在 data 前面构造，而不是按参数
+    // 声明的顺序。JSON.stringify 按对象属性的插入顺序输出键；data 可能有几十
+    // KB（例如 grande_repo_read 截断到 65536 字节上限），如果 ChatGPT 侧对
+    // 响应做静默截断（项目自己的调研已经记录了这一点），排在 data 之后的
+    // truncated/nextCursor/hint 就可能落在永远看不到的那部分文本里——这几个
+    // 字段恰恰是模型判断"要不要继续读/搜"的唯一依据，必须排在前面。
     truncated: args.truncated ?? false,
     nextCursor: args.nextCursor ?? null,
     hint: args.hint,
+    data: args.data,
     taskContext: args.taskContext ?? null,
   };
 }
@@ -82,10 +90,27 @@ export function truncateText(text: string, maxBytes: number): { text: string; tr
   return { text: buf.subarray(0, end).toString("utf8"), truncated: true };
 }
 
+/**
+ * 分页取一批 items，可选从 offset 开始（C2 修复）。offset 默认 0，此时首页行为
+ * 与旧签名完全一致：未超限时 `nextCursor: null`，超限时截断到 `max` 条并给出
+ * `nextCursor: String(max)`。
+ *
+ * cursor 此前只是摆设：grande_repo_search/grande_diff 的 hint 让模型带
+ * `cursor=${nextCursor}` 再次调用，但两个工具的 inputSchema 都不接受 cursor
+ * 参数——zod 会静默剥离这个未声明的字段，模型的第二次调用其实和第一次一模
+ * 一样，拿到字节相同的结果，却把这当成"翻页成功"继续读下去。offset 让续读
+ * 真正返回下一页，而不是让 cursor 停留在"看起来像回事"的摆设状态。
+ */
 export function truncateList<T>(
   items: T[],
   max: number,
+  offset = 0,
 ): { items: T[]; truncated: boolean; nextCursor: string | null } {
-  if (items.length <= max) return { items, truncated: false, nextCursor: null };
-  return { items: items.slice(0, max), truncated: true, nextCursor: String(max) };
+  const page = items.slice(offset, offset + max);
+  const truncated = offset + page.length < items.length;
+  return {
+    items: page,
+    truncated,
+    nextCursor: truncated ? String(offset + page.length) : null,
+  };
 }
