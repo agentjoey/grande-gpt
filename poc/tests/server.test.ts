@@ -124,6 +124,75 @@ describe("路由与访问控制", () => {
   });
 });
 
+describe("响应信封序列化（I3 修复）", () => {
+  /**
+   * 这里刻意走真实 HTTP 往返（而不是 tools.test.ts 里的 InMemoryTransport），
+   * 因为"序列化后的键序"这个断言只有在真的过了一次 JSON.stringify/JSON.parse
+   * 之后才有意义——JSON.parse 按 ECMAScript 规范重建对象时，字符串键按它们在
+   * 源文本里出现的先后顺序插入，所以 Object.keys() 的顺序如实反映了线上字节序。
+   */
+  it("data 体积很大时，truncated/nextCursor/hint 仍排在 data 之前——即使响应被从尾部截断也不会丢失这些信号字段", async () => {
+    const app = createApp();
+    await app.request(`/${SECRET}/mcp/demo-app`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+      }),
+    });
+
+    const openRes = await app.request(`/${SECRET}/mcp/demo-app`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "grande_task_open", arguments: { goal: "g" } },
+      }),
+    });
+    const openBody = parseMcpJsonRpcResponse(await openRes.text()) as {
+      result: { structuredContent: { taskId: string } };
+    };
+    const taskId = openBody.result.structuredContent.taskId;
+
+    const readRes = await app.request(`/${SECRET}/mcp/demo-app`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 3,
+        method: "tools/call",
+        params: { name: "grande_repo_read", arguments: { taskId, path: "src/big-config.ts" } },
+      }),
+    });
+    const text = await readRes.text();
+    const parsed = parseMcpJsonRpcResponse(text) as {
+      result: { content: Array<{ text?: string }>; structuredContent: Record<string, unknown> };
+    };
+
+    const structured = parsed.result.structuredContent;
+    expect((structured as { truncated: boolean }).truncated).toBe(true); // 前提：这次读取确实触发了截断
+
+    const keys = Object.keys(structured);
+    const truncatedIdx = keys.indexOf("truncated");
+    const nextCursorIdx = keys.indexOf("nextCursor");
+    const hintIdx = keys.indexOf("hint");
+    const dataIdx = keys.indexOf("data");
+    expect(truncatedIdx).toBeGreaterThanOrEqual(0);
+    expect(dataIdx).toBeGreaterThanOrEqual(0);
+    expect(truncatedIdx).toBeLessThan(dataIdx);
+    expect(nextCursorIdx).toBeLessThan(dataIdx);
+    expect(hintIdx).toBeLessThan(dataIdx);
+
+    // content[0].text 不再是 structuredContent 的完整重复：真正的大段 data 内容
+    // 不应该在这段摘要文本里再出现一遍。
+    const bigContentSample = (structured as { data: { content: string } }).data.content.slice(0, 200);
+    expect(parsed.result.content[0]?.text ?? "").not.toContain(bigContentSample);
+  });
+});
+
 describe("观测日志", () => {
   let logPath: string;
 

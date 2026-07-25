@@ -48,12 +48,57 @@ function t(zh: string, en: string): string {
   return HINT_LANG === "en" ? en : zh;
 }
 
-/** 工具结果统一形态：structuredContent 承载信封，content 给人类可读摘要 */
+/**
+ * content[0].text 此前是 `JSON.stringify(envelope, null, 2)`——与 structuredContent
+ * 完全重复，等于把每个响应的字节数翻了一倍（I3 修复：`grande_repo_read` 读大文件
+ * 时测得 143KB，一大半就是这份重复）。这里换成真正精简的摘要：省略体积可能很大
+ * 的 data，只留 hint 和判断"下一步怎么办"需要的信号字段。
+ */
+function summarize(envelope: Record<string, unknown>): string {
+  if (envelope.ok === false) {
+    const error = envelope.error as { code?: string; message?: string } | undefined;
+    return `ok=false code=${error?.code ?? "?"} taskId=${String(envelope.taskId ?? "null")} — ${error?.message ?? ""}`;
+  }
+  const head = [
+    "ok=true",
+    `taskId=${String(envelope.taskId ?? "null")}`,
+    `truncated=${String(envelope.truncated ?? false)}`,
+    ...(typeof envelope.nextCursor === "string" ? [`nextCursor=${envelope.nextCursor}`] : []),
+  ].join(" ");
+  const hint = typeof envelope.hint === "string" ? envelope.hint : "";
+  return hint.length > 0 ? `${head}\n${hint}` : head;
+}
+
+/** 工具结果统一形态：structuredContent 承载完整信封，content 给人类可读的精简摘要 */
 function reply(envelope: object) {
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(envelope, null, 2) }],
+    content: [{ type: "text" as const, text: summarize(envelope as Record<string, unknown>) }],
     structuredContent: envelope as Record<string, unknown>,
   };
+}
+
+/**
+ * 活跃任务的统一摘要形态（M8 修复）。此前三处各自手写了字段集不一致的版本：
+ * requireTask 「缺 taskId」分支只给 taskId+goal，「taskId 不存在」分支给
+ * taskId+goal+branch+filesChanged，grande_task_status 给全部五个字段（还多了
+ * lastJob）。taskId 恢复是 P-3 的度量对象，模型从「漏传 taskId」恢复时反而比
+ * 从「传错 taskId」恢复时拿到更少的线索，这个不一致本身就会污染度量结果。
+ * 统一取三者中最全的字段集，三处都用它。
+ */
+function activeTasksSummary(): Array<{
+  taskId: string;
+  goal: string;
+  branch: string;
+  filesChanged: number;
+  lastJob: string | null;
+}> {
+  return [...tasks.values()].map((x) => ({
+    taskId: x.taskId,
+    goal: x.goal,
+    branch: x.branch,
+    filesChanged: getRepo(x.repoId)?.changedPaths().length ?? 0,
+    lastJob: lastJobStateForTask(x.taskId),
+  }));
 }
 
 function requireTask(taskId: string | undefined) {
@@ -61,7 +106,7 @@ function requireTask(taskId: string | undefined) {
     return err({
       code: "INVALID_INPUT",
       message: t("缺少 taskId。", "Missing taskId."),
-      details: { activeTasks: [...tasks.values()].map((x) => ({ taskId: x.taskId, goal: x.goal })) },
+      details: { activeTasks: activeTasksSummary() },
     });
   }
   const task = tasks.get(taskId);
@@ -73,14 +118,7 @@ function requireTask(taskId: string | undefined) {
         `Task ${taskId} not found. Pick one of the active tasks below.`,
       ),
       retryable: true,
-      details: {
-        activeTasks: [...tasks.values()].map((x) => ({
-          taskId: x.taskId,
-          goal: x.goal,
-          branch: x.branch,
-          filesChanged: getRepo(x.repoId)?.changedPaths().length ?? 0,
-        })),
-      },
+      details: { activeTasks: activeTasksSummary() },
     });
   }
   return task;
@@ -88,6 +126,20 @@ function requireTask(taskId: string | undefined) {
 
 function isTask(v: Task | ReturnType<typeof err>): v is Task {
   return (v as { ok?: false }).ok !== false;
+}
+
+/**
+ * cursor 是上一页响应里原样回传的 nextCursor（实质是偏移量的字符串形式）。C2
+ * 修复：此前 grande_repo_search / grande_diff 的 hint 让模型带 cursor 再次
+ * 调用，但两个工具的 inputSchema 都不接受这个参数——zod 会静默剥掉它，模型的
+ * "翻页"调用其实和第一次一模一样，拿到字节相同的结果。cursor 可能是模型编出
+ * 来的非法值，保守地把任何非法/负数都当作"从头开始"，而不是让 Array.slice 的
+ * NaN 语义悄悄决定行为。
+ */
+function parseCursor(cursor: string | undefined): number {
+  if (cursor === undefined) return 0;
+  const n = Number(cursor);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
 }
 
 export function registerTools(server: McpServer, repoId: string): void {
@@ -102,7 +154,9 @@ export function registerTools(server: McpServer, repoId: string): void {
         "在当前仓库上开启一个开发任务，创建隔离分支与工作区。任何读写代码的操作都必须先调用它拿到 taskId。",
         "Open a development task on the current repository, creating an isolated branch and worktree. Call this first to obtain a taskId; every other tool requires it.",
       ),
-      inputSchema: { goal: z.string().describe("这次任务要达成的目标，一句话") },
+      inputSchema: {
+        goal: z.string().describe(t("这次任务要达成的目标，一句话", "One sentence describing what this task should accomplish.")),
+      },
       annotations: RW,
     },
     async ({ goal }) => {
@@ -138,15 +192,7 @@ export function registerTools(server: McpServer, repoId: string): void {
       if (taskId === undefined) {
         return reply(
           ok({
-            data: {
-              activeTasks: [...tasks.values()].map((x) => ({
-                taskId: x.taskId,
-                goal: x.goal,
-                branch: x.branch,
-                filesChanged: getRepo(x.repoId)?.changedPaths().length ?? 0,
-                lastJob: lastJobStateForTask(x.taskId),
-              })),
-            },
+            data: { activeTasks: activeTasksSummary() },
             hint: t("选一个 taskId 继续。", "Pick a taskId to continue."),
           }),
         );
@@ -202,14 +248,18 @@ export function registerTools(server: McpServer, repoId: string): void {
         "在仓库中按文本搜索，返回路径、行号与该行内容。结果最多 50 条，超出会标记 truncated。",
         "Search the repository by text; returns path, line number and line content. Capped at 50 hits; excess is flagged via truncated.",
       ),
-      inputSchema: { taskId: z.string(), query: z.string() },
+      inputSchema: {
+        taskId: z.string(),
+        query: z.string(),
+        cursor: z.string().optional().describe(t("上一页响应里的 nextCursor，用于翻到下一页", "The nextCursor from the previous page's response, to fetch the next page")),
+      },
       annotations: RO,
     },
-    async ({ taskId, query }) => {
+    async ({ taskId, query, cursor }) => {
       const task = requireTask(taskId);
       if (!isTask(task)) return reply(task);
       const all = getRepo(task.repoId)!.search(query);
-      const { items, truncated, nextCursor } = truncateList(all, LIMITS.searchHits);
+      const { items, truncated, nextCursor } = truncateList(all, LIMITS.searchHits, parseCursor(cursor));
       return reply(
         ok({
           taskId,
@@ -239,7 +289,10 @@ export function registerTools(server: McpServer, repoId: string): void {
       inputSchema: {
         taskId: z.string(),
         path: z.string(),
-        lineRange: z.string().optional().describe("形如 '100-200'，用于读取大文件的某一段"),
+        lineRange: z
+          .string()
+          .optional()
+          .describe(t("形如 '100-200'，用于读取大文件的某一段", "e.g. '100-200', used to read a slice of a large file")),
       },
       annotations: RO,
     },
@@ -302,7 +355,10 @@ export function registerTools(server: McpServer, repoId: string): void {
               op: z.enum(["create", "modify"]),
               path: z.string(),
               content: z.string(),
-              expectedSha256: z.string().optional().describe("modify 时必填，取自 grande_repo_read"),
+              expectedSha256: z
+                .string()
+                .optional()
+                .describe(t("modify 时必填，取自 grande_repo_read", "Required for modify; obtained from grande_repo_read")),
             }),
           )
           .min(1),
@@ -338,6 +394,28 @@ export function registerTools(server: McpServer, repoId: string): void {
             );
           }
         }
+        // M9 修复：create 此前对已存在路径没有任何保护，会静默覆盖——完全绕过了
+        // modify 分支上面那套 expectedSha256 机制。模型完全可能对一个已有文件
+        // 误用 create（而不是 modify），把它当成"新建"，结果是一次没有任何
+        // 陈旧检测的静默覆盖。整批校验先行，保证事务语义：即便这是 edits 数组
+        // 里唯一出问题的一条，前面已经"通过校验"的条目也不会被写入。
+        if (e.op === "create") {
+          const existing = repo.readFile(e.path);
+          if (existing) {
+            return reply(
+              err({
+                taskId,
+                code: "PATH_EXISTS",
+                message: t(
+                  `${e.path} 已存在，create 不能覆盖已有文件（本次未写入任何文件）。若要修改已有文件，请改用 op="modify" 并带上 expectedSha256（来自 grande_repo_read）。`,
+                  `${e.path} already exists; create cannot overwrite an existing file (nothing was written). Use op="modify" with expectedSha256 from grande_repo_read to change an existing file.`,
+                ),
+                retryable: true,
+                details: { path: e.path },
+              }),
+            );
+          }
+        }
       }
 
       for (const e of edits) repo.writeFile(e.path, e.content);
@@ -361,14 +439,17 @@ export function registerTools(server: McpServer, repoId: string): void {
     {
       title: "Show changes",
       description: t("查看当前任务相对基线的全部改动。", "Show all changes in this task relative to its base."),
-      inputSchema: { taskId: z.string() },
+      inputSchema: {
+        taskId: z.string(),
+        cursor: z.string().optional().describe(t("上一页响应里的 nextCursor，用于翻到下一页", "The nextCursor from the previous page's response, to fetch the next page")),
+      },
       annotations: RO,
     },
-    async ({ taskId }) => {
+    async ({ taskId, cursor }) => {
       const task = requireTask(taskId);
       if (!isTask(task)) return reply(task);
       const all = getRepo(task.repoId)!.diff();
-      const { items, truncated, nextCursor } = truncateList(all, LIMITS.diffLines);
+      const { items, truncated, nextCursor } = truncateList(all, LIMITS.diffLines, parseCursor(cursor));
       return reply(
         ok({
           taskId,
@@ -377,7 +458,10 @@ export function registerTools(server: McpServer, repoId: string): void {
           nextCursor,
           taskContext: contextFor(task),
           hint: truncated
-            ? t(`diff 过长，只返回前 ${LIMITS.diffLines} 行。`, `Diff truncated to the first ${LIMITS.diffLines} lines.`)
+            ? t(
+                `diff 过长（共 ${all.length} 行），只返回前 ${LIMITS.diffLines} 行。需要更多请带 cursor=${nextCursor} 再次调用。`,
+                `Diff truncated to the first ${LIMITS.diffLines} of ${all.length} lines. Call again with cursor=${nextCursor} for more.`,
+              )
             : t("确认改动无误后可运行测试。", "Run the tests once the changes look right."),
         }),
       );
