@@ -8,7 +8,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "report": "node scripts/report.ts"
+    "report": "node scripts/report.ts",
+    "tunnel": "cloudflared tunnel --config ~/.cloudflared/grande-poc.yml run"
   },
   "dependencies": {
     "@hono/node-server": "1.19.7",
