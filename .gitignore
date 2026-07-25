@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+.vitest/
+
+# Secrets & local config — control-plane state lives in ~/.grande-control/,
+# never inside this repo. These patterns are a defensive second line.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Runtime / derived data (lives in GPT_Workspace/.grande-work/, listed defensively)
+.grande-work/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
