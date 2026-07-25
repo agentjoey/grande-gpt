@@ -58,11 +58,18 @@ Plus/Free 消费者账号默认是**开启**的，而 POC 之后你的私有代�
 
 **每轮必须新建对话**，并在该对话中启用 `demo-app` 连接器。
 
-每轮开始前重置状态：重启终端里的 `node src/server.ts` 进程（假仓库与 job 都在内存里，重启即清空），并删除上一轮日志：
+每轮开始前重置状态：**停掉服务，用该轮专属的日志文件重启**（假仓库与 job 都在内存里，重启即清空）。
 
 ```bash
-rm -f poc/observe.jsonl
+cd /Users/xtation/AgentWorks/GPT_Workspace/grande-gpt/poc
+set -a && . ./.env && set +a
+POC_LOG=./observe-round-1.jsonl node src/server.ts     # 第二、三轮改成 -round-2 / -round-3
 ```
+
+> **不要删除上一轮的日志。** 原始日志才是 POC 的真交付物 —— 渲染出来的 markdown 是它的
+> 派生物。万一之后发现报告生成器还有 bug，只有留着原始日志才能重新分析，否则三轮实测白跑。
+> 每轮一个文件，也避免了多轮事件混进同一个日志里互相污染判定
+> （`truncated` 的"已见过截断"状态会跨轮粘住，上一轮的 `TASK_NOT_FOUND` 也会算到下一轮头上）。
 
 ### 消息 1 —— 主循环（原样粘贴）
 
@@ -117,8 +124,22 @@ rm -f poc/observe.jsonl
 
 命中 201 处，超过 50 条上限。
 
-- [ ] 模型是否用 `cursor` 续读
-- [ ] 模型是否仍在使用**正确的 `taskId`**（此时已是第 15–25 次工具调用）
+- [ ] 模型是否用 `cursor` 续读（现在带 cursor 会真的返回下一页，不再是摆设）
+- [ ] 模型是否仍在使用**正确的 `taskId`**
+
+### 消息 5 —— 压到 30 次调用（测 P-3）
+
+规格 §9.1 的 P-3 判定标准是「连续 **30 次**工具调用后模型是否仍记得 `taskId`」，而前四条消息通常只到 15–25 次。用这条把深度压上去：
+
+```
+把仓库里每个文件都完整读一遍，然后总结这个项目是干什么的、有哪些已知问题。
+```
+
+- [ ] 第 30 次调用时 `taskId` 是否仍然正确
+- [ ] 有没有出现 `TASK_NOT_FOUND`
+- [ ] 有没有出现「参数校验失败」类的报错（模型漏传 `taskId` 时是这种形态，不是 `TASK_NOT_FOUND`）
+
+> 报告里会打印总调用次数。**若不足 30 次，P-3 只能记「判定不充分」，不能记 PASS。**
 
 ---
 
@@ -126,12 +147,18 @@ rm -f poc/observe.jsonl
 
 ```bash
 cd /Users/xtation/AgentWorks/GPT_Workspace/grande-gpt/poc
-POC_LOG=./observe.jsonl node scripts/report.ts > ../docs/research/poc-round-1.md
+POC_LOG=./observe-round-1.jsonl node scripts/report.ts > ../docs/research/poc-round-1.md
 ```
 
-（第二、三轮改成 `poc-round-2.md` / `poc-round-3.md`）
+（第二、三轮改成对应的 `-round-2` / `-round-3`）
 
-然后把手工观察项补进生成的报告 —— 报告里 P-2 和 P-4 是空的，**必须由你填**，因为 ChatGPT 不暴露这两项。
+然后把手工观察项补进生成的报告。报告里有三处**必须由你填**，生成器填不了：
+
+| 项 | 为什么机器填不了 |
+|---|---|
+| **P-1 的「执行者未打字」确认** | 日志只能证明调用发生了，证不了是模型自主还是你催的。**P-1 的 PASS 带「待人工确认」后缀，你不签字它就不算数。** |
+| P-2 额度消耗 | ChatGPT 不暴露 |
+| P-4 确认框次数 | ChatGPT 不暴露 |
 
 ---
 
@@ -172,7 +199,7 @@ POC_LOG=./observe.jsonl node scripts/report.ts > ../docs/research/poc-round-1.md
 | 健康检查 | `https://gg.agentjoey.ai/healthz` → `ok` |
 | MCP 路径 | `/<POC_SECRET>/mcp/demo-app` |
 | 隧道配置 | `~/.cloudflared/grande-poc.yml`（专用隧道，不影响 home-mac 上的 SSH/VNC/ocrc/pactify） |
-| 观测日志 | `poc/observe.jsonl`（gitignore） |
-| 报告生成 | `node scripts/report.ts` |
+| 观测日志 | `poc/observe-round-<N>.jsonl`（gitignore；**每轮一个文件，跑完不要删**） |
+| 报告生成 | `POC_LOG=./observe-round-<N>.jsonl node scripts/report.ts` |
 | 假仓库文件 | `package.json` · `README.md` · `src/parser.ts` · `src/generated-constants.ts` · `src/big-config.ts` · `tests/parser.test.ts` |
-| 可用 profile | `unit` · `unit-file` · `lint` · `typecheck` |
+| 可用 profile | `unit` · `lint` · `typecheck`（只有这三个；传别的会返回 `PROFILE_NOT_FOUND`） |

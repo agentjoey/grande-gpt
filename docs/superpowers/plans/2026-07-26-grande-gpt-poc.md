@@ -4,7 +4,15 @@
 
 **Goal:** 用一个返回硬编码假数据的 MCP 服务端，在真实 ChatGPT 对话中验证 P-1～P-5 五项交互假设，从而决定是否启动 S0。
 
-**Architecture:** 单进程 TypeScript 服务：Hono 处理 HTTP → `StreamableHTTPServerTransport`（无状态模式）→ `McpServer` 注册九个工具 → 工具读写内存中的假仓库与假 job 状态机 → 每次调用写一条 JSONL 观测日志。cloudflared 把 `m2m.agentjoey.ai` 指向本地端口。全部产出是一份观察记录，代码一次性、不进入 S0 代码库。
+**Architecture:** 单进程 TypeScript 服务：Hono 处理 HTTP → `WebStandardStreamableHTTPServerTransport`（无状态模式）→ `McpServer` 注册九个工具 → 工具读写内存中的假仓库与假 job 状态机 → 每次调用把请求参数**与响应摘要**写一条 JSONL 观测日志。cloudflared 专用隧道 `grande-poc` 把 `gg.agentjoey.ai` 指向本地端口。全部产出是一份观察记录，代码一次性、不进入 S0 代码库。
+
+> **执行期修订（2026-07-26）**：本计划原稿写的是 `m2m.agentjoey.ai`，但该域名实际映射到
+> `ssh://localhost:22`（Human Owner 的 SSH 接入），复用会切断 SSH。经授权改为新建专用隧道
+> `grande-poc` + 新域名 `gg.agentjoey.ai`，完全不触碰 home-mac 隧道上的现有服务。
+>
+> 原稿还有两处已在执行中修正，记此备查：① 观测日志原本只记调用参数不记响应，导致
+> P-1/P-3/P-5 都缺关键信号（详见 §「执行期发现的计划缺陷」）；② 信封声明了 `nextCursor`
+> 却没有任何工具接受 `cursor` 入参，"续读"从一开始就是摆设。
 
 **Tech Stack:** Node 24 · TypeScript 5 · pnpm · `@modelcontextprotocol/sdk@1.29.0` · Hono 4 + `@hono/node-server` · vitest 4 · cloudflared
 
