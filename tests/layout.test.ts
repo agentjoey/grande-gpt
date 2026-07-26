@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -83,6 +83,32 @@ describe("loadLayout()", () => {
   it("不创建工作区根——那是用户的目录，不存在应当报错而不是被我们凭空造出来", () => {
     rmSync(ws, { recursive: true, force: true });
     expect(() => loadLayout()).toThrow(/不存在/);
+  });
+
+  describe("D3 硬约束：两个根不能互相包含", () => {
+    // D3（CLAUDE.md「不得静默推翻的决定」）：被审计者不能拥有审计记录的写权限。
+    // 在这条修复之前，loadLayout 只检查 GRANDE_CONTROL 是不是绝对路径，从不检查
+    // 它落在哪里——把它设进工作区内部会被静默接受，之后 resolveInRepo 甚至能算出
+    // 一条落在仓库里、指向审计库本体的合法写入目标。
+
+    it("拒绝 GRANDE_CONTROL 落在 GRANDE_WORKSPACE 之内", () => {
+      process.env.GRANDE_CONTROL = join(ws, ".grande-control-inside");
+      expect(() => loadLayout()).toThrow(/控制平面不能是工作区的子目录/);
+    });
+
+    it("拒绝 GRANDE_WORKSPACE 落在 GRANDE_CONTROL 之内（反方向同样破坏两棵树互不包含的前提）", () => {
+      const nestedWs = join(ctrl, "workspace-inside-control");
+      mkdirSync(nestedWs, { recursive: true });
+      process.env.GRANDE_WORKSPACE = nestedWs;
+      expect(() => loadLayout()).toThrow(/工作区不能是控制平面的子目录/);
+    });
+
+    it("两个根正常互不包含（本文件其它所有用例的 fixture 形状）时必须照常被接受，不能为了挡越界连正常布局也一起拒了", () => {
+      expect(() => loadLayout()).not.toThrow();
+      const l = loadLayout();
+      expect(l.workspaceRoot).toBe(realpathSync(ws));
+      expect(l.controlRoot).toBe(realpathSync(ctrl));
+    });
   });
 });
 

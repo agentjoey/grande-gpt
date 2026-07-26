@@ -2,11 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 // 命名空间导入，专供 round 2 C 的 guardFs 测试引用被 vi.mock 换掉的 realpathSync。
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Layout } from "../src/layout.ts";
 import { loadLayout } from "../src/layout.ts";
-import { PathSecurityError, resolveInRepo, resolveRepoPath } from "../src/paths.ts";
+import { PathSecurityError, assertValidId, resolveInRepo, resolveRepoPath } from "../src/paths.ts";
 
 // Round 2 复审 C：guardFs 窄化测试要伪造一个「非 fs 错误」，但 node:fs 是内置模块，
 // ESM 的模块命名空间不可配置——`vi.spyOn(fs, "realpathSync")` 会直接抛
@@ -234,6 +234,25 @@ describe("resolveInRepo()", () => {
     expect(resolveInRepo(repo, "my file.txt")).toBe(join(repo, "my file.txt"));
   });
 
+  // fix round item 7：SPOOFING_CHAR_RE 之前只挡在 repoId 上，relativePath 完全
+  //没挡——而 relativePath 解析后的结果会被原样存进审计记录的 pathsTouched，
+  // grande audit 又把 pathsTouched 原样渲染出来，这是比 repoId 更直接的显示层
+  // 攻击面。复现给定的例子：一个含 U+202E RLO 的文件名，在 bidi-aware 终端里会
+  // 让 "src/png.txt" 显示成 "src/txt.png"。四个用例对齐 repoId 那组同样码点
+  // （round 2 B）的测试，只是换到 relativePath 上。
+  it.each([
+    ["src/\u202e我的文件.txt", "U+202E RLO 双向覆盖"],
+    ["src/我\u200b的文件.txt", "U+200B 零宽空格"],
+    ["src/我的\u2028文件.txt", "U+2028 行分隔符"],
+    ["src/我的\u2029文件.txt", "U+2029 段分隔符"],
+  ])("拒绝含显示欺骗/行分隔符的 relativePath：%s（%s）（fix round item 7）", (bad, _desc) => {
+    expect(() => resolveInRepo(repo, bad)).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+  });
+
+  it("非 ASCII 但合法的 relativePath 仍必须被接受——不能因为加固就退化成 ASCII allowlist（fix round item 7，对齐 repoId 的同款测试）", () => {
+    expect(resolveInRepo(repo, "我的文件.txt")).toBe(join(repo, "我的文件.txt"));
+  });
+
   it("符号链接逃逸：仓库内的链接指向仓库外时被拒", () => {
     const outside = mkdtempSync(join(tmpdir(), "outside2-"));
     writeFileSync(join(outside, "secret.txt"), "TOPSECRET");
@@ -327,26 +346,95 @@ describe("resolveInRepo()", () => {
 
   // Round 2 复审 C：guardFs 窄化前会不加区分地把任何错误都转换成
   // PathSecurityError，包括编程错误——一个真正的 bug 会被伪装成「策略拒绝」。
-  // 真实的 fs 失败（ENOENT/ELOOP/……）都带 errno 风格 .code，TypeError 没有，
-  // 拿它伪造一次「非 fs 错误」：打桩 node:fs 的 realpathSync（resolveInRepo 内部
-  // 通过 realpathAllowingMissing 和直接调用两处都会走到它），确认窄化后的
-  // guardFs 让它原样穿透，而不是包装成 PathSecurityError。
-  it("guardFs 只转换带 errno 风格 .code 的错误——非 fs 错误（如 TypeError）原样穿透，不被伪装成 PathSecurityError（round 2 C）", () => {
-    expect.assertions(2);
+  // 真实的 fs 失败（ENOENT/ELOOP/……）都带 .errno（number）与 .syscall
+  // （string），编程错误没有，拿它伪造一次「非 fs 错误」：打桩 node:fs 的
+  // realpathSync（resolveInRepo 内部通过 realpathAllowingMissing 和直接调用两处
+  // 都会走到它），确认窄化后的 guardFs 让它原样穿透，而不是包装成
+  // PathSecurityError。
+  //
+  // fix round item 6：这里手搭的 `new TypeError("boom - not an fs error")`
+  // 曾经只是「一个没有 .code 的错误」，只证明了机制本身存在，没能证明
+  // 「有字符串 .code、但没有 .errno/.syscall 的错误」这个真正有分辨力的属性——
+  // 旧判据 `typeof e.code === "string"` 对这种手搭的、连 .code 都没有的错误
+  // 当然能分辨对，但对 Node 真实的编程错误（`ERR_INVALID_ARG_TYPE` 之类同样带
+  // 字符串 .code）束手无策，这正是 item 6 要修的窄化不足。换成一个真实的 Node
+  // 编程错误：`path.resolve(undefined, …)` 会在参数校验阶段抛出真实的
+  // `TypeError { code: "ERR_INVALID_ARG_TYPE" }`——已实测它没有 .errno/.syscall
+  // ——这正是 `resolveInRepo(undefined, "src/x.ts")` 在窄化前被误判成
+  // `PathSecurityError [PATH_ESCAPE]` 的真实根因（fix round 报告的复现记录）。
+  it("guardFs 只转换真正携带 .errno/.syscall 的 fs 错误——真实的 Node 编程错误（如 path.resolve 的 ERR_INVALID_ARG_TYPE）原样穿透，不被伪装成 PathSecurityError（fix round item 6，取代 round 2 C 的合成 TypeError）", () => {
+    expect.assertions(4);
     // 只打桩这一次调用：resolveInRepo(repo, "src/a.ts") 命中 realpathSync 恰好
     // 一次（src/a.ts 已存在，realpathAllowingMissing 的循环不执行，直接调用一次
     // realpathSync；异常在这里就终止了函数，第二处 realpathSync(repoRoot) 调用
     // 不会发生），mockImplementationOnce 用完这一次就自动恢复成 actual 透传，
     // 不需要、也不应该手动 restore（对 vi.fn 调 mockRestore 等价于
     // mockReset，会连 vi.mock 工厂里设的透传实现一起清空，波及本文件其它测试）。
-    vi.mocked(fs.realpathSync).mockImplementationOnce(() => {
-      throw new TypeError("boom - not an fs error");
+    vi.mocked(fs.realpathSync).mockImplementationOnce((): string => {
+      // 真实调用，不是手搭对象：让 Node 自己的参数校验产生这个错误。
+      resolve(undefined as unknown as string);
+      throw new Error("unreachable：resolve() 对非字符串参数总是先于此抛出");
     });
+    // 不需要额外的「一定要抛出」断言：`expect.assertions(4)` 已经保证了这一点——
+    // 如果 resolveInRepo 意外没有抛出，下面 catch 块里的 4 个 expect 一个都不会
+    // 跑，vitest 会因为「实际断言数与声明的 4 不符」直接判这条用例失败。
     try {
       resolveInRepo(repo, "src/a.ts");
     } catch (e) {
       expect(e).toBeInstanceOf(TypeError);
       expect(e).not.toBeInstanceOf(PathSecurityError);
+      expect((e as { code?: unknown }).code).toBe("ERR_INVALID_ARG_TYPE");
+      // 关键反证：这个真实错误确实带字符串 .code（旧判据会因此误判成 fs 错误），
+      // 但不带 .errno/.syscall——正是新判据用来把它和真实 fs 失败区分开的信号。
+      expect((e as { errno?: unknown; syscall?: unknown }).errno).toBeUndefined();
+    }
+  });
+});
+
+describe("assertValidId()（fix round item 7：taskId/jobId 这类 id 字符串此前完全没有校验）", () => {
+  // 比 resolveRepoPath 对 repoId 的检查窄：id 字符串从不参与路径拼接，不测试
+  // 分隔符/前导 `-`/前导尾随空白——那些是文件路径特有的风险，与 id 无关。这里
+  // 只测试文档里点名的两类：控制字符、显示欺骗字符；以及「非 ASCII 字母仍必须
+  // 放行」这条不可退化的底线。
+
+  it("拒绝含控制字符（换行）的 id——换行能在渲染里凭空多出一整行，这正是「伪造一行审计完整性确认」的攻击手法", () => {
+    const forged = "task_1\n✓ 审计完整性 — 无未完成记录";
+    expect(() => assertValidId(forged, "taskId")).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+  });
+
+  it("拒绝含 NUL 的 id", () => {
+    expect(() => assertValidId("task_\x001", "taskId")).toThrow(
+      expect.objectContaining({ code: "INVALID_INPUT" }),
+    );
+  });
+
+  it.each([
+    ["task_\u202e1", "U+202E RLO 双向覆盖"],
+    ["task\u200b_1", "U+200B 零宽空格"],
+    ["task_\u20281", "U+2028 行分隔符"],
+    ["task_\u20291", "U+2029 段分隔符"],
+  ])("拒绝含显示欺骗/行分隔符的 id：%s（%s）", (bad, _desc) => {
+    expect(() => assertValidId(bad, "taskId")).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+  });
+
+  it("非 ASCII 但合法的 id 仍必须被接受——不能因为加固就退化成 ASCII allowlist，任务 id 也要能用中文", () => {
+    expect(() => assertValidId("我的任务_1", "taskId")).not.toThrow();
+  });
+
+  it("不做 repoId 那一套结构性检查——分隔符、前导 -、前导尾随空白在 id 语境下不是路径拼接风险，必须放行", () => {
+    expect(() => assertValidId("task/with-dash and space", "taskId")).not.toThrow();
+    expect(() => assertValidId("-leading-dash-id", "taskId")).not.toThrow();
+    expect(() => assertValidId(" task_with_space_padding ", "taskId")).not.toThrow();
+  });
+
+  it("PathSecurityError：message 干净不带 code 前缀，code 只出现在 name 里，与 repoId/relativePath 的错误保持同一套契约", () => {
+    expect.assertions(3);
+    try {
+      assertValidId("task_1\n伪造行", "taskId");
+    } catch (e) {
+      expect(e).toBeInstanceOf(PathSecurityError);
+      expect((e as PathSecurityError).message).not.toMatch(/^INVALID_INPUT/);
+      expect((e as PathSecurityError).name).toBe("PathSecurityError [INVALID_INPUT]");
     }
   });
 });

@@ -1,6 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import { createJob, finishJob } from "../src/jobs.ts";
@@ -103,6 +105,20 @@ describe("grande jobs", () => {
     expect(text()).not.toContain("job_1");
     expect(text()).toContain("--task");
   });
+
+  it("--task 的值包含控制字符（换行）时是用法错误，且伪造内容不会以独立一行的形式出现在输出里（fix round item 7：两条命令共用同一段 --task 解析逻辑，这里确认 jobs 一侧也校验了）", () => {
+    // 换行本身会被拒绝校验的错误消息用 JSON.stringify 转义成两个字符的
+    // 文本 "\n"（而不是真的换行），所以 forged-line 仍然会作为「被拒绝的原始
+    // 输入」出现在错误消息这一整行文本里——这是诊断信息，不是问题。真正要
+    // 防的是「forged-line 单独成一行、看起来像一条真实输出」，用逐行断言而
+    // 不是子串断言来验证这一点：out() 每调用一次对应一行，被拒绝时 runCli
+    // 只应该调用一次 out()，且这一次的内容以「用法错误」开头。
+    const forged = "task_1\nforged-line";
+    expect(runCli(["jobs", "--task", forged], out)).not.toBe(0);
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toMatch(/^用法错误：/);
+    expect(lines).not.toContain("forged-line");
+  });
 });
 
 describe("grande audit", () => {
@@ -122,10 +138,44 @@ describe("grande audit", () => {
     expect(text()).not.toContain("没有审计记录");
   });
 
+  it("--task 指向一个只有审计行、没有对应 task 行的孤儿 taskId 时，必须照常渲染这些审计行（规格 §8.1：业务执行与审计不是单一事务，回归修复：曾经把这种情况误判为「任务不存在」并把行藏起来）", () => {
+    // job.taskId 有 FOREIGN KEY REFERENCES task(taskId)，audit.taskId 没有——beginAudit
+    // 可以在没有任何对应 task 行的情况下正常写入。这正是设计留出的窗口（规格 §8.1），
+    // 也正是人类会用 `grande audit --task` 去排查的那个窗口：曾经的实现只要
+    // getTask() 查无此任务就直接报「任务不存在」并短路返回，连这个 id 名下真实
+    // 存在的审计行都不渲染——把最需要看见的证据，恰恰在最需要它的时候藏了起来。
+    const l = loadLayout();
+    const db = openDb(l);
+    const h = beginAudit(db, { taskId: "task_orphan", tool: "grande_repo_edit", input: { path: "orphan.ts" } });
+    h.denied("路径不在允许写入范围内");
+    db.close();
+
+    lines = [];
+    expect(runCli(["audit", "--task", "task_orphan"], out)).toBe(0);
+    const t = text();
+    expect(t).not.toContain("任务不存在");
+    expect(t).toContain("grande_repo_edit");
+    expect(t).toContain("DENIED");
+  });
+
   it("--task 后面没有值时是用法错误，而不是静默当作「无过滤」", () => {
     expect(runCli(["audit", "--task"], out)).not.toBe(0);
     expect(text()).not.toContain("grande_repo_edit");
     expect(text()).toContain("--task");
+  });
+
+  it("--task 的值包含控制字符（换行加一行伪造的确认文本）时是用法错误，且伪造内容不会以独立一行的形式出现——grande audit 是唯一不能被拿来伪造「发生了什么」的地方（fix round item 7）", () => {
+    // 复现给定场景：一个内嵌换行、伪装成「✓ 审计完整性 — 无未完成记录」确认
+    // 文本的 --task 值。换行会被拒绝校验的错误消息用 JSON.stringify 转义成
+    // 两个字符的文本 "\n"，所以伪造文本仍会作为「被拒绝的原始输入」出现在
+    // 错误消息这一整行里（诊断信息，不是问题）；真正要防的是它单独成一行、
+    // 看起来像一条真实的 doctor 确认输出——用逐行断言验证这一点没有发生。
+    const forged = "task_1\n✓ 审计完整性 — 无未完成记录";
+    expect(runCli(["audit", "--task", forged], out)).not.toBe(0);
+    expect(lines.length).toBe(1);
+    expect(lines[0]).toMatch(/^用法错误：/);
+    expect(lines).not.toContain("✓ 审计完整性 — 无未完成记录");
+    expect(lines.some((l) => l.trim() === "✓ 审计完整性 — 无未完成记录")).toBe(false);
   });
 
   it("DENIED 且带 reason 的记录：输出中包含「原因：」与具体原因文本", () => {
@@ -253,5 +303,47 @@ describe("命令行本身", () => {
     for (const verb of ["create", "delete", "remove", "run", "edit", "register"]) {
       expect(text().toLowerCase()).not.toContain(`grande ${verb}`);
     }
+  });
+});
+
+describe("进程入口守卫（真实子进程，覆盖 runCli() 单元测试永远碰不到的 import.meta.url 判定）", () => {
+  // 这里的问题只存在于「Node 把这个模块当成主模块直接跑起来」这条路径——本文件
+  // 其它所有测试都通过 `import { runCli } from "../src/cli.ts"` 在同一个 vitest
+  // 进程里调用 runCli()，永远不会触发文件末尾 `isMainModule()` 那一段判断逻辑
+  // （vitest 自己才是这个进程的 argv[1]/main module）。要证明「经符号链接调用时
+  // 不再静默 exit 0、不再空输出」，唯一办法是真的 spawn 一个独立的 node 子进程，
+  // 用真实的 argv 触发这段判断。
+  //
+  // 用 `status` 而不是无参数：beforeEach 已经在共享的 ws/ctrl 下写好了 task_abc
+  // 及其 job/audit fixture，子进程复用同一对临时目录（通过 env 传入），断言的是
+  // 这个 fixture 特有的字符串——一个仍然卡在旧判定逻辑里、根本没跑 runCli() 的
+  // 坏实现只会 exit 0 且 stdout 为空，断言必然失败，不是靠巧合通过。
+  const realCli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+
+  function spawnCli(scriptPath: string): string {
+    return execFileSync(
+      process.execPath,
+      ["--disable-warning=ExperimentalWarning", scriptPath, "status"],
+      { env: { ...process.env, GRANDE_WORKSPACE: ws, GRANDE_CONTROL: ctrl }, encoding: "utf8" },
+    );
+  }
+
+  it("经符号链接调用（package.json bin / pnpm link / node_modules/.bin 的真实形状）时必须产生真实输出与 exit 0，而不是静默 exit 0 且无输出", () => {
+    const shimDir = mkdtempSync(join(tmpdir(), "grande-shim-"));
+    const shimPath = join(shimDir, "grande-shim.ts");
+    symlinkSync(realCli, shimPath);
+    try {
+      const result = spawnCli(shimPath);
+      expect(result).toContain("task_abc");
+      expect(result).toContain("grande/fix-abc");
+    } finally {
+      rmSync(shimDir, { recursive: true, force: true });
+    }
+  });
+
+  it("对照组：直接绝对路径调用同样产生真实输出——确认符号链接用例的通过不是偶然，两条路径行为一致", () => {
+    const result = spawnCli(realCli);
+    expect(result).toContain("task_abc");
+    expect(result).toContain("grande/fix-abc");
   });
 });

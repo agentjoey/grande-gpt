@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
@@ -66,5 +67,45 @@ describe("openDb()", () => {
         .run("j1", "no-such-task", "unit", "[]", "running", Date.now()),
     ).toThrow();
     db.close();
+  });
+
+  it("busy_timeout 设为 5000ms 而不是默认的 0——第二个并发写者不会一撞锁就立刻收到 database is locked", () => {
+    const l = loadLayout();
+    ensureLayout(l);
+    const db = openDb(l);
+    expect((db.prepare("PRAGMA busy_timeout").get() as { timeout: number }).timeout).toBe(5000);
+    db.close();
+  });
+
+  it("全新库首次 openDb 之后，user_version 落到当前 schema 版本", () => {
+    const l = loadLayout();
+    ensureLayout(l);
+    const db = openDb(l);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(1);
+    db.close();
+  });
+
+  it("schema 版本不匹配时 openDb 响亮拒绝，错误信息同时点出期望版本与磁盘上的实际版本", () => {
+    // 先用 openDb() 正常建一次库（user_version 落到当前 SCHEMA_VERSION=1），
+    // 再绕开 openDb、用一个裸连接把 user_version 强行改写成一个不匹配的值——
+    // 模拟「这个库文件是被别的版本的代码建出来的」，不需要真的去改一次 schema
+    // 定义就能复现这条防线。
+    const l = loadLayout();
+    ensureLayout(l);
+    openDb(l).close();
+
+    const raw = new DatabaseSync(l.stateDb);
+    raw.exec("PRAGMA user_version = 99");
+    raw.close();
+
+    expect(() => openDb(l)).toThrow(/user_version=1/);
+    expect(() => openDb(l)).toThrow(/user_version=99/);
+  });
+
+  it("幂等打开不会把已经匹配的 user_version 错误地判成不匹配（正常路径的对照组）", () => {
+    const l = loadLayout();
+    ensureLayout(l);
+    openDb(l).close();
+    expect(() => openDb(l).close()).not.toThrow();
   });
 });

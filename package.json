@@ -3,6 +3,8 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "packageManager": "pnpm@10.33.0",
   "bin": { "grande": "./src/cli.ts" },
   "scripts": {
     "test": "vitest run",

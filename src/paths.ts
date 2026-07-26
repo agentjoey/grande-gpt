@@ -24,13 +24,31 @@ function isUnder(parent: string, child: string): boolean {
 }
 
 /**
- * 判断一个错误是否携带 errno 风格的 `.code`（`ENOENT`/`ELOOP`/`EACCES`/……）——
- * 这是「一次真实的 fs 调用失败」的标志。用来把它和「这段代码本身有 bug」
- * （比如一个 `TypeError`）区分开：后者不该被 `guardFs` 吞成一个策略拒绝
- * （round 2 复审 C）。
+ * 判断一个错误是不是「一次真实的 fs 调用失败」——用 `.errno`（数值）与
+ * `.syscall`（字符串，例如 `lstat`/`realpath`）**同时**存在来判断，而不是只看
+ * `.code` 是不是字符串（fix round：原判据 `typeof e.code === "string"` 窄化得
+ * 不够）。Node 的**编程错误**同样携带字符串 `.code`——`ERR_INVALID_ARG_TYPE`、
+ * `ERR_INVALID_ARG_VALUE` 这类参数校验失败都是——只看 `.code` 会把它们也判成
+ * 「fs 调用失败」，转而被 `guardFs` 吞成一个策略拒绝：调用方传错参数类型这种
+ * 真实 bug，被伪装成了「路径越权」（已实测：`resolveInRepo(undefined,
+ * "src/x.ts")` 内部 `path.resolve()` 对 `undefined` 参数校验失败，抛出的
+ * `TypeError { code: "ERR_INVALID_ARG_TYPE" }` 在窄化前会被报成
+ * `PathSecurityError [PATH_ESCAPE]`）。
+ *
+ * `.errno`/`.syscall` 这一对只在 libuv 真正发起过一次系统调用（`lstat`/
+ * `realpath`/……）并失败时才会被 Node 一并附加在错误对象上——已用真实错误对象
+ * 逐字段核实：`realpathSync` 对不存在路径抛出的 `ENOENT` 同时带 `errno: -2`
+ * （number）与 `syscall: "lstat"`（string）；`path.resolve(undefined, …)` 抛出
+ * 的 `ERR_INVALID_ARG_TYPE` 两者都没有（`undefined`）。用这一对而不是单独一个
+ * `.errno`：`.errno` 在极少数场景下可能是 `0` 或缺失而 `.code` 仍有意义，两者
+ * 同时要求把误判面收得更窄。
  */
-function hasErrnoCode(e: unknown): e is Error & { code: string } {
-  return e instanceof Error && typeof (e as { code?: unknown }).code === "string";
+function hasErrnoCode(e: unknown): e is Error & { errno: number; syscall: string } {
+  return (
+    e instanceof Error &&
+    typeof (e as { errno?: unknown }).errno === "number" &&
+    typeof (e as { syscall?: unknown }).syscall === "string"
+  );
 }
 
 /**
@@ -118,6 +136,13 @@ const CONTROL_CHAR_RE = /[\x00-\x1f\x7f]/;
  * 弹出（含 U+202E RLO）；U+2066-U+2069 bidi 隔离符；U+2028/U+2029 行/段分隔符；
  * U+061C 阿拉伯字母标记。不含 ZWNJ/ZWJ（U+200C/U+200D）——它们在部分文字（如
  * 阿拉伯语、印地语连字）里有合法排版用途，划进来会重蹈 ASCII allowlist 的覆辙。
+ *
+ * 应用范围（fix round item 7 之前只加在 repoId 上）：repoId（本来就有）、
+ * relativePath（本来只挡了控制字符，没挡这一组——resolveInRepo 的结果会被
+ * 原样存进 pathsTouched，grande audit 又把 pathsTouched 原样渲染出来，bidi
+ * override 能让审计查看器把 src/png.txt 显示成 src/txt.png）、以及
+ * assertValidId 校验的 id 类字符串（taskId/jobId：换行加一行伪造的确认文本，
+ * 能在这些 id 从未走过路径校验的情况下原样存进账本、原样回显）。
  */
 const SPOOFING_CHAR_RE = /[\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029\u061c]/;
 
@@ -145,6 +170,37 @@ function assertNoLeadingDash(segment: string, label: string): void {
     throw new PathSecurityError(
       "INVALID_INPUT",
       `${label} 不能以 - 开头（到了 argv 里会被当成命令行选项）：${JSON.stringify(segment)}`,
+    );
+  }
+}
+
+/**
+ * 校验一个「id 形状」的字符串——`taskId`/`jobId` 这类不作为文件路径使用、但
+ * 同样是调用方可控、会被持久化、且可能被 `grande audit`/`grande jobs` 原样
+ * 回显给人看的标识符（fix round item 7：此前 `taskId` 完全没有任何校验——
+ * 一个内嵌换行、伪装成 `✓ 审计完整性 — 无未完成记录` 的 `taskId` 能原样存进
+ * 审计账本、原样回显，让人误以为一切正常）。
+ *
+ * 比 `repoId`/`relativePath` 的检查窄：id 字符串从不参与路径拼接，不必挡
+ * 分隔符、前导 `-`、前导/尾随空白——那些是文件路径特有的风险，这里只挡两类
+ * 会伪造显示内容的字符：控制字符（换行能在渲染里凭空多出一整行）与显示欺骗
+ * 字符（bidi override 等能让同一段文本在终端里显示成别的顺序）。非 ASCII
+ * **字母**必须继续放行——`我的项目` 之于 `repoId` 成立的理由，同样适用于
+ * 任务 id（例如 `我的任务_1`）。
+ *
+ * 当前只在 `audit.ts` 的 `beginAudit()`（`taskId` 进入审计账本的唯一入口）与
+ * `cli.ts` 的 `--task` 参数解析（`taskId` 原样回显进「任务不存在」提示的唯一
+ * 入口）两处调用——这是本次修复范围内仅有的两个真正「id 进入数据库/进入回显」
+ * 的落点；`jobId` 目前没有对应的调用点（`createJob`/`createTask` 属于
+ * `tasks.ts`/`jobs.ts`，本轮修复范围明确排除），导出为通用函数是为了将来
+ * S0-B 接上工具处理层时可以直接复用，而不是重新发明一遍同样的校验。
+ */
+export function assertValidId(id: string, label: string): void {
+  assertNoControlChars(id, label);
+  if (SPOOFING_CHAR_RE.test(id)) {
+    throw new PathSecurityError(
+      "INVALID_INPUT",
+      `${label} 不能包含双向覆盖/零宽空格/行分隔符等显示欺骗字符：${JSON.stringify(id)}`,
     );
   }
 }
@@ -234,12 +290,15 @@ export function resolveRepoPath(layout: Layout, repoId: string, registered: Read
  * （悬空）符号链接，见 `realpathAllowingMissing` 的注释（C1）。
  *
  * `relativePath` 和 `repoId` 一样是模型可控字符串（round 2 复审 BLOCKING 2）：
- * 同样拒绝控制字符（整串扫描，与 `repoId` 共用 `assertNoControlChars`）和每一
- * 段开头的 `-`（`repoId` 前导 `-` 检查的类比——这个值可能被原样传给某个命令
- * 当参数）。不检查首尾空白：路径分段里的空格是合法文件名的一部分（例如
- * "my file.txt"），逐段 trim 会连带拒掉这类合法输入。不检查显示欺骗字符
- * （bidi/零宽/行分隔符）——那一项目前只加在 `repoId` 上（round 2 复审 B 的
- * 范围本就限定在 `repoId`），未在此扩展。
+ * 同样拒绝控制字符（整串扫描，与 `repoId` 共用 `assertNoControlChars`）、显示
+ * 欺骗字符（fix round item 7——此前这一项只加在 `repoId` 上，`relativePath`
+ * 完全没挡；而 `relativePath` 解析后的结果会被原样存进审计记录的
+ * `pathsTouched`，`grande audit` 又把它原样渲染出来，是比 `repoId` 更直接的
+ * 显示层攻击面：`repoId` 至多影响 `REPO_NOT_REGISTERED` 之类的错误消息，
+ * `relativePath` 能直接出现在人类核对「刚才动了哪些文件」的那一行）和每一段
+ * 开头的 `-`（`repoId` 前导 `-` 检查的类比——这个值可能被原样传给某个命令当
+ * 参数）。不检查首尾空白：路径分段里的空格是合法文件名的一部分（例如
+ * "my file.txt"），逐段 trim 会连带拒掉这类合法输入。
  */
 export function resolveInRepo(repoRoot: string, relativePath: string): string {
   if (relativePath.length === 0) {
@@ -249,6 +308,12 @@ export function resolveInRepo(repoRoot: string, relativePath: string): string {
     throw new PathSecurityError("INVALID_INPUT", `必须是仓库内的相对路径：${relativePath}`);
   }
   assertNoControlChars(relativePath, "relativePath");
+  if (SPOOFING_CHAR_RE.test(relativePath)) {
+    throw new PathSecurityError(
+      "INVALID_INPUT",
+      `relativePath 不能包含双向覆盖/零宽空格/行分隔符等显示欺骗字符：${JSON.stringify(relativePath)}`,
+    );
+  }
   for (const segment of relativePath.split("/")) {
     assertNoLeadingDash(segment, "relativePath 的路径分段");
   }

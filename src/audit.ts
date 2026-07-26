@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { assertValidId } from "./paths.ts";
 
 /**
  * `PENDING` 是 `beginAudit` 落 INTENT 行时唯一的初始值——Policy 还没有表态。
@@ -60,11 +61,27 @@ function toRow(r: Record<string, unknown>): AuditRow {
   };
 }
 
-/** 稳定摘要：键序不影响结果，相同输入必得相同摘要 */
+/**
+ * 稳定摘要：键序不影响结果，相同输入必得相同摘要。
+ *
+ * 键排序用普通字符串序（`a < b ? -1 : a > b ? 1 : 0`），不用 `localeCompare()`
+ * （fix round item 8）：`localeCompare()` 是 locale 感知的排序，对不少字符对
+ * 会判「相等」（返回 0）即使两个字符串本身并不相等——例如软连字符 U+00AD
+ * 默认在多数 locale 的排序权重表里被视为可忽略字符，`"a".localeCompare("a\u00ad")`
+ * 实测为 `0`。`Array.prototype.sort` 是稳定排序（ES2019+），比较器判「相等」的
+ * 两项会保持原始（插入）顺序不变——于是 `{a:1,"a\u00ad":2}` 与
+ * `{"a\u00ad":2,a:1}` 这两个键序不同、语义相同的输入，排序后 `Object.fromEntries`
+ * 产出的对象仍然保留各自的原始插入顺序，`JSON.stringify` 序列化出两段不同的
+ * 文本，摘要因此不同——直接违反本函数自己文档化的“键序不影响结果”契约。
+ * 普通字符串序按 UTF-16 code unit 逐位比较，两个不同的字符串永远不会比较出
+ * `0`；同时它不查 ICU 排序表，摘要结果也不再随运行机器的 locale 设置而变化。
+ */
 function digest(input: unknown): string {
   const stable = JSON.stringify(input, (_k, v: unknown) =>
     v && typeof v === "object" && !Array.isArray(v)
-      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)))
+      ? Object.fromEntries(
+          Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+        )
       : v,
   );
   return createHash("sha256").update(stable ?? "null", "utf8").digest("hex");
@@ -86,8 +103,13 @@ function digest(input: unknown): string {
  * `UPDATE` 才会真的生效；谓词是本函数写死的字面量，不经过调用方输入拼接，没有
  * 注入面。三组谓词：
  *
- * - `executing()`：`state='INTENT'`。只有还停在 INTENT 的行才能进入执行；
- *   已经在 EXECUTING 或已终结的行再调用是 no-op。
+ * - `executing()`：`state='INTENT' AND decision='ALLOWED'`。只有还停在 INTENT
+ *   **且已经被 Policy 放行**的行才能进入执行；`decision` 仍是 `PENDING`（Policy
+ *   尚未表态）时调用它必须是 no-op——否则账本会写下「执行过、甚至成功了」，
+ *   而 Policy 从未表态，且这条记录此后永远无法被修正：`allowed()`/`denied()`
+ *   自己的谓词同样要求 `state='INTENT'`，而 `executing()` 一旦（哪怕误）写入，
+ *   就已经把 `state` 推离了 INTENT，二者都会对着这一行永久输掉 CAS。已经在
+ *   EXECUTING 或已终结的行再调用同样是 no-op。
  * - `succeeded()` / `failed()`：`state NOT IN ('SUCCEEDED','FAILED')`。行还
  *   没到终态就能被它们终结，但终态一旦落定就不能被另一个终态覆盖——堵死
  *   「SUCCEEDED 被改写成 FAILED」反过来也一样。
@@ -115,6 +137,13 @@ export function beginAudit(
   db: DatabaseSync,
   a: { taskId: string | null; tool: string; input: unknown },
 ): AuditHandle {
+  // fix round item 7：taskId 是调用方可控字符串，且是它进入审计账本的唯一入口
+  // ——此前完全没有校验，一个内嵌换行、伪装成一行「审计完整性正常」确认文本的
+  // taskId 能原样存进这张表，`grande audit`/`grande jobs --task` 之后又可能把它
+  // 原样回显。校验放在 INSERT 之前：不合法的 taskId 连 INTENT 行都不该留下——
+  // 它不是一次「留痕后失败」的正常执行，是调用方传了个格式错误的标识符。
+  if (a.taskId !== null) assertValidId(a.taskId, "taskId");
+
   const opId = `op_${randomUUID()}`;
   const now = Date.now();
   db.prepare(
@@ -145,7 +174,10 @@ export function beginAudit(
 
   const executing = (): boolean => {
     const res = db
-      .prepare("UPDATE audit SET state='EXECUTING', updatedAt=? WHERE opId=? AND state='INTENT'")
+      .prepare(
+        "UPDATE audit SET state='EXECUTING', updatedAt=? " +
+          "WHERE opId=? AND state='INTENT' AND decision='ALLOWED'",
+      )
       .run(Date.now(), opId);
     return res.changes > 0;
   };
