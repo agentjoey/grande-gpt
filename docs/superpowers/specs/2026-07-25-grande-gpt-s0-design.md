@@ -81,6 +81,11 @@ Seatbelt、worktree 与数据库，接上真实 ChatGPT 对话测五件事（验
 | D10 | S0 的运行状况查看用 CLI 而非网页 | 网页 = 新页面 = T3，须走完整 Mockup Gate | 观测能力弱于控制台，S2.5 补齐 |
 | D11 | **POC 先行，未通过不启动 S0** | 整个 55–85 人日押在一个 1–2 天可验证的假设上（模型能否自主轮询）；见 §13 | 多 1–2 人日，且这部分代码是一次性的 |
 | D12 | **必须确认 ChatGPT 账号的训练数据设置** | Plus/Free 消费者账号**默认**会用你的内容改进模型；私有代码会流经对话 | 若选择关闭 Data Controls 则接受其对个性化的影响；若改用 Business 账号则推翻「省钱」前提 |
+| ~~D13~~ | ~~S0 接入改用 OpenAI Secure MCP Tunnel~~ | **2026-07-26 作废** —— 需要 OpenAI Platform 的 API key（与 ChatGPT 订阅是两回事，官方未公布价格），Human Owner 选择不引入该依赖。改用既有的 Cloudflare Tunnel + Server URL，见 D16 | — |
+| D14 | **S0 之前先做 S0-0 风险验证 spike** | POC 已经证明这个模式有效：把可能推翻大量下游工作的未知，用 1–2 天先证伪。S0 剩三个此类未知：OAuth 握手、Seatbelt 下 node/npm 能否运行、Tunnel 的延迟特性 | 多 2 人日；但任一项失败都会作废 13–19 人日中的大部分 |
+| ~~D15~~ | ~~S0 = Tunnel + No Auth，不实现 OAuth~~ | **2026-07-26 作废，随 D13 一同失效。** 该条唯一的依据是「服务端不在公网」；回到 Server URL 后依据消失 | — |
+| **D16** | **S0 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | 沿用既有 Cloudflare 隧道，不引入 OpenAI Platform 依赖。**因端点公网可达且 S0 在真实仓库上执行真实代码，认证成为必需** —— 这与 §4.4 原先那句被更正的「OAuth 是连接的硬性前置条件」不是一回事：它不是连接的前提，而是**本项目威胁模型下的要求**。ChatGPT 的 Authentication 下拉只有 OAuth / No Auth / Mixed 三项（已实地确认），无静态 API key 选项，故只能选 OAuth | OAuth 授权服务器需自建（S0-D）。**U3 随 D13 一同销掉；U1 重新成为前置验证项**，但其代价已大幅降低——服务端已实现并经 curl 端到端验证（含 PKCE 负向测试、伪造 token 拒绝、`aud` 校验），残留未知窄化为「ChatGPT 的 OAuth 客户端能否与之握手」 |
+| **D17** | **Production 命名与端点形态** | 隧道 `grande-gpt`；主机名 `grande.agentjoey.ai`；MCP 端点 `https://grande.agentjoey.ai/mcp/<repoId>`（按 D5 每 repo 一个端点，令牌 `aud` 绑定该端点）；Gateway 监听 `127.0.0.1:8787`，不对外暴露，只由 cloudflared 转发。**POC 阶段的密钥路径段被去掉** —— 它是 No Auth 时期的替代品，有 OAuth 后不再需要，且它会落进 Cloudflare 访问日志 | POC 的 `grande-poc` 隧道与 `gg.agentjoey.ai` 待退役 |
 
 ### 3.1 三条铁律
 
@@ -154,8 +159,17 @@ GrandeGPT 对你的 canonical checkout 只做两件事：
 
 ### 4.4 MCP 服务端表面与认证
 
-即使单用户，这套协议表面也**不能跳过** —— 它是 ChatGPT 建立连接的硬性前置条件。
-可简化的是后端实现（单 client、固定 scope、本地签发与校验），不是协议表面本身。
+> **2026-07-26 更正：本节原写「这套协议表面不能跳过 —— 它是 ChatGPT 建立连接的硬性前置条件」，
+> 那句是错的。** POC 全程使用 **No Authentication** 并完整跑通了 40 次工具调用 ——
+> OAuth 不是连接的前提。
+>
+> **但 S0 仍然要做 OAuth，理由不同（D16）**：端点公网可达，而 S0 在真实仓库上执行真实代码。
+> 「公网 + 无认证 + 可执行代码」在本项目的威胁模型下不可接受。区别在于——
+> 这是**我们的要求**，不是**平台的前提**。这个区分很重要：它意味着认证方案由我们的威胁模型
+> 决定，而不是被平台绑死。
+>
+> ChatGPT 的 Authentication 下拉只有 **OAuth / No Auth / Mixed** 三项（已实地确认），
+> 没有静态 API key 或自定义 header 选项，因此只能走 OAuth。
 
 S0 必须实现：
 
@@ -168,6 +182,25 @@ S0 必须实现：
 | 每请求校验 | token 签名、`iss`、`exp`/`nbf`、`aud`（须匹配本端点资源标识）、scope |
 | 失败响应 | `401` + `WWW-Authenticate` 指向 protected resource metadata |
 | 客户端注册 | DCR 可选；优先 CIMD，在 AS 元数据声明 `client_id_metadata_document_supported: true` |
+| **refresh_token** | **必须实现**（见下方 U1 实测） |
+
+> **2026-07-26 U1 实测结论**（详见 [`spike/findings/U1-oauth.md`](../../../spike/findings/U1-oauth.md)）：
+> ChatGPT 与本设计的 OAuth 握手**已端到端跑通**，且 **D5 的每-repo `aud` 绑定被坐实** ——
+> ChatGPT 从每-repo 元数据自动发现 `resource`，在 `/authorize` 与 `/token` 全程携带，
+> 签发的令牌 `aud` 精确等于该端点 URL。
+>
+> 实测顺序为：`POST /mcp` → 401 → 顺 `WWW-Authenticate` 取**每-repo**元数据 → 认证后调用。
+> **因此 `WWW-Authenticate: Bearer resource_metadata="..."` 是承重的**，S0 必须有测试覆盖。
+>
+> ⚠️ **发现一个会导致一小时后断线的缺口**：ChatGPT 注册时请求
+> `grant_types: ["authorization_code", "refresh_token"]`，而 spike 的 AS 只声明
+> `["authorization_code"]`、不签发 refresh token、access_token 1 小时过期
+> ——**过期后没有续期路径，连接断开、需重新授权**。
+> 次生问题：`/register` 照单全收了它不支持的 grant type，未按 RFC 7591 回传实际支持的子集。
+>
+> **S0 必须**：① 实现 `refresh_token` grant 并在元数据如实声明；
+> ② `/register` 校验并回传实际支持的 `grant_types`；③ 明确 access_token 寿命与续期策略，
+> 不得靠「长期不过期」回避 refresh。
 
 **`aud` 必须绑定具体端点**（`/mcp/grande-gpt` 与 `/mcp/project-b` 的令牌不可互换）——
 这是 D5「隔离由协议层强制」的实际落点。若 `aud` 校验放松，每 repo 一个端点就退化为纯约定。
@@ -184,6 +217,31 @@ worktree 里的 `.git` 是一个**文件**，指向 `<canonical>/.git/worktrees/
 `hooks/pre-commit` 里写东西，等你下次在自己的 checkout 里手动 commit 时执行。
 
 **此条进 S0 验收标准（AC-7）。**
+
+### 4.6 同一个陷阱的第二条路径：写工具绕过沙箱（S0-A 审查实测发现）
+
+§4.5 讲的是**沙箱内子进程**往 `.git/hooks/` 写。还有一条路径完全不经过 Seatbelt：
+
+**写工具本身。** `grande_repo_edit` 的路径校验（`resolveInRepo`）契约只有一条——
+**目标必须在仓库之内**。而 `.git/config`、`.git/hooks/pre-commit` 确实在仓库之内，
+所以它们是合法目标。写入由 Gateway 进程执行，**沙箱根本不在这条链路上**。
+
+S0-A 实测确认三者均被 `resolveInRepo` 接受：`.git/config`、`.git/hooks/pre-commit`、
+`src/../.git/config`。
+
+后果与 §4.5 同级甚至更直接：往 `hooks/pre-commit` 写脚本，或改 `core.pager` /
+`core.fsmonitor`，都能在你下次手动 git 操作时执行任意宿主命令——**而且是在沙箱退出之后
+执行的**，沙箱的任何限制都不适用。
+
+**这不是 `resolveInRepo` 的缺陷**：包含性检查做的就是包含性检查，把「哪些路径在语义上
+该禁写」塞进它会让一个安全原语承担两种职责。**这是缺一层策略**：
+
+> **要求（S0-B 硬门禁）**：任何写工具在调用 `resolveInRepo` 之后，必须再过一道
+> **仓库内敏感路径拒绝表**，至少覆盖 `.git/` 全子树。该表从 `~/.grande-control/config/`
+> 读取（铁律一：不从仓库内读），且**默认拒绝、不可由工具参数放宽**（铁律三）。
+> 无此层则不得上线任何写工具。
+
+进 S0 验收标准 **AC-14**。
 
 ---
 
@@ -253,6 +311,34 @@ ChatGPT 的静默截断会让模型在残缺数据上继续推理而毫不知情
 六个只读工具**完全不弹框**。一次典型任务约 3–5 次 `repo_edit` + 3–5 次 `grande_run`，
 且 ChatGPT 支持会话内「记住」批准 —— 实际体感是**每个会话开头确认 2 次，之后无感**。
 新会话重置，这对安全反而是好事。
+
+> **2026-07-26 修订**：实际 UI 比上述假设宽松。每个 developer-mode app 有独立的
+> **Permissions** 页，四档：`Always ask` / `Allow read actions` / `Allow low-risk actions`（默认）
+> / `Allow all actions`。**per-app 权限档是比工具粒度更有效的杠杆** —— 配一次，之后只有写
+> 操作才问，不必每会话重来。
+>
+> 这同时**验证了注解必须如实标注的价值**：正因为六个只读工具标了 `readOnlyHint: true`，
+> `Allow read actions` 档才能精确放行轮询（`grande_run_result`）而拦住写入。若图省事全标成
+> 写工具，该档位即失效。
+>
+> **对 POC 的直接影响**：`Always ask` 档下每次轮询都要人工点确认，**P-1 结构上无法测量**。
+> 因此 POC 固定用 `Allow read actions`（第三轮改默认档做对照），见 `poc/PROTOCOL.md` §0.3.1。
+>
+> P-4 的问题相应从「每次弹框烦不烦」变为「在此权限模型下实际摩擦有多大」——
+> 明显更乐观的问题。
+
+> **2026-07-26 POC 第一轮实测：比上面这版修订还要乐观得多。**
+>
+> 在 `Allow read actions` 档下，整轮**只弹了一次框，而且是 app 级的**
+> （「是否同意使用 GrandeGPT」），**根本没有细到工具级别**。执行者连「记住」都没勾。
+> 一轮 40 次工具调用、其中 6 次写操作（1 次 `task_open` + 1 次 `repo_edit` + 4 次 `run`），
+> 总计 **1 次确认**。
+>
+> **因此「写操作必须做粗粒度以压低弹框数」这条设计理由基本失效。** 工具粒度今后应按
+> 语义清晰度与操作原子性来定，而不是为了少弹框而合并——后者是个已被证伪的约束。
+>
+> 注意这不改变 §5.3「S0 不支持删除」的结论：那条的理由是「没有 Checkpoint 就不该有
+> 不可逆操作」，与弹框数无关。
 
 ### 5.5 统一响应信封
 
@@ -470,6 +556,37 @@ S0 的失败解析**只做 exit code + 尾部日志 + 可配置的失败行正�
 `TASK_NOT_FOUND` 的错误信息必须列出活跃任务及其分支与变更数 —— 这是 `taskId` 丢失时的兜底路径，
 比干巴巴报错有用得多。
 
+### 7.1 内部异常 → 工具错误码的映射（S0-B 必须实现）
+
+上表是**工具层**（发给 ChatGPT 的 `error{code,...}`）的词汇表。S0-A 的内部模块抛的是别的东西，
+两者**不是同一套**，这一点在 S0-A 收尾审查中才暴露出来 —— 当时三个模块各用一种错误约定：
+
+| 模块 | 当前抛出 | 备注 |
+|---|---|---|
+| `paths.ts` | `PathSecurityError`，带结构化 `.code`，`name` 为 `PathSecurityError [CODE]` | 唯一被认真设计过的一种 |
+| `tasks.ts` / `jobs.ts` | 裸 `Error`，机器可读信息只存在于 message 前缀（`"TASK_NOT_FOUND: …"`） | 反模式：正是 Task 2 明确否定过的做法 |
+| `layout.ts` / `registry.ts` | 裸 `Error`，纯散文，无码 | 启动期配置错误，直接面向人 |
+
+**S0-B 的工具层必须做这层映射**，且不得靠解析 message 字符串：
+
+| 内部 | → 工具错误码 |
+|---|---|
+| `PathSecurityError.code = "PATH_ESCAPE"` | `POLICY_DENIED` |
+| `PathSecurityError.code = "INVALID_INPUT"` | `INVALID_INPUT` |
+| `PathSecurityError.code = "REPO_NOT_REGISTERED"` / `"REPO_NOT_FOUND"` | `REPO_NOT_REGISTERED` |
+| `tasks.ts` 的 `TASK_NOT_FOUND` | `TASK_NOT_FOUND`（并按上文补齐活跃任务清单） |
+| `tasks.ts` 的 `STALE_STATE` | `INVALID_INPUT`（乐观并发失败，重读后重试） |
+| `jobs.ts` 的 `JOB_NOT_FOUND` | `INVALID_INPUT` |
+| `layout.ts` / `registry.ts` 的启动期错误 | 不映射 —— 这些应让 Gateway **启动失败**，而不是变成一次工具调用的错误 |
+
+**注意 AC-1 的验收断言写的是 `POLICY_DENIED`**，而 `paths.ts` 实际抛 `PATH_ESCAPE`。
+上表第一行就是这条断言得以成立的前提 —— 没有这层映射，AC-1 在 S0-B 会验收不过。
+
+内部错误约定本身**不统一到一种**是刻意的取舍：`layout.ts` 的错误发生在启动期、只给人看，
+硬套结构化码没有收益。但**凡是会经由工具层传给 ChatGPT 的异常，都必须带结构化 `.code`**，
+不得只把码写进 message —— 那样工具层就只能靠字符串匹配，而字符串是会被改写、被本地化、
+被截断的。
+
 ---
 
 ## 8. 数据模型与本地观测
@@ -492,15 +609,37 @@ job
 
 audit
   opId TEXT PK · taskId · tool · inputDigest
-  decision TEXT            -- ALLOWED | DENIED
+  decision TEXT            -- PENDING | ALLOWED | DENIED
   state    TEXT            -- INTENT | EXECUTING | SUCCEEDED | FAILED
-  pathsTouched JSON · at TIMESTAMP
+  reason   TEXT NULL       -- 拒绝或失败的原因
+  pathsTouched JSON · at TIMESTAMP · updatedAt TIMESTAMP
 ```
 
 **`audit` 先写 `INTENT` 再执行**（草案 §14.1 的做法）。业务执行与审计不是单一事务，
 但未完成状态可被后台恢复器发现并核对（恢复器本身属 S4）。
 
 S0 不含：`lease`、`checkpoint`、`trash`、`userId`。
+
+**三处在 S0-A 实现期间加固，均由代码审查实测催生：**
+
+1. **`decision` 的初值是 `PENDING`，不是 `ALLOWED`。** 原设计在写 `INTENT` 行时就把
+   `decision` 定为 `ALLOWED`，而那一刻 Policy 还没裁决。崩溃在这个窗口里会留下一条
+   「已放行」的记录，可实际上没有任何东西放行过它 —— 在一个**唯一职责就是说实话**的
+   组件里，这是 fail-open 默认值。`PENDING` 陈述的是事实。
+
+2. **句柄的「只能前进」由写入本身强制，不靠调用纪律。** 每个状态跃迁都带
+   compare-and-swap 谓词，方法返回 `boolean` 表明本次调用是否真的写入了 —— 竞争失败
+   可被发现，而非静默丢弃。实测（修复前）可以：把 `SUCCEEDED` 改写成 `FAILED`、
+   把 `EXECUTING` 退回 `INTENT`、以及产生 `decision=DENIED` 却带非空 `pathsTouched`
+   的**自相矛盾记录**（拒绝意味着从未执行，却记录了动过的文件）。
+   修复后穷举全部 3905 条调用序列、18555 个终态，零违例。
+
+   这与 `job.finishJob` 缺 CAS 是同一类缺陷 —— 该类缺陷在本项目已出现两次，
+   **凡「状态只能单向推进」的地方，都必须把它写进 SQL 谓词**。
+
+3. **`reason` 落库。** 原接口收下 `reason` 参数却丢弃它。「为什么被拒」几乎就是审计
+   记录最有价值的字段；且同一方法的兄弟参数 `pathsTouched` 是持久化的，读源码的人
+   没有理由认为 `reason` 不是。
 
 ### 8.2 CLI 调试视图（D10）
 
@@ -561,8 +700,13 @@ POC 的全部产出是**一份观察记录**（存 `docs/research/`）与对本�
 | AC-12 | 环境变量清洗生效：沙箱内看不到宿主的 `*_TOKEN` / `*_API_KEY` | 自动化：注入假 token 到 Gateway 环境，fixture 测试断言读不到 |
 | **AC-13** | **在真实 ChatGPT 对话中完成一次「读 → 改 → 跑测试 → 看失败 → 再改 → 通过」完整循环** | **人工**：对 fixture 仓库与 grande-gpt 各做一次，记录对话轮数、确认框次数、模型选错工具的次数 |
 
-**AC-13 是 S0 真正的目标**，其余 12 条是它的安全前提。AC-13 的观察记录（尤其是模型选错工具的
+| **AC-14** | **写工具无法写入仓库内敏感路径**（§4.6）。至少 `.git/` 全子树被拒，含 `.git/config`、`.git/hooks/pre-commit`，以及经 `..` 绕行的等价写法如 `src/../.git/config` | 自动化：每条路径一个用例，断言被拒且返回码明确；另一条断言拒绝表来自 `~/.grande-control/config/` 而非仓库内文件 |
+
+**AC-13 是 S0 真正的目标**，其余各条是它的安全前提。AC-13 的观察记录（尤其是模型选错工具的
 情况与 `taskId` 是否丢失）**直接决定 S1–S5 的工具设计**，必须成文留存而非口头结论。
+
+**AC-14 由 S0-A 的代码审查实测催生**，不是设计时想到的。它与 AC-7 是同一类攻击的两条路径：
+AC-7 堵沙箱内子进程，AC-14 堵写工具自身。**只做 AC-7 会留下一条完全不经过沙箱的通路。**
 
 ### 9.3 验收仓库
 
@@ -637,6 +781,8 @@ Notion、**computer-use（整个桌面控制）**、**claude-in-chrome（已登�
 | 单用户假设 | 将来开放需重做身份层 | 数据模型不预留 `userId`，接受返工 |
 | 沙箱验证覆盖不完整 | 已实测：写拒绝 · 读嵌套 deny/allow · 网络拒绝（DNS 与直连 IP）· APFS clonefile。**未测**：全禁网下 node/npm/tsc 的实际可运行性、pnpm store 符号链接 | 列入 §12.1 待实测清单，S0 第一周内验证 |
 | Gateway 进程本身未沙箱化 | Gateway 被攻破则边界失效 | 有意为之 —— Gateway 是可信代码；风险由「不引入通用逃生舱」控制 |
+| **`realpath` 不是拼写归一器** | macOS 文件系统大小写不敏感、Unicode 归一化不敏感，但 `realpathSync` **不改写调用方给的拼写**：目录实为 `MixedCase` 时问 `mixedcase` 返回 `mixedcase`，问 NFD 返回 NFD。对包含性判断无害（只会失败得更严格），但 **Seatbelt 按字节精确匹配策略路径** —— 拼写不一致会让 allow 规则过严、**deny 规则静默失效**，正是 spike U2 那个 fail-open | **S0-C 要求**：进 SBPL 的路径一律取自 `readdirSync` / `discoverRepos()` 的**磁盘实际拼写**，不得取自调用方传入的 `repoId`。S0-A 审查发现 |
+| **`repoId` 的 Unicode 双身份** | 同一目录的 NFC 与 NFD 拼写是两个不同字节串，因而是两个注册表身份、两个审计键。对 D3「审计完整性」有影响 | **未处置，知情保留**。S0-A 只拒了控制字符、前导 `-`、首尾空白（都无正当用途）。未采用 ASCII 白名单，因为那会让 `我的项目` 这类目录无法注册 —— 属产品决策，留待 Human Owner 定 |
 
 ---
 
@@ -703,6 +849,17 @@ ChatGPT 能否驱动它的证据」，后者才是决定 S1–S5 形态的输入
 Pro（$200/月）才是「在滥用护栏内基本无限」。**15–90 条 /5h 的 Sol 额度对 agentic 编码是紧的**，
 其严重程度完全取决于 R2。
 
+> **2026-07-26 POC 第一轮实测，本条大幅下调**：用 **Sol**，一个完整开发循环
+> （探索 → 定位缺陷 → 修复 → 验证通过 → 大文件分段读取 → 全仓搜索分页 → 全仓通读总结）
+> 共 **40 次工具调用**，只消耗 **5 条用户消息**，**全程无额度提示**。
+>
+> 因为 R2 实测为 PASS（模型自主轮询，不需要人催），这 40 次调用被压进 5 个回合，
+> 而不是我原先担心的「每次轮询算一条消息」。**R1 的灾难情形（Sol 的 15 条连一个任务
+> 都跑不完）已被排除。**
+>
+> 保留的部分：即便按报道的低端 15 条 /5h，也只够约 3 个完整任务，仍不是「几乎免费」。
+> 但这是「需要规划」而非「不可行」。
+
 #### R2 · 模型能否自主轮询 —— 整个设计的单点假设
 
 §5.4 的异步模型（`grande_run` → 返回 `jobId` → 模型轮询 `grande_run_result`）
@@ -715,6 +872,16 @@ Pro（$200/月）才是「在滥用护栏内基本无限」。**15–90 条 /5h 
 
 这两种情形的差距是**方案可行**与**方案不可行**。设计初稿把它当作「加个 `pollAfterSeconds`
 提示即可」处理，这是**设计缺陷** —— 它实际是成败点，因此提升为 POC 的 P-1 硬门禁。
+
+> **2026-07-26 POC 第一轮实测：PASS，落在「能自主轮询」这一边。**
+> 4/4 个 job 全部由模型自主轮询至终态，单个 episode 最多连续轮询 5 次（间隔 3–6 秒），
+> 最长无人工间隔调用链 17 次。模型读懂了 `pollAfterSeconds` 并据此 sleep
+> （截图显示 "Slept for 17 seconds"，与我们返回的值吻合）。
+>
+> **判定依据是回合边界而非间隔阈值**：每段轮询链都完整落在单个 ChatGPT 回合内
+> （截图顶部的 `Worked for Xs`），而单个回合内人无法插话——这是结构性证明。
+>
+> 本条风险**解除**。`hint` + `pollAfterSeconds` 的引导设计按预期生效。
 
 #### R3 · Context rot：ChatGPT chat 未为 agentic 状态设计压缩
 
@@ -757,7 +924,32 @@ GrandeGPT 唯一的技术差异化是**访问 GPT-5.6 的计费方式**。
 以下是 Codex CLI 与 Claude Code **给不了**的，构成本项目真正的立项理由：
 
 1. **从移动端驱动本机开发。** ChatGPT app → 隧道 → 本机仓库，跑测试、看结果、改代码。
-   现有工具均无此能力。**这是唯一的、结构性的差异化。**
+   现有工具均无此能力。**这是唯一的、结构性的差异化 —— 也因此是最需要先验证的一条。**
+
+   ✅ **2026-07-26 P-6 实测：成立。** iOS app 上读、写、轮询全部通过：
+
+   | 能力 | 证据 |
+   |---|---|
+   | 读 | `grande_task_status` / `grande_repo_map` 到达服务端并正常返回 |
+   | **写** | `grande_task_open` 成功创建 `task_30922817`（服务端日志确认），**无确认框** |
+   | **轮询** | `grande_run` → 2 次 `grande_run_result`（间隔 17.5s / 10.3s）轮询至终态，全程在**一个 46 秒回合**内 |
+
+   官方 developer mode 文档只写「available … **on the web**」、二手来源报告「MCP write actions
+   are currently disabled on mobile devices」——**这两条对 iOS app 都不成立**。文档只是没有
+   覆盖移动端，不等于移动端不支持。
+
+   ⚠️ **但发现一个真实的运维风险：iOS 上连接器会话不稳定。** 实测中出现过两种失败，
+   两次都**不是**能力限制：
+
+   - 同一对话内读请求成功、写请求**一条记录都没到达服务端**，模型报「资源不可用」
+   - 整个连接器「当前不可用」，读写都到不了服务端
+
+   **关键问题是这两种失败与真正的能力限制在客户端措辞上完全无法区分**——模型说「不可用」时，
+   你无从判断是平台禁止、连接器未启用、还是网络抖动。**只有服务端观测日志能定性。**
+   这条在本 POC 中连续两次把结论从错误方向拉回来，是 S0 必须保留完整调用日志的直接理由。
+
+   降级路线（**当前不需要，仅备查**）：参考项目的确认字符串模式，可把写操作拆成
+   「移动端出意图 + 确认串」与「另一侧落地执行」两段。P-6 已通过，故不实现。
 2. **受控执行边界强于现有工具。** Codex CLI 与 Claude Code 对本机有较宽访问权；本方案的
    无 shell、路径白名单、审计账本、worktree 隔离、canonical `.git` 只读，治理强度明显更高。
    **若目标是「让 AI 碰代码但有真护栏」，这个设计本身即产品。**

@@ -4,7 +4,15 @@
 
 **Goal:** 用一个返回硬编码假数据的 MCP 服务端，在真实 ChatGPT 对话中验证 P-1～P-5 五项交互假设，从而决定是否启动 S0。
 
-**Architecture:** 单进程 TypeScript 服务：Hono 处理 HTTP → `StreamableHTTPServerTransport`（无状态模式）→ `McpServer` 注册九个工具 → 工具读写内存中的假仓库与假 job 状态机 → 每次调用写一条 JSONL 观测日志。cloudflared 把 `m2m.agentjoey.ai` 指向本地端口。全部产出是一份观察记录，代码一次性、不进入 S0 代码库。
+**Architecture:** 单进程 TypeScript 服务：Hono 处理 HTTP → `WebStandardStreamableHTTPServerTransport`（无状态模式）→ `McpServer` 注册九个工具 → 工具读写内存中的假仓库与假 job 状态机 → 每次调用把请求参数**与响应摘要**写一条 JSONL 观测日志。cloudflared 专用隧道 `grande-poc` 把 `gg.agentjoey.ai` 指向本地端口。全部产出是一份观察记录，代码一次性、不进入 S0 代码库。
+
+> **执行期修订（2026-07-26）**：本计划原稿写的是 `m2m.agentjoey.ai`，但该域名实际映射到
+> `ssh://localhost:22`（Human Owner 的 SSH 接入），复用会切断 SSH。经授权改为新建专用隧道
+> `grande-poc` + 新域名 `gg.agentjoey.ai`，完全不触碰 home-mac 隧道上的现有服务。
+>
+> 原稿还有两处已在执行中修正，记此备查：① 观测日志原本只记调用参数不记响应，导致
+> P-1/P-3/P-5 都缺关键信号（详见 §「执行期发现的计划缺陷」）；② 信封声明了 `nextCursor`
+> 却没有任何工具接受 `cursor` 入参，"续读"从一开始就是摆设。
 
 **Tech Stack:** Node 24 · TypeScript 5 · pnpm · `@modelcontextprotocol/sdk@1.29.0` · Hono 4 + `@hono/node-server` · vitest 4 · cloudflared
 
@@ -13,7 +21,8 @@
 以下取自规格 `docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`，**每个任务的要求都隐含包含本节**。
 
 - **POC 代码是一次性的，不进入 S0 代码库。** 全部放在 `poc/`，产出是观察记录 + 对规格的修订。
-- **不实现任何真实逻辑**：无 Gateway、无 Seatbelt、无 worktree、无 git、无 SQLite、无文件系统写入。全部数据在内存中。
+- **不实现任何真实逻辑**：无 Gateway、无 Seatbelt、无 worktree、无 git、无 SQLite。**假仓库与 job 的全部业务状态只存在于内存中**，进程退出即消失。
+  - 唯一允许的磁盘写入是**观测日志** `observe.jsonl`（Task 5 的 `observe.ts`）—— 它是本 POC 的交付物本身，属于仪表而非业务逻辑。除此之外不得有任何文件写入。
 - **九个工具名固定**：`grande_task_open`、`grande_task_status`、`grande_repo_map`、`grande_repo_search`、`grande_repo_read`、`grande_repo_edit`、`grande_diff`、`grande_run`、`grande_run_result`。
 - **`repoId` 由 URL 端点决定，绝不作为工具参数**（规格 D5）。
 - **注解必须如实标注**：六个只读工具 `readOnlyHint: true`；`grande_task_open` / `grande_repo_edit` / `grande_run` 为 `readOnlyHint: false, destructiveHint: false`；**所有工具 `openWorldHint: false`**。
@@ -97,11 +106,11 @@ cd poc
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --experimental-strip-types src/server.ts",
+    "dev": "node src/server.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "report": "node --experimental-strip-types scripts/report.ts"
+    "report": "node scripts/report.ts"
   },
   "dependencies": {
     "@hono/node-server": "1.19.7",

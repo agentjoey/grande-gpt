@@ -1,0 +1,9 @@
+node_modules/
+
+# 观测日志：每轮一个文件（observe-round-1.jsonl 等），是 POC 的原始交付物，
+# 只留在本地不入库。通配符必须覆盖分轮文件名，否则 PROTOCOL.md §1 的
+# 每轮独立日志会漏进提交。
+observe.jsonl
+observe-*.jsonl
+
+.env
