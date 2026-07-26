@@ -6,7 +6,7 @@ import { ensureLayout, loadLayout } from "../src/layout.ts";
 
 let ws: string;
 let ctrl: string;
-const saved = { ws: process.env.GRANDE_WORKSPACE, ctrl: process.env.GRANDE_CONTROL };
+const saved = { ws: process.env.GRANDE_WORKSPACE, ctrl: process.env.GRANDE_CONTROL, home: process.env.HOME };
 
 beforeEach(() => {
   ws = mkdtempSync(join(tmpdir(), "grande-ws-"));
@@ -22,6 +22,8 @@ afterEach(() => {
   else process.env.GRANDE_WORKSPACE = saved.ws;
   if (saved.ctrl === undefined) delete process.env.GRANDE_CONTROL;
   else process.env.GRANDE_CONTROL = saved.ctrl;
+  if (saved.home === undefined) delete process.env.HOME;
+  else process.env.HOME = saved.home;
 });
 
 describe("loadLayout()", () => {
@@ -42,7 +44,15 @@ describe("loadLayout()", () => {
 
   it("GRANDE_CONTROL 缺省时回退到 ~/.grande-control", () => {
     delete process.env.GRANDE_CONTROL;
-    expect(loadLayout().controlRoot).toBe(join(process.env.HOME ?? "", ".grande-control"));
+    const tempHome = mkdtempSync(join(tmpdir(), "grande-home-"));
+    try {
+      process.env.HOME = tempHome;
+      const l = loadLayout();
+      const expected = realpathSync(join(tempHome, ".grande-control"));
+      expect(l.controlRoot).toBe(expected);
+    } finally {
+      rmSync(tempHome, { recursive: true, force: true });
+    }
   });
 
   it("拒绝相对路径的 GRANDE_WORKSPACE", () => {
@@ -69,12 +79,18 @@ describe("loadLayout()", () => {
     expect(l.derivedRoot.startsWith(l.workspaceRoot)).toBe(true);
     expect(l.worktreesRoot.startsWith(l.derivedRoot)).toBe(true);
   });
+
+  it("不创建工作区根——那是用户的目录，不存在应当报错而不是被我们凭空造出来", () => {
+    rmSync(ws, { recursive: true, force: true });
+    expect(() => loadLayout()).toThrow(/不存在/);
+  });
 });
 
 describe("ensureLayout()", () => {
   it("创建控制平面目录", () => {
     const l = loadLayout();
     ensureLayout(l);
+    expect(existsSync(join(l.controlRoot, "state"))).toBe(true);
     expect(existsSync(l.configDir)).toBe(true);
     expect(existsSync(l.artifactsDir)).toBe(true);
   });
@@ -83,10 +99,5 @@ describe("ensureLayout()", () => {
     const l = loadLayout();
     ensureLayout(l);
     expect(() => ensureLayout(l)).not.toThrow();
-  });
-
-  it("不创建工作区根——那是用户的目录，不存在应当报错而不是被我们凭空造出来", () => {
-    rmSync(ws, { recursive: true, force: true });
-    expect(() => loadLayout()).toThrow(/不存在/);
   });
 });
