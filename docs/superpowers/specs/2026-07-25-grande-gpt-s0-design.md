@@ -556,6 +556,37 @@ S0 的失败解析**只做 exit code + 尾部日志 + 可配置的失败行正�
 `TASK_NOT_FOUND` 的错误信息必须列出活跃任务及其分支与变更数 —— 这是 `taskId` 丢失时的兜底路径，
 比干巴巴报错有用得多。
 
+### 7.1 内部异常 → 工具错误码的映射（S0-B 必须实现）
+
+上表是**工具层**（发给 ChatGPT 的 `error{code,...}`）的词汇表。S0-A 的内部模块抛的是别的东西，
+两者**不是同一套**，这一点在 S0-A 收尾审查中才暴露出来 —— 当时三个模块各用一种错误约定：
+
+| 模块 | 当前抛出 | 备注 |
+|---|---|---|
+| `paths.ts` | `PathSecurityError`，带结构化 `.code`，`name` 为 `PathSecurityError [CODE]` | 唯一被认真设计过的一种 |
+| `tasks.ts` / `jobs.ts` | 裸 `Error`，机器可读信息只存在于 message 前缀（`"TASK_NOT_FOUND: …"`） | 反模式：正是 Task 2 明确否定过的做法 |
+| `layout.ts` / `registry.ts` | 裸 `Error`，纯散文，无码 | 启动期配置错误，直接面向人 |
+
+**S0-B 的工具层必须做这层映射**，且不得靠解析 message 字符串：
+
+| 内部 | → 工具错误码 |
+|---|---|
+| `PathSecurityError.code = "PATH_ESCAPE"` | `POLICY_DENIED` |
+| `PathSecurityError.code = "INVALID_INPUT"` | `INVALID_INPUT` |
+| `PathSecurityError.code = "REPO_NOT_REGISTERED"` / `"REPO_NOT_FOUND"` | `REPO_NOT_REGISTERED` |
+| `tasks.ts` 的 `TASK_NOT_FOUND` | `TASK_NOT_FOUND`（并按上文补齐活跃任务清单） |
+| `tasks.ts` 的 `STALE_STATE` | `INVALID_INPUT`（乐观并发失败，重读后重试） |
+| `jobs.ts` 的 `JOB_NOT_FOUND` | `INVALID_INPUT` |
+| `layout.ts` / `registry.ts` 的启动期错误 | 不映射 —— 这些应让 Gateway **启动失败**，而不是变成一次工具调用的错误 |
+
+**注意 AC-1 的验收断言写的是 `POLICY_DENIED`**，而 `paths.ts` 实际抛 `PATH_ESCAPE`。
+上表第一行就是这条断言得以成立的前提 —— 没有这层映射，AC-1 在 S0-B 会验收不过。
+
+内部错误约定本身**不统一到一种**是刻意的取舍：`layout.ts` 的错误发生在启动期、只给人看，
+硬套结构化码没有收益。但**凡是会经由工具层传给 ChatGPT 的异常，都必须带结构化 `.code`**，
+不得只把码写进 message —— 那样工具层就只能靠字符串匹配，而字符串是会被改写、被本地化、
+被截断的。
+
 ---
 
 ## 8. 数据模型与本地观测
