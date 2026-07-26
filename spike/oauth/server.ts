@@ -50,10 +50,21 @@ const PORT = Number(process.env.PORT ?? 8787);
 const ISSUER = process.env.ISSUER ?? `http://127.0.0.1:${PORT}`;
 const KEY = new TextEncoder().encode(process.env.OAUTH_SECRET ?? randomBytes(32).toString("hex"));
 
-/** 每 repo 一个端点（D5）。先硬编码一个小注册表：至少两个 id 才能测「跨端点必须拒绝」。 */
-const REPO_IDS = new Set<string>(["demo-app", "other-repo"]);
+/**
+ * 每 repo 一个端点（D5）。**repoId 即 `GPT_Workspace` 下的目录名**（规格 §4.2）——
+ * 不是任意标签。当前该目录下只有 `grande-gpt` 一个真实仓库，它同时也是 §9.3 定的
+ * dogfooding 目标。
+ *
+ * 早前这里写的是 `demo-app` / `other-repo`——那是 POC 的**虚构**仓库名（内存里的
+ * fixture），混进 production 配置属于命名污染：ChatGPT 侧配好的端点 URL 会长期留在
+ * 插件配置里，用一个不存在的仓库名去建它，后面每次看到都要重新判断"这是真的还是测试"。
+ *
+ * S0 起应改为从 `GPT_Workspace` 自动发现 git 仓库、再经显式注册（规格 §4.2），
+ * 而不是硬编码——本 spike 只验证认证层，先用真实值写死。
+ */
+const REPO_IDS = new Set<string>(["grande-gpt"]);
 /** 根路径 `/.well-known/oauth-protected-resource` 没有 repoId 可用，见该路由下的注释。 */
-const DEFAULT_REPO_ID = "demo-app";
+const DEFAULT_REPO_ID = "grande-gpt";
 
 const SCOPE_PREFIX = "grande:repo:";
 const resourceUrl = (repoId: string): string => `${ISSUER}/mcp/${repoId}`;

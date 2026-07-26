@@ -81,9 +81,11 @@ Seatbelt、worktree 与数据库，接上真实 ChatGPT 对话测五件事（验
 | D10 | S0 的运行状况查看用 CLI 而非网页 | 网页 = 新页面 = T3，须走完整 Mockup Gate | 观测能力弱于控制台，S2.5 补齐 |
 | D11 | **POC 先行，未通过不启动 S0** | 整个 55–85 人日押在一个 1–2 天可验证的假设上（模型能否自主轮询）；见 §13 | 多 1–2 人日，且这部分代码是一次性的 |
 | D12 | **必须确认 ChatGPT 账号的训练数据设置** | Plus/Free 消费者账号**默认**会用你的内容改进模型；私有代码会流经对话 | 若选择关闭 Data Controls 则接受其对个性化的影响；若改用 Business 账号则推翻「省钱」前提 |
-| D13 | **S0 接入改用 OpenAI Secure MCP Tunnel，Gateway 不暴露公网** | 本机跑 `tunnel-client`，只出不进。消除 POC 阶段的证据完整性风险（知道 URL 即可向观测日志注入伪造事件），且与「能力面最小」主线一致。详见 [调研 §5.1](../../research/2026-07-25-chatgpt-platform-constraints.md) | 需 OpenAI Platform 的 API key（与 ChatGPT 订阅是两回事），官方未公布价格；传输为长轮询，延迟特性未实测 |
+| ~~D13~~ | ~~S0 接入改用 OpenAI Secure MCP Tunnel~~ | **2026-07-26 作废** —— 需要 OpenAI Platform 的 API key（与 ChatGPT 订阅是两回事，官方未公布价格），Human Owner 选择不引入该依赖。改用既有的 Cloudflare Tunnel + Server URL，见 D16 | — |
 | D14 | **S0 之前先做 S0-0 风险验证 spike** | POC 已经证明这个模式有效：把可能推翻大量下游工作的未知，用 1–2 天先证伪。S0 剩三个此类未知：OAuth 握手、Seatbelt 下 node/npm 能否运行、Tunnel 的延迟特性 | 多 2 人日；但任一项失败都会作废 13–19 人日中的大部分 |
-| D15 | **S0 = Tunnel + No Auth，不实现 OAuth** | 本节 §4.4 原断言「OAuth 是连接的硬性前置条件」是**错的** —— POC 用 No Auth 跑通全程即为反证。而 D13 下服务端不在公网、只有绑定用户 org 的 OpenAI 中继可达；OAuth 真正提供的三项价值（按用户身份、令牌过期、scope 强制）在**严格单用户**（D2）+ 私有隧道下都不适用。省下 S0-D 的实现量与 U1 的验证时间 | ⚠️ **该决定使 U3（Tunnel 可用性与延迟）从可选变为前置条件**。POC 能用 No Auth + 公网 URL 是因为它只提供假数据；S0 在真实仓库上执行真实代码，同样组合即「公网上一个无认证的代码执行端点」。**若 U3 证明 Tunnel 不可用或过慢、S0 退回 Server URL，则 OAuth 重新变为必需，本条作废** |
+| ~~D15~~ | ~~S0 = Tunnel + No Auth，不实现 OAuth~~ | **2026-07-26 作废，随 D13 一同失效。** 该条唯一的依据是「服务端不在公网」；回到 Server URL 后依据消失 | — |
+| **D16** | **S0 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | 沿用既有 Cloudflare 隧道，不引入 OpenAI Platform 依赖。**因端点公网可达且 S0 在真实仓库上执行真实代码，认证成为必需** —— 这与 §4.4 原先那句被更正的「OAuth 是连接的硬性前置条件」不是一回事：它不是连接的前提，而是**本项目威胁模型下的要求**。ChatGPT 的 Authentication 下拉只有 OAuth / No Auth / Mixed 三项（已实地确认），无静态 API key 选项，故只能选 OAuth | OAuth 授权服务器需自建（S0-D）。**U3 随 D13 一同销掉；U1 重新成为前置验证项**，但其代价已大幅降低——服务端已实现并经 curl 端到端验证（含 PKCE 负向测试、伪造 token 拒绝、`aud` 校验），残留未知窄化为「ChatGPT 的 OAuth 客户端能否与之握手」 |
+| **D17** | **Production 命名与端点形态** | 隧道 `grande-gpt`；主机名 `grande.agentjoey.ai`；MCP 端点 `https://grande.agentjoey.ai/mcp/<repoId>`（按 D5 每 repo 一个端点，令牌 `aud` 绑定该端点）；Gateway 监听 `127.0.0.1:8787`，不对外暴露，只由 cloudflared 转发。**POC 阶段的密钥路径段被去掉** —— 它是 No Auth 时期的替代品，有 OAuth 后不再需要，且它会落进 Cloudflare 访问日志 | POC 的 `grande-poc` 隧道与 `gg.agentjoey.ai` 待退役 |
 
 ### 3.1 三条铁律
 
@@ -158,13 +160,18 @@ GrandeGPT 对你的 canonical checkout 只做两件事：
 ### 4.4 MCP 服务端表面与认证
 
 > **2026-07-26 更正：本节原写「这套协议表面不能跳过 —— 它是 ChatGPT 建立连接的硬性前置条件」，
-> 那句是错的。** POC 全程使用 **No Authentication** 并完整跑通了 40 次工具调用，
-> OAuth 从来不是连接的前置条件。见 D15。
+> 那句是错的。** POC 全程使用 **No Authentication** 并完整跑通了 40 次工具调用 ——
+> OAuth 不是连接的前提。
 >
-> **S0 决定：Tunnel + No Auth，不实现 OAuth。** 本节以下内容改为「若将来回到
-> Server URL 模式或开放多客户端时的实现要求」，S0 不执行。
+> **但 S0 仍然要做 OAuth，理由不同（D16）**：端点公网可达，而 S0 在真实仓库上执行真实代码。
+> 「公网 + 无认证 + 可执行代码」在本项目的威胁模型下不可接受。区别在于——
+> 这是**我们的要求**，不是**平台的前提**。这个区分很重要：它意味着认证方案由我们的威胁模型
+> 决定，而不是被平台绑死。
+>
+> ChatGPT 的 Authentication 下拉只有 **OAuth / No Auth / Mixed** 三项（已实地确认），
+> 没有静态 API key 或自定义 header 选项，因此只能走 OAuth。
 
-若将来需要 OAuth，须实现：
+S0 必须实现：
 
 | 项 | 要求 |
 |---|---|
