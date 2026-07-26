@@ -36,15 +36,28 @@ cd /Users/xtation/AgentWorks/GPT_Workspace/grande-gpt/poc && echo "https://gg.ag
 
 secret 只存在于 `poc/.env`（已 gitignore），**不要**把完整 URL 贴进任何会被提交的文件。
 
-### 0.3 在 ChatGPT 中添加连接器
+### 0.3 在 ChatGPT 中添加 app
 
-1. 网页版 → **Settings → Security and login** → 启用 developer mode
-2. **Settings → Plugins**（或 `chatgpt.com/plugins`）→ **+** 新建 developer-mode app
-3. URL 填 0.2 输出的完整地址
+> **别找「连接器」——它已经不叫这个了。** 命名改过三轮：connectors → apps（2025-12）
+> → plugins（2026-07-09 目录与 Codex 合并时）。设置项现在叫 **Plugins**，
+> UI 里这个东西的正式名称是 **developer-mode app**。
+
+1. 网页版 → **Settings → Security and login** → 打开 **Developer mode**
+   **← 不先开这个，第 2 步的菜单根本不会出现**
+2. **Settings → Plugins**（或直接 `chatgpt.com/plugins`）→ **+** → 新建 developer-mode app
+3. URL 填 §0.2 输出的完整地址
 4. 认证方式选 **No Authentication**
 5. 保存后确认工具列表显示 **9 个** `grande_*` 工具
+   —— 新建的 app 初始存放在 **Drafts** 下，列表里没看到"已启用"是正常的
 
-> 若此步失败，把失败信息记进观察记录的「未覆盖项」—— 这本身就是 S0 必须解决的问题。
+#### ⚠️ 每个对话都要单独启用一次
+
+在对话输入框的 **「+」菜单 → Developer mode** 里勾上本 app。
+
+**本协议要求每轮用全新对话，所以三轮你要各启用一次。** 忘了启用的症状是模型回你
+「我没有这些工具」—— **那不是 P-1 FAIL，只是没启用，别记成实验结果。**
+
+> 若添加这一步本身失败，把失败信息记进观察记录的「未覆盖项」—— 这本身就是 S0 必须解决的问题。
 
 ### 0.4 确认训练数据设置（规格 D12）
 
