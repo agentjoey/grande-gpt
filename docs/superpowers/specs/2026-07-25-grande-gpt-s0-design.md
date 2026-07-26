@@ -182,6 +182,25 @@ S0 必须实现：
 | 每请求校验 | token 签名、`iss`、`exp`/`nbf`、`aud`（须匹配本端点资源标识）、scope |
 | 失败响应 | `401` + `WWW-Authenticate` 指向 protected resource metadata |
 | 客户端注册 | DCR 可选；优先 CIMD，在 AS 元数据声明 `client_id_metadata_document_supported: true` |
+| **refresh_token** | **必须实现**（见下方 U1 实测） |
+
+> **2026-07-26 U1 实测结论**（详见 [`spike/findings/U1-oauth.md`](../../../spike/findings/U1-oauth.md)）：
+> ChatGPT 与本设计的 OAuth 握手**已端到端跑通**，且 **D5 的每-repo `aud` 绑定被坐实** ——
+> ChatGPT 从每-repo 元数据自动发现 `resource`，在 `/authorize` 与 `/token` 全程携带，
+> 签发的令牌 `aud` 精确等于该端点 URL。
+>
+> 实测顺序为：`POST /mcp` → 401 → 顺 `WWW-Authenticate` 取**每-repo**元数据 → 认证后调用。
+> **因此 `WWW-Authenticate: Bearer resource_metadata="..."` 是承重的**，S0 必须有测试覆盖。
+>
+> ⚠️ **发现一个会导致一小时后断线的缺口**：ChatGPT 注册时请求
+> `grant_types: ["authorization_code", "refresh_token"]`，而 spike 的 AS 只声明
+> `["authorization_code"]`、不签发 refresh token、access_token 1 小时过期
+> ——**过期后没有续期路径，连接断开、需重新授权**。
+> 次生问题：`/register` 照单全收了它不支持的 grant type，未按 RFC 7591 回传实际支持的子集。
+>
+> **S0 必须**：① 实现 `refresh_token` grant 并在元数据如实声明；
+> ② `/register` 校验并回传实际支持的 `grant_types`；③ 明确 access_token 寿命与续期策略，
+> 不得靠「长期不过期」回避 refresh。
 
 **`aud` 必须绑定具体端点**（`/mcp/grande-gpt` 与 `/mcp/project-b` 的令牌不可互换）——
 这是 D5「隔离由协议层强制」的实际落点。若 `aud` 校验放松，每 repo 一个端点就退化为纯约定。

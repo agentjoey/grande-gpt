@@ -1,83 +1,128 @@
-# U1 · OAuth 2.1 + PKCE 握手 —— 结论：**刻意未验证**（S0 不需要）
+# U1 · OAuth 2.1 + PKCE 与 ChatGPT 的握手 —— 结论：**PASS**
 
-**日期** 2026-07-26 · **状态**：服务端已实现并本地验证通过，但**未与 ChatGPT 做握手实测**。
+**日期** 2026-07-26 · **端点** `https://grande.agentjoey.ai/mcp/grande-gpt`
+**接入** Cloudflare 隧道 `grande-gpt` → 本机 `127.0.0.1:8787`（规格 D16/D17）
+**客户端** ChatGPT 网页版 developer-mode app，Authentication = OAuth
 
 ---
 
-## 为什么不做
+## 结论
 
-U1 原本的立项理由是规格里的一句话：
+**PASS。** ChatGPT 完整走通 DCR → authorize → token → 认证后调用工具，
+返回 `{ok: true, pong: true, repoId: "grande-gpt"}`。
 
-> 即使单用户，这套协议表面也**不能跳过** —— 它是 ChatGPT 建立连接的硬性前置条件。
+**并且 D5「每 repo 一个端点、令牌 `aud` 绑定端点」在 ChatGPT 侧端到端坐实** ——
+它在 `/authorize` 与 `/token` 两处都携带了 `resource`，签发的令牌 `aud` 精确等于
+该端点 URL。每-repo 隔离是协议层强制的边界，不是命名约定。
 
-**那句是错的，而且我们自己的 POC 早已证伪它** —— POC 全程使用 **No Authentication**，
-完整跑通 40 次工具调用、跨 5 条消息 44 分钟。OAuth 从来不是连接的前置条件。
+---
 
-叠加 D13（S0 改用 Secure MCP Tunnel）之后：
+## 四项观察
 
-| | Server URL 模式 | Tunnel 模式（S0 采用） |
+### ① 注册方式：DCR，不是 CIMD
+
+ChatGPT 先检查 CIMD，UI 明确提示 *"CIMD is unavailable because the server did not
+advertise CIMD support"*，随后退回 DCR。实际注册请求体：
+
+```json
+{
+  "client_name": "ChatGPT",
+  "redirect_uris": ["https://chatgpt.com/connector/oauth/<opaque>"],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none"
+}
+```
+
+官方文档说 CIMD 是**更受推荐**的方式。S0 若想避免每次连接都动态注册一个新 client，
+可在 AS 元数据加 `"client_id_metadata_document_supported": true`。**本轮未验证 CIMD 路径。**
+
+### ② 发现顺序：先撞 401，再顺 `WWW-Authenticate` 找元数据
+
+```
+POST /mcp/grande-gpt                                    → 401（无 Bearer）
+GET  /.well-known/oauth-protected-resource/mcp/grande-gpt   ← 顺着响应头找过来
+POST /mcp/grande-gpt                                    → 已认证，200
+```
+
+两个推论：
+
+- **`WWW-Authenticate: Bearer resource_metadata="..."` 是承重的。** 缺失或写错，
+  握手根本起不来。S0 实现时这是必须有测试覆盖的一条。
+- ChatGPT 用的是**每-repo 那份**元数据（`/.well-known/oauth-protected-resource/mcp/<repoId>`），
+  不是根路径那份。根路径那份因为没有 repoId 可用而固定指向默认 repo，属观察性质、
+  非权威 —— 实测证明 ChatGPT 不依赖它。
+
+### ③ PKCE：ChatGPT 主动发 S256
+
+`/authorize` 与 `/token` 的实际参数：
+
+```
+code_challenge_method : "S256"
+code_challenge        : <43 字符 base64url>
+code_verifier         : <64 字符>（token 交换时）
+```
+
+无需强制，ChatGPT 自己就发。我们服务端的**无条件** PKCE 校验（修掉了参考代码里
+`rec.challenge && ...` 那个「客户端不传 challenge 就跳过校验」的绕过）与之相容。
+
+### ④ `aud` 精确绑定端点 —— D5 成立
+
+```
+/authorize ← resource: "https://grande.agentjoey.ai/mcp/grande-gpt"
+             scope:    "grande:repo:grande-gpt"
+/token     ← resource: "https://grande.agentjoey.ai/mcp/grande-gpt"
+/token     → aud:      "https://grande.agentjoey.ai/mcp/grande-gpt"
+/mcp       ← 校验通过，sub=spike-user, aud 匹配本端点
+```
+
+ChatGPT 从 UI 的 **Resource** 字段（由每-repo 元数据自动发现）取值并全程携带。
+配套地，用 `grande-gpt` 的令牌打其他端点会被 JWT 校验拒绝
+（上一轮以 `demo-app` / `other-repo` 实测过：401 `JWTClaimValidationFailed`）。
+
+---
+
+## ⚠️ 实测发现的真问题：refresh_token 缺口
+
+| | |
+|---|---|
+| ChatGPT 注册时请求 | `grant_types: ["authorization_code", "refresh_token"]` |
+| 我们 AS 元数据声明 | `grant_types_supported: ["authorization_code"]` |
+| 我们实际签发 | 仅 access_token，**1 小时过期，无 refresh token** |
+
+**后果：令牌过期后 ChatGPT 没有续期路径，连接断开，用户必须重新授权。**
+一小时一次，不可接受。
+
+**次生问题**：我们的 `/register` **默默接受**了这个包含 `refresh_token` 的注册请求，
+没有按 RFC 7591 回退成实际支持的子集并在响应中如实告知。ChatGPT 因此以为可以续期。
+
+**这条只有真跑握手才能发现** —— curl 自测全绿、静态检查也发现不了，因为它不是错误，
+是**双方对能力的理解不一致**。这正是 U1 存在的理由。
+
+### 对 S0 的要求
+
+1. **必须实现 refresh_token**（授权码流 + `refresh_token` grant），并在 AS 元数据
+   如实声明 `grant_types_supported`。
+2. `/register` 应按 RFC 7591 校验并回传实际支持的 `grant_types`，而不是照单全收。
+3. access_token 的有效期与 refresh 策略需明确 —— 单用户场景下可放宽 access_token
+   寿命，但不能靠「长期不过期」来回避 refresh。
+
+---
+
+## 未覆盖
+
+| # | 未验证 | 何时需要 |
 |---|---|---|
-| 端点是否公网可达 | 是 | **否** |
-| 谁能触达 | 任何知道 URL 的人 | 只有绑定用户 org 的 OpenAI 中继 |
-| OAuth 的边际价值 | 高 —— 它是唯一的门 | **低** —— 隧道本身即是门 |
-
-OAuth 实际提供的是**按用户身份、令牌过期、scope 强制**三项，而 S0 是**严格单用户**（D2）。
-三项在单用户 + 私有隧道下都不适用。
-
-**Human Owner 决定：S0 = Tunnel + No Auth，不实现 OAuth（D15）。**
+| 1 | **CIMD 路径** —— 本轮走的是 DCR | 若 S0 不希望每次连接动态注册新 client |
+| 2 | **令牌过期后的实际行为** —— 未等满 1 小时观察 ChatGPT 如何反应 | 实现 refresh 前应先观察一次，确认失败形态 |
+| 3 | **多 repo 并存时 ChatGPT 的行为** —— 目前只注册了 `grande-gpt` 一个 | 第二个仓库进入 workspace 时 |
+| 4 | 移动端的 OAuth 流程 | P-6 已证明 iOS 可读写，但那是 No Auth 时期；OAuth 下未测 |
 
 ---
 
-## ⚠️ 这个决定的连带后果（不要丢掉）
+## 本轮建立的资产
 
-**它把 U3（Tunnel 可用性与延迟）从可选变成了前置条件。**
-
-POC 能用 No Auth + 公网 URL，是因为它只提供**假数据**。S0 在**真实仓库上执行真实代码** ——
-同样的组合放到 S0 就是「公网上一个无认证的代码执行端点」。
-
-**No Auth 只在 Tunnel 成立时才可接受。** 若 U3 证明 Tunnel 不可用或过慢、S0 退回
-Server URL 模式，则 OAuth 重新成为必需，D15 作废，本文档的结论需重新评估。
-
----
-
-## 已经做了什么（未浪费，可直接复用）
-
-`spike/oauth/server.ts` 已实现并**经 curl 端到端验证通过**：
-
-- 两份发现文档格式正确：`/.well-known/oauth-protected-resource`（含 `resource` /
-  `authorization_servers` / `scopes_supported`）与 `/.well-known/oauth-authorization-server`
-  （含 `authorization_endpoint` / `token_endpoint` / `registration_endpoint` / `jwks_uri` /
-  `code_challenge_methods_supported: ["S256"]`）
-- 未认证访问 `/mcp` 返回 **401 + `WWW-Authenticate: Bearer resource_metadata="..."`**
-- 完整流程走通：`/register` → `/authorize`（真实 S256 challenge）→ `/token`（匹配的 verifier）
-  → 带 Bearer 的 `/mcp` → `tools/list` 显示 `spike_ping` → 调用返回 `pong`
-- 负向测试：**PKCE verifier 不匹配被拒**（`invalid_grant` / "PKCE mismatch"）；
-  已消费的 code 无法重放；四种伪造 token 全部被拒且错误原因可区分
-  （`JWTClaimValidationFailed` / `JWTExpired` / `JWSSignatureVerificationFailed`）
-- JWT 的 `aud` 确认等于资源标识
-
-实现过程中发现并修掉了计划参考代码里的一个**真实绕过**：原写法 `rec.challenge && ...`
-在客户端不传 `code_challenge` 时会**静默跳过整个 PKCE 校验**。已改为无条件强制，
-并补了负向测试。
-
-**因此残留未知是窄的**：不是「我们的 AS 能不能用」（已证明能），
-而是「**ChatGPT 的 OAuth 客户端能否与之握手**」——尤其是它走 DCR 还是 CIMD、
-以及它是否正确回传 `aud`（这条关系到规格 D5「每 repo 一个端点、`aud` 绑定端点」
-能否落地）。
-
----
-
-## 若将来需要重启 U1
-
-代码在 git 历史里（提交 `33b9bd7`）。重跑只需：
-
-1. `cd spike && OAUTH_SECRET=<随机> ISSUER=https://<域名> PORT=8788 node oauth/server.ts`
-2. 把 `<域名>` 加进某条 cloudflared 隧道的 ingress 并建 DNS 记录
-3. ChatGPT → Settings → Plugins → **+** → Server URL 填 `https://<域名>/mcp`，
-   Authentication 选 **OAuth**
-4. 观察服务端日志：ChatGPT 打了哪些端点、顺序如何、`code_challenge_method` 实际取值、
-   `/register` 是否被调用（DCR vs CIMD）、令牌 `aud` 的实际取值
-
-本轮建立的临时基础设施已拆除：服务已停、`oauth-spike.agentjoey.ai` 已从 ingress 摘除
-（返回 404）、`oauth/.env` 已删。**Cloudflare 面板里那条 CNAME 记录需手动删除** ——
-`cloudflared` 不提供删除 DNS 记录的子命令。
+- `spike/oauth/server.ts` —— OAuth AS + 每-repo 受保护 MCP 端点，公网实测通过。
+  **它是 S0-D 认证层的直接原型**，不再是一次性 spike 代码。
+- Cloudflare 隧道 `grande-gpt` → `grande.agentjoey.ai`（规格 D17），production 命名。
+- ChatGPT 侧的 developer-mode app「GrandeGPT」已配置并授权成功。
