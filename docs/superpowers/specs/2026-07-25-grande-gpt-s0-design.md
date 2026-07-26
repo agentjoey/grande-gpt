@@ -254,6 +254,21 @@ ChatGPT 的静默截断会让模型在残缺数据上继续推理而毫不知情
 且 ChatGPT 支持会话内「记住」批准 —— 实际体感是**每个会话开头确认 2 次，之后无感**。
 新会话重置，这对安全反而是好事。
 
+> **2026-07-26 修订**：实际 UI 比上述假设宽松。每个 developer-mode app 有独立的
+> **Permissions** 页，四档：`Always ask` / `Allow read actions` / `Allow low-risk actions`（默认）
+> / `Allow all actions`。**per-app 权限档是比工具粒度更有效的杠杆** —— 配一次，之后只有写
+> 操作才问，不必每会话重来。
+>
+> 这同时**验证了注解必须如实标注的价值**：正因为六个只读工具标了 `readOnlyHint: true`，
+> `Allow read actions` 档才能精确放行轮询（`grande_run_result`）而拦住写入。若图省事全标成
+> 写工具，该档位即失效。
+>
+> **对 POC 的直接影响**：`Always ask` 档下每次轮询都要人工点确认，**P-1 结构上无法测量**。
+> 因此 POC 固定用 `Allow read actions`（第三轮改默认档做对照），见 `poc/PROTOCOL.md` §0.3.1。
+>
+> P-4 的问题相应从「每次弹框烦不烦」变为「在此权限模型下实际摩擦有多大」——
+> 明显更乐观的问题。
+
 ### 5.5 统一响应信封
 
 ```json

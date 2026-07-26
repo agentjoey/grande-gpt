@@ -50,6 +50,24 @@ secret 只存在于 `poc/.env`（已 gitignore），**不要**把完整 URL 贴�
 5. 保存后确认工具列表显示 **9 个** `grande_*` 工具
    —— 新建的 app 初始存放在 **Drafts** 下，列表里没看到"已启用"是正常的
 
+#### 0.3.1 权限档（Permissions）—— 直接决定 P-1 能不能测
+
+app 建好后进它的 **Permissions** 页，四选一。**选「Allow read actions」**（第二项）。
+
+| 档位 | 对本实验的影响 |
+|---|---|
+| Always ask | ❌ **每次轮询都要人工点确认 → P-1 结构上无法测量**，只会得到一个什么都说明不了的 FAIL |
+| **Allow read actions** ✅ | 六个只读工具（含 `grande_run_result`）自动放行，三个写工具弹框。**P-1 与 P-4 同时可测** |
+| Allow low-risk actions（默认） | ⚠️ 那句 "may deny actions involving sensitive information" 是未公开的启发式；跑到一半被拒会让人**分不清是模型问题还是平台拒的** |
+| Allow all actions | P-4 恒为 0 个弹框——那是设置的产物，不是发现 |
+
+关键在 **`grande_run_result` 标的是 `readOnlyHint: true`**，所以「Allow read actions」下轮询
+不会被人工点击卡住，而这正是 P-1 要观察的行为。
+
+> **第三轮建议改用默认档「Allow low-risk actions」**，作为对照：看默认档到底自动放行了
+> 哪些工具、有没有触发那个 "may deny"。零额外成本，多一份 S0 需要的数据。
+> **记得在观察记录里写明每轮用的是哪一档** —— 不写的话 P-4 的数字无法解释。
+
 #### ⚠️ 每个对话都要单独启用一次
 
 在对话输入框的 **「+」菜单 → Developer mode** 里勾上本 app。
