@@ -81,7 +81,13 @@ ChatGPT 依据 `readOnlyHint` 注解判定读/写：**没有该注解的工具�
 
 ## 5. 传输与服务端形态（官方）
 
-- **公网 HTTPS**，稳定 URL，惯例以 `/mcp` 结尾
+> **2026-07-26 更正**：本节原写「必须公网 HTTPS」，**不准确**。ChatGPT 新建 developer-mode app
+> 的对话框里，Connection 有 **Server URL / Tunnel** 两个选项。选 Tunnel 时走 OpenAI 官方的
+> **Secure MCP Tunnel**：本机跑 `tunnel-client` 守护进程，**只出不进** —— 它主动向 OpenAI
+> 拉取排队的 MCP 请求、转发给本地服务、再从同一连接送回响应。**服务端完全不需要公网可达，
+> 不开任何入站端口。** 详见 §5.1。
+
+- **公网 HTTPS**，稳定 URL，惯例以 `/mcp` 结尾 —— **仅 Server URL 模式适用**
 - **Streamable HTTP** 传输（developer mode 亦支持 SSE，生产用 streamable HTTP）
 - **服务端应无状态** —— 会话状态由我们自己按 `taskId` 持久化，这与"新会话用 task ID 恢复上下文"天然吻合
 - 工具需提供明确的 input schema，返回结构化数据时提供 output schema
@@ -91,6 +97,39 @@ ChatGPT 依据 `readOnlyHint` 注解判定读/写：**没有该注解的工具�
 [MCP 概念](https://developers.openai.com/apps-sdk/concepts/mcp-server)
 
 ---
+
+### 5.1 Secure MCP Tunnel（S0 的推荐接入方式）
+
+**形态**：从 [openai/tunnel-client](https://github.com/openai/tunnel-client) 下载二进制，在能触达
+MCP 服务的网络内运行。只需出站 HTTPS 到 `api.openai.com:443`（或 mTLS 端点）。
+
+```bash
+export CONTROL_PLANE_API_KEY="sk-..."
+tunnel-client init --profile <name> --tunnel-id tunnel_xxx --mcp-server-url http://localhost:8787/mcp
+tunnel-client doctor --profile <name> --explain
+tunnel-client run --profile <name>
+```
+
+在 ChatGPT 侧：**Settings → Plugins → +** → Connection 选 **Tunnel** → 选中已创建的隧道
+（或粘贴 `tunnel_id`）。`tunnel_id` 是稳定的。
+
+| 维度 | 结论 |
+|---|---|
+| 支持的调用面 | ChatGPT、Codex、Responses API 等 |
+| 凭据 | **需要 OpenAI Platform 的 runtime API key（`sk-...`），与 ChatGPT 订阅是两回事**；权限走 org 级 RBAC（Tunnels Read/Use/Manage） |
+| 价格 | **官方文档未列**，需自行确认 |
+| 传输 | **当前用长轮询**；官方博客明说这是初期方案而非最终设计 |
+| 流式 | 连接器要求流式结果时，隧道路径可转发 SSE |
+| 认证 | 隧道只是传输层；OAuth discovery 可穿隧道，但授权服务器需对 `tunnel-client` 所在主机可达 |
+
+**为什么这对本项目重要**：它消除了公网暴露。最终审查指出，Server URL 模式下
+**任何人知道 URL 就能往观测日志里追加伪造事件**（一段格式正确的 `grande_run` +
+快速 `grande_run_result` 会渲染成"自主轮询"，凭空制造 P-1 PASS）——那是证据完整性问题，
+不是保密性问题。隧道模式让只有 OpenAI 能触达服务，且绑定 org。
+
+**为什么 POC 阶段不用它**：P-1 的测量对象就是调用间隔，而长轮询的缓冲特性未知 ——
+在测时序的实验前引入它会产生无法排除的混杂因素（报告里一个 30 秒间隔，分不清是模型慢
+还是隧道缓冲）。POC 用已实测过时序特性的 Cloudflare 隧道，**S0 换成本方式**。
 
 ## 6. 认证（官方）
 

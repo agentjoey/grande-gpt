@@ -45,7 +45,7 @@ secret 只存在于 `poc/.env`（已 gitignore），**不要**把完整 URL 贴�
 1. 网页版 → **Settings → Security and login** → 打开 **Developer mode**
    **← 不先开这个，第 2 步的菜单根本不会出现**
 2. **Settings → Plugins**（或直接 `chatgpt.com/plugins`）→ **+** → 新建 developer-mode app
-3. URL 填 §0.2 输出的完整地址
+3. Connection 选 **Server URL**（**不是 Tunnel**，理由见下），URL 填 §0.2 输出的完整地址
 4. 认证方式选 **No Authentication**
 5. 保存后确认工具列表显示 **9 个** `grande_*` 工具
    —— 新建的 app 初始存放在 **Drafts** 下，列表里没看到"已启用"是正常的
@@ -58,6 +58,24 @@ secret 只存在于 `poc/.env`（已 gitignore），**不要**把完整 URL 贴�
 「我没有这些工具」—— **那不是 P-1 FAIL，只是没启用，别记成实验结果。**
 
 > 若添加这一步本身失败，把失败信息记进观察记录的「未覆盖项」—— 这本身就是 S0 必须解决的问题。
+
+#### 为什么本轮选 Server URL 而不是 Tunnel
+
+对话框里的 **Tunnel** 是 OpenAI 官方的 Secure MCP Tunnel：本机跑 `tunnel-client` 守护进程，
+只出不进，服务完全不暴露在公网。**那对 S0 是更优架构**（它消除了「知道 URL 就能往观测日志
+里追加伪造事件」这个证据完整性风险），但本轮 POC 不用它，理由是方法学的：
+
+**官方博客写明该隧道当前用长轮询传输，且是初期方案。而 P-1 的整个测量就是调用间隔** ——
+在测时序的实验前引入缓冲特性未知的传输，会让报告里的一个 30 秒间隔无法区分「模型慢」
+和「隧道缓冲」，而 `HUMAN_GAP_MS` 的整套阈值论证都建立在传输延迟可忽略之上。
+
+现用的 Cloudflare 隧道已端到端实测（initialize / 9 个工具 / cursor 真翻页 / 错误 secret 404），
+时序特性已知。
+
+> **三轮跑完后建议顺手试一次 Tunnel 模式**（约 20 分钟，实验已结束、零风险），
+> 特别记录它给调用往返增加了多少延迟 —— 这是 S0 切换前最想知道的数。
+> 前置条件：需要 OpenAI Platform 的 API key（`sk-...`，与 ChatGPT 订阅是两回事），
+> 且官方未公布价格。
 
 ### 0.4 确认训练数据设置（规格 D12）
 
