@@ -55,6 +55,7 @@ export function openDb(layout: Layout): DatabaseSync {
       decision     TEXT NOT NULL,
       state        TEXT NOT NULL,
       pathsTouched TEXT NOT NULL,
+      reason       TEXT,
       at           INTEGER NOT NULL,
       updatedAt    INTEGER NOT NULL
     );

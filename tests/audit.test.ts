@@ -58,34 +58,44 @@ describe("beginAudit()", () => {
     expect(getAudit(db, a.opId)?.inputDigest).toBe(getAudit(db, b.opId)?.inputDigest);
     expect(getAudit(db, a.opId)?.inputDigest).not.toBe(getAudit(db, c.opId)?.inputDigest);
   });
+
+  it("刚落 INTENT 时 decision 为 PENDING——Policy 尚未裁决，账本不能替它编结论", () => {
+    const h = beginAudit(db, { taskId: null, tool: "t", input: {} });
+    expect(getAudit(db, h.opId)?.decision).toBe("PENDING");
+  });
 });
 
 describe("状态推进", () => {
   it("完整成功路径：INTENT → ALLOWED → EXECUTING → SUCCEEDED", () => {
     const h = beginAudit(db, { taskId: "task_1", tool: "grande_run", input: {} });
-    h.allowed();
-    h.executing();
-    h.succeeded(["/w/a.ts"]);
+    expect(h.allowed()).toBe(true);
+    expect(h.executing()).toBe(true);
+    expect(h.succeeded(["/w/a.ts"])).toBe(true);
     const row = getAudit(db, h.opId);
     expect(row?.decision).toBe("ALLOWED");
     expect(row?.state).toBe("SUCCEEDED");
     expect(row?.pathsTouched).toEqual(["/w/a.ts"]);
+    expect(row?.reason).toBeNull();
   });
 
   it("被 Policy 拒绝时记 DENIED 且停在 FAILED，不进入 EXECUTING", () => {
     const h = beginAudit(db, { taskId: null, tool: "grande_repo_edit", input: {} });
-    h.denied("路径不在允许写入范围内");
+    expect(h.denied("路径不在允许写入范围内")).toBe(true);
     const row = getAudit(db, h.opId);
     expect(row?.decision).toBe("DENIED");
     expect(row?.state).toBe("FAILED");
+    expect(row?.pathsTouched).toEqual([]);
+    expect(row?.reason).toBe("路径不在允许写入范围内");
   });
 
   it("失败路径记录原因", () => {
     const h = beginAudit(db, { taskId: null, tool: "t", input: {} });
-    h.allowed();
-    h.executing();
-    h.failed("STALE_FILE");
-    expect(getAudit(db, h.opId)?.state).toBe("FAILED");
+    expect(h.allowed()).toBe(true);
+    expect(h.executing()).toBe(true);
+    expect(h.failed("STALE_FILE")).toBe(true);
+    const row = getAudit(db, h.opId);
+    expect(row?.state).toBe("FAILED");
+    expect(row?.reason).toBe("STALE_FILE");
   });
 
   it("updatedAt 随状态推进而变化，at 保持首次写入时刻", async () => {
@@ -95,7 +105,66 @@ describe("状态推进", () => {
     h.allowed();
     const second = getAudit(db, h.opId)!;
     expect(second.at).toBe(first.at);
-    expect(second.updatedAt).toBeGreaterThanOrEqual(first.updatedAt);
+    expect(second.updatedAt).toBeGreaterThan(first.updatedAt);
+  });
+});
+
+describe("forward-only 保证（CAS）", () => {
+  it("① 终态不可被改写成另一终态：SUCCEEDED 之后 failed() 必须是 no-op", () => {
+    const h = beginAudit(db, { taskId: null, tool: "t", input: {} });
+    h.allowed();
+    h.executing();
+    expect(h.succeeded(["/w/a.ts"])).toBe(true);
+    const before = getAudit(db, h.opId);
+
+    expect(h.failed("boom", ["/w/b.ts"])).toBe(false);
+
+    const after = getAudit(db, h.opId);
+    expect(after).toEqual(before);
+    expect(after?.state).toBe("SUCCEEDED");
+  });
+
+  it("② 状态不可倒退：executing() 之后再调 allowed() 不能把 state 拉回 INTENT", () => {
+    const h = beginAudit(db, { taskId: null, tool: "t", input: {} });
+    expect(h.allowed()).toBe(true);
+    expect(h.executing()).toBe(true);
+    const before = getAudit(db, h.opId);
+    expect(before?.state).toBe("EXECUTING");
+
+    expect(h.allowed()).toBe(false);
+
+    const after = getAudit(db, h.opId);
+    expect(after).toEqual(before);
+    expect(after?.state).toBe("EXECUTING");
+  });
+
+  it("③ DENIED 不可能同时带非空 pathsTouched——结构性不可能，不是靠调用方自律", () => {
+    const h = beginAudit(db, { taskId: null, tool: "t", input: {} });
+    h.allowed();
+    h.executing();
+    expect(h.failed("boom", ["/w/touched.ts"])).toBe(true);
+    const before = getAudit(db, h.opId);
+
+    // 事后想把一条已经执行过、留下 pathsTouched 的记录伪装成「从未执行过」的 DENIED
+    expect(h.denied("late denial")).toBe(false);
+
+    const after = getAudit(db, h.opId);
+    expect(after).toEqual(before);
+    expect(after?.decision).not.toBe("DENIED");
+    expect(after?.pathsTouched).toEqual(["/w/touched.ts"]);
+  });
+
+  it("输掉 CAS 的调用返回 false，且整行（包括 updatedAt）不变", () => {
+    const h = beginAudit(db, { taskId: null, tool: "t", input: {} });
+    h.allowed();
+    h.executing();
+    expect(h.succeeded(["/w/a.ts"])).toBe(true);
+    const before = getAudit(db, h.opId);
+
+    expect(h.succeeded(["/w/b.ts"])).toBe(false);
+
+    const after = getAudit(db, h.opId);
+    expect(after).toEqual(before);
   });
 });
 
