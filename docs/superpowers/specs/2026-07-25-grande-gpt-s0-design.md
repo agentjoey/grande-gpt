@@ -578,15 +578,37 @@ job
 
 audit
   opId TEXT PK · taskId · tool · inputDigest
-  decision TEXT            -- ALLOWED | DENIED
+  decision TEXT            -- PENDING | ALLOWED | DENIED
   state    TEXT            -- INTENT | EXECUTING | SUCCEEDED | FAILED
-  pathsTouched JSON · at TIMESTAMP
+  reason   TEXT NULL       -- 拒绝或失败的原因
+  pathsTouched JSON · at TIMESTAMP · updatedAt TIMESTAMP
 ```
 
 **`audit` 先写 `INTENT` 再执行**（草案 §14.1 的做法）。业务执行与审计不是单一事务，
 但未完成状态可被后台恢复器发现并核对（恢复器本身属 S4）。
 
 S0 不含：`lease`、`checkpoint`、`trash`、`userId`。
+
+**三处在 S0-A 实现期间加固，均由代码审查实测催生：**
+
+1. **`decision` 的初值是 `PENDING`，不是 `ALLOWED`。** 原设计在写 `INTENT` 行时就把
+   `decision` 定为 `ALLOWED`，而那一刻 Policy 还没裁决。崩溃在这个窗口里会留下一条
+   「已放行」的记录，可实际上没有任何东西放行过它 —— 在一个**唯一职责就是说实话**的
+   组件里，这是 fail-open 默认值。`PENDING` 陈述的是事实。
+
+2. **句柄的「只能前进」由写入本身强制，不靠调用纪律。** 每个状态跃迁都带
+   compare-and-swap 谓词，方法返回 `boolean` 表明本次调用是否真的写入了 —— 竞争失败
+   可被发现，而非静默丢弃。实测（修复前）可以：把 `SUCCEEDED` 改写成 `FAILED`、
+   把 `EXECUTING` 退回 `INTENT`、以及产生 `decision=DENIED` 却带非空 `pathsTouched`
+   的**自相矛盾记录**（拒绝意味着从未执行，却记录了动过的文件）。
+   修复后穷举全部 3905 条调用序列、18555 个终态，零违例。
+
+   这与 `job.finishJob` 缺 CAS 是同一类缺陷 —— 该类缺陷在本项目已出现两次，
+   **凡「状态只能单向推进」的地方，都必须把它写进 SQL 谓词**。
+
+3. **`reason` 落库。** 原接口收下 `reason` 参数却丢弃它。「为什么被拒」几乎就是审计
+   记录最有价值的字段；且同一方法的兄弟参数 `pathsTouched` 是持久化的，读源码的人
+   没有理由认为 `reason` 不是。
 
 ### 8.2 CLI 调试视图（D10）
 
