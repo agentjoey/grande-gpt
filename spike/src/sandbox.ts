@@ -110,8 +110,14 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   writeFileSync(profilePath, buildProfile(canonicalPaths), "utf8");
 
   // 环境清洗：只传必需的四个。宿主的 *_TOKEN / *_API_KEY / DYLD_* 一律不进沙箱。
+  //
+  // PATH 从 execRoots 派生，不再单独硬编码。原先两者是两处独立的常量，
+  // 于是修好了 profile 的放行清单、PATH 却仍指向 /opt/homebrew/bin——
+  // 直接 exec node 能过，但 pnpm 的 `#!/usr/bin/env node` shebang 解析不到 node，
+  // 报 `env: node: No such file or directory`（exit 127）。二者派生自同一来源后
+  // 不可能再分叉。
   const env = {
-    PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+    PATH: canonicalPaths.execRoots.join(":"),
     HOME: home,
     LANG: "en_US.UTF-8",
     TMPDIR: o.paths.jobTmp,

@@ -189,3 +189,40 @@ describe("runSandboxed()", () => {
     expect(Buffer.byteLength(r.stdout, "utf8")).toBeLessThanOrEqual(8192);
   });
 });
+
+describe("PATH 与 execRoots 同源（回归：修复前二者是两处独立硬编码）", () => {
+  /**
+   * 用 `env node` 而不是 shebang 脚本来测——两者走的是同一条 PATH 查找，
+   * 但 shebang 脚本必须放在 worktree 里，而 worktree 不在 execRoots，
+   * 会先撞上「不能 exec worktree 内文件」那个独立问题（exit 71），
+   * 把 PATH 的信号盖掉。见 findings/U2 里关于 worktree exec 的记录。
+   */
+  it("沙箱内经 PATH 能解析到 node —— pnpm 的 shebang 走的正是这条查找", async () => {
+    const r = await runSandboxed({
+      argv: ["/usr/bin/env", "node", "-e", "console.log('path-ok')"],
+      cwd: paths.worktree,
+      paths: { ...paths, execRoots: defaultExecRoots() },
+      timeoutMs: 20_000,
+      maxOutputBytes: 65_536,
+    });
+    // 修复前：PATH 硬编码为 /opt/homebrew/bin 而 node 在 /usr/local/bin，
+    // 此处会得到 exit 127 + "env: node: No such file or directory"
+    expect(r.stdout + r.stderr).not.toContain("No such file or directory");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("path-ok");
+  }, 25_000);
+
+  it("PATH 与 profile 的 execRoots 完全一致，不可能再分叉", async () => {
+    const roots = defaultExecRoots();
+    const r = await runSandboxed({
+      argv: ["/usr/bin/env"],
+      cwd: paths.worktree,
+      paths: { ...paths, execRoots: roots },
+      timeoutMs: 20_000,
+      maxOutputBytes: 65_536,
+    });
+    const line = r.stdout.split("\n").find((l) => l.startsWith("PATH="));
+    expect(line).toBeDefined();
+    expect(line!.slice("PATH=".length).split(":").sort()).toEqual([...roots].sort());
+  }, 25_000);
+});
