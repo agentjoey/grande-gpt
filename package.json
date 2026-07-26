@@ -1,0 +1,21 @@
+{
+  "name": "grande-gpt",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "grande": "./src/cli.ts" },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "cli": "node --disable-warning=ExperimentalWarning src/cli.ts"
+  },
+  "dependencies": {
+    "yaml": "2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}
