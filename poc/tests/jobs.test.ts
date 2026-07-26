@@ -78,3 +78,45 @@ describe("job 状态机", () => {
     expect(a).toContain(jobId.replace("job_", ""));
   });
 });
+
+describe("profile 决定输出（第一轮实测发现：lint/typecheck 曾都返回 vitest 输出）", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    resetJobs();
+    getRepo("demo-app")!.reset();
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("lint 返回 eslint 输出，不是 vitest", () => {
+    const { jobId } = startJob({ taskId: "t", repoId: "demo-app", profile: "lint" });
+    vi.advanceTimersByTime(JOB_DURATION_MS + 1);
+    const s = getJobStatus(jobId)!;
+    expect(s.tail.join("\n")).toContain("eslint");
+    expect(s.tail.join("\n")).not.toContain("vitest");
+  });
+
+  it("typecheck 返回 tsc 输出，不是 vitest", () => {
+    const { jobId } = startJob({ taskId: "t", repoId: "demo-app", profile: "typecheck" });
+    vi.advanceTimersByTime(JOB_DURATION_MS + 1);
+    const s = getJobStatus(jobId)!;
+    expect(s.tail.join("\n")).toContain("tsc --noEmit");
+    expect(s.tail.join("\n")).not.toContain("vitest");
+  });
+
+  it("lint/typecheck 不受 parser 缺陷影响，未修复时也通过", () => {
+    expect(getRepo("demo-app")!.isFixed()).toBe(false);
+    for (const profile of ["lint", "typecheck"]) {
+      const { jobId } = startJob({ taskId: "t", repoId: "demo-app", profile });
+      vi.advanceTimersByTime(JOB_DURATION_MS + 1);
+      expect(getJobStatus(jobId)!.state, profile).toBe("passed");
+    }
+  });
+
+  it("unit 仍与 parser 缺陷绑定：未修复时失败", () => {
+    const { jobId } = startJob({ taskId: "t", repoId: "demo-app", profile: "unit" });
+    vi.advanceTimersByTime(JOB_DURATION_MS + 1);
+    const s = getJobStatus(jobId)!;
+    expect(s.state).toBe("failed");
+    expect(s.tail.join("\n")).toContain("vitest");
+  });
+});

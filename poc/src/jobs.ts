@@ -51,7 +51,7 @@ export function startJob(args: { taskId: string; repoId: string; profile: string
   return { jobId };
 }
 
-const FAIL_TAIL = [
+const UNIT_FAIL_TAIL = [
   "$ vitest run",
   "",
   " ❯ tests/parser.test.ts (2 tests | 1 failed)",
@@ -65,7 +65,7 @@ const FAIL_TAIL = [
   "      Tests  1 failed | 1 passed (2)",
 ];
 
-const PASS_TAIL = [
+const UNIT_PASS_TAIL = [
   "$ vitest run",
   "",
   " ✓ tests/parser.test.ts (2 tests)",
@@ -74,23 +74,48 @@ const PASS_TAIL = [
   "      Tests  2 passed (2)",
 ];
 
+const LINT_TAIL = ["$ eslint .", "", "  0 problems (0 errors, 0 warnings)"];
+
+const TYPECHECK_TAIL = ["$ tsc --noEmit", "", "  No type errors found."];
+
+/**
+ * profile → 输出。第一轮实测中模型指出：跑 `lint` 和 `typecheck` 得到的都是
+ * `$ vitest run` 的输出，与 package.json 声明的 `eslint .` / `tsc --noEmit`
+ * 对不上，因此它明确拒绝声称 lint/typecheck 通过——那个判断是对的，
+ * 原实现只按 willPass 二选一，profile 存了却从不参与决定输出。
+ *
+ * 只有 unit 与场景（parser 空输入缺陷）绑定，会有失败态；lint 与 typecheck
+ * 不属于该场景，恒为通过。
+ */
+function tailFor(profile: string, willPass: boolean): string[] {
+  if (profile === "lint") return LINT_TAIL;
+  if (profile === "typecheck") return TYPECHECK_TAIL;
+  return willPass ? UNIT_PASS_TAIL : UNIT_FAIL_TAIL;
+}
+
+/** lint / typecheck 不参与 parser 场景，恒通过 */
+function passesFor(profile: string, willPass: boolean): boolean {
+  return profile === "lint" || profile === "typecheck" ? true : willPass;
+}
+
 export function getJobStatus(jobId: string): JobStatus | undefined {
   const rec = jobs.get(jobId);
   if (!rec) return undefined;
 
   const elapsed = Date.now() - rec.startedAt;
   const done = elapsed >= JOB_DURATION_MS;
-  const state: JobState = !done ? "running" : rec.willPass ? "passed" : "failed";
+  const passes = passesFor(rec.profile, rec.willPass);
+  const state: JobState = !done ? "running" : passes ? "passed" : "failed";
 
   return {
     jobId: rec.jobId,
     taskId: rec.taskId,
     profile: rec.profile,
     state,
-    exitCode: !done ? null : rec.willPass ? 0 : 1,
+    exitCode: !done ? null : passes ? 0 : 1,
     durationMs: done ? JOB_DURATION_MS : elapsed,
     failedTests: state === "failed" ? ["parser > handles empty input"] : [],
-    tail: !done ? [] : rec.willPass ? PASS_TAIL : FAIL_TAIL,
+    tail: !done ? [] : tailFor(rec.profile, rec.willPass),
     artifactId: `art_${rec.jobId.replace("job_", "")}`,
   };
 }
