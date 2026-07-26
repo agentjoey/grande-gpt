@@ -196,6 +196,35 @@ describe("executing() 门禁 Policy 决策（fix round：executing 谓词补 dec
   });
 });
 
+describe("succeeded() 门禁执行状态（fix round：succeeded 谓词收紧为 state='EXECUTING'）", () => {
+  // 修复前 succeeded() 的谓词只看 state NOT IN ('SUCCEEDED','FAILED')，INTENT
+  // 同样满足这个条件——跳过 allowed()/executing() 直接调用 succeeded() 会成功，
+  // 账本因此能记下 decision=PENDING、state=SUCCEEDED、pathsTouched 非空的一行：
+  // 一次操作「成功」了，而账本从未记录 Policy 批准过它、也从未记录它执行过。
+  // 这与已经堵死的「DENIED 却带非空 pathsTouched」是同一类自相矛盾记录，铁律
+  // 三要求能做成硬约束的不能靠调用方自律——调用方哪怕无视 executing() 的
+  // false 返回值径直调用 succeeded()，现在也不能得逞。完整合法链路
+  // allowed() → executing() → succeeded() 仍然成功并落 SUCCEEDED，见「状态
+  // 推进」describe 块里的「完整成功路径」测试，此处不重复覆盖。
+  it("succeeded() 在 executing() 之前调用必须是 no-op——不能凭空断言「已成功」", () => {
+    const h = beginAudit(db, { taskId: null, tool: "grande_repo_edit", input: { path: "/repo/src/a.ts" } });
+    expect(h.succeeded(["/repo/src/a.ts"])).toBe(false);
+    const row = getAudit(db, h.opId);
+    expect(row?.state).toBe("INTENT");
+    expect(row?.decision).toBe("PENDING");
+    expect(row?.pathsTouched).toEqual([]);
+  });
+
+  it("failed() 在 executing() 之前调用依然允许——执行开始前失败是真实场景（如 worktree 创建失败、操作被放弃），不是自相矛盾记录，不收紧", () => {
+    const h = beginAudit(db, { taskId: null, tool: "t", input: {} });
+    expect(h.failed("SETUP_FAILED")).toBe(true);
+    const row = getAudit(db, h.opId);
+    expect(row?.state).toBe("FAILED");
+    expect(row?.decision).toBe("PENDING");
+    expect(row?.reason).toBe("SETUP_FAILED");
+  });
+});
+
 describe("forward-only 保证（CAS）", () => {
   it("① 终态不可被改写成另一终态：SUCCEEDED 之后 failed() 必须是 no-op", () => {
     const h = beginAudit(db, { taskId: null, tool: "t", input: {} });

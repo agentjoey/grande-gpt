@@ -110,9 +110,19 @@ function digest(input: unknown): string {
  *   自己的谓词同样要求 `state='INTENT'`，而 `executing()` 一旦（哪怕误）写入，
  *   就已经把 `state` 推离了 INTENT，二者都会对着这一行永久输掉 CAS。已经在
  *   EXECUTING 或已终结的行再调用同样是 no-op。
- * - `succeeded()` / `failed()`：`state NOT IN ('SUCCEEDED','FAILED')`。行还
- *   没到终态就能被它们终结，但终态一旦落定就不能被另一个终态覆盖——堵死
- *   「SUCCEEDED 被改写成 FAILED」反过来也一样。
+ * - `succeeded()`：`state='EXECUTING'`。只有正处于 EXECUTING 的行才能被记
+ *   成功——`succeeded()` 是「工作已完成」的断言，账本里这行连「已开始执行」
+ *   都没记录过（还停在 INTENT，甚至 `decision` 都没转成 `ALLOWED`），就没有
+ *   任何依据支撑这个断言。跳过 `executing()` 直接调用 `succeeded()` 现在
+ *   必须是 no-op——堵的是与 `executing()` 那条同一类漏洞（fix round）：不能
+ *   让调用方靠自律去保证「按顺序调用、不跳步骤」。
+ * - `failed()`：`state NOT IN ('SUCCEEDED','FAILED')`，比 `succeeded()` 宽——
+ *   INTENT、EXECUTING 都能被它终结。这不是对称遗漏：执行**开始前**失败
+ *   （worktree 创建失败、操作被放弃等）是真实且真话的场景，`decision=PENDING,
+ *   state=FAILED` 没有断言任何工作被完成，跟上面 `succeeded()` 那种「无依据
+ *   断言成功」不是同一类问题，不需要也不应该收紧成 `state='EXECUTING'`。
+ * - 两者共同点：行一旦到达终态，就不能再被其中任何一个终结第二次——堵死
+ *   「SUCCEEDED 被改写成 FAILED」，反过来也一样。
  * - `allowed()` / `denied()`（Policy 的决策步）：`decision='PENDING' AND
  *   state='INTENT'`。选它而不是单独一个 `decision='PENDING'`，是因为决策和
  *   「行还没被 executing() 推走」这两件事必须同时成立——`state='INTENT'` 这
@@ -186,7 +196,7 @@ export function beginAudit(
     const res = db
       .prepare(
         "UPDATE audit SET state='SUCCEEDED', pathsTouched=?, updatedAt=? " +
-          "WHERE opId=? AND state NOT IN ('SUCCEEDED','FAILED')",
+          "WHERE opId=? AND state='EXECUTING'",
       )
       .run(JSON.stringify(paths), Date.now(), opId);
     return res.changes > 0;
