@@ -73,8 +73,20 @@ describe("job 读写", () => {
   it("listJobs 可按 taskId 过滤，且按开始时间倒序", () => {
     createJob(db, { jobId: "job_1", taskId: "task_1", profile: "unit", argv: [], pgid: null });
     createJob(db, { jobId: "job_2", taskId: "task_1", profile: "lint", argv: [], pgid: null });
+    // 两个 job 都挂在同一个 taskId 下不足以证明「过滤」——即使 listJobs 完全
+    // 忽略 taskId 参数、把所有 job 都列出来，上面两行断言也会看起来通过，因为
+    // job_1/job_2 反正都在结果里。这里现造一个第二任务和它自己的 job，只有
+    // 过滤真的排除了别的任务，job_other 才不会出现（同一缺陷类型，参见
+    // tests/cli.test.ts 的 "--task 过滤"）。
+    createTask(db, {
+      taskId: "task_other", repoId: "demo", branch: "b2", baseCommit: "c",
+      worktreePath: "/w2", state: "READY",
+    });
+    createJob(db, { jobId: "job_other", taskId: "task_other", profile: "unit", argv: [], pgid: null });
+
     expect(listJobs(db, "task_1").map((j) => j.jobId)).toEqual(["job_2", "job_1"]);
-    expect(listJobs(db).length).toBe(2);
+    expect(listJobs(db, "task_1").map((j) => j.jobId)).not.toContain("job_other");
+    expect(listJobs(db).length).toBe(3);
   });
 });
 

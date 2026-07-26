@@ -94,6 +94,15 @@ describe("grande jobs", () => {
   it("--task 指向不存在的任务时给出提示且退出码非零", () => {
     expect(runCli(["jobs", "--task", "nope"], out)).not.toBe(0);
   });
+
+  it("--task 后面没有值时是用法错误，而不是静默当作「无过滤」", () => {
+    // 悬空的 --task（后面没有值）曾经被 rest[taskIdx+1]===undefined 静默等同于
+    // 「没传 --task」，于是列出全部 job——job_1 恰好也在无过滤结果里，看起来
+    // 像是正常工作。真正的用法错误应该在到达 listJobs 之前就被挡下。
+    expect(runCli(["jobs", "--task"], out)).not.toBe(0);
+    expect(text()).not.toContain("job_1");
+    expect(text()).toContain("--task");
+  });
 });
 
 describe("grande audit", () => {
@@ -102,6 +111,71 @@ describe("grande audit", () => {
     expect(text()).toContain("grande_repo_edit");
     expect(text()).toContain("ALLOWED");
     expect(text()).toContain("SUCCEEDED");
+  });
+
+  it("--task 指向不存在的任务时给出提示且退出码非零，而不是假的「没有审计记录」", () => {
+    // grande jobs --task <bad-id> 一直能正确报错（先调用 getTask），但 cmdAudit
+    // 从不做这个存在性检查，直接把「查无此任务」和「这个任务真的没有审计记录」
+    // 渲染成同一句话——对着一个打错的 task id，人会误以为一切正常。
+    expect(runCli(["audit", "--task", "nope"], out)).toBe(1);
+    expect(text()).toContain("任务不存在：nope");
+    expect(text()).not.toContain("没有审计记录");
+  });
+
+  it("--task 后面没有值时是用法错误，而不是静默当作「无过滤」", () => {
+    expect(runCli(["audit", "--task"], out)).not.toBe(0);
+    expect(text()).not.toContain("grande_repo_edit");
+    expect(text()).toContain("--task");
+  });
+
+  it("DENIED 且带 reason 的记录：输出中包含「原因：」与具体原因文本", () => {
+    const l = loadLayout();
+    const db = openDb(l);
+    const h = beginAudit(db, { taskId: "task_abc", tool: "grande_repo_edit", input: { path: "denied.ts" } });
+    h.denied("路径越权：越过了仓库边界");
+    db.close();
+
+    lines = [];
+    expect(runCli(["audit"], out)).toBe(0);
+    const t = text();
+    expect(t).toContain("DENIED");
+    expect(t).toContain("原因：");
+    expect(t).toContain("路径越权：越过了仓库边界");
+  });
+});
+
+describe("停在 INTENT/EXECUTING 的审计记录（崩溃或中断的痕迹）", () => {
+  it("audit 给出 ⚠️ 警告块，且未终结记录的 decision 显示为 PENDING", () => {
+    // beforeEach 里唯一的审计行走完了 ALLOWED → EXECUTING → SUCCEEDED 全程，
+    // listUnfinishedAudit 永远是空的——cmdAudit 的 ⚠️ 警告块和 PENDING 这个
+    // decision 取值因此从未被任何自动化测试真正跑到过。这里现造一条只调用了
+    // beginAudit、什么都不推进的行（停在 INTENT，decision 仍是 PENDING）。
+    const l = loadLayout();
+    const db = openDb(l);
+    beginAudit(db, { taskId: "task_abc", tool: "grande_repo_edit", input: { path: "stuck-intent.ts" } });
+    db.close();
+
+    lines = [];
+    expect(runCli(["audit"], out)).toBe(0);
+    const t = text();
+    expect(t).toContain("⚠️");
+    expect(t).toContain("停在 INTENT/EXECUTING");
+    expect(t).toContain("PENDING");
+  });
+
+  it("doctor 的「审计完整性」检查在有未完成记录时失败，退出码非零", () => {
+    const l = loadLayout();
+    const db = openDb(l);
+    const h = beginAudit(db, { taskId: "task_abc", tool: "grande_repo_edit", input: { path: "stuck-executing.ts" } });
+    h.allowed();
+    h.executing();
+    db.close();
+
+    lines = [];
+    expect(runCli(["doctor"], out)).not.toBe(0);
+    const t = text();
+    expect(t).toContain("✗ 审计完整性");
+    expect(t).toContain("停在 INTENT/EXECUTING");
   });
 });
 
@@ -119,6 +193,47 @@ describe("grande doctor", () => {
     lines = [];
     expect(runCli(["doctor"], out)).not.toBe(0);
     expect(text()).toMatch(/demo/);
+  });
+});
+
+describe("GRANDE_WORKSPACE 缺失时干净失败（而不是抛出裸异常）", () => {
+  // withDb 曾经直接调用 loadLayout() 不做任何错误处理——任何失败（未设置/非
+  // 绝对路径/目录不存在）都会作为未捕获异常逃出 cmdStatus/cmdJobs/cmdAudit，
+  // 一路逃出 runCli，绕过 out 回调、也不返回退出码，违反 runCli 自己文档化的
+  // @returns 契约。cmdDoctor 在同一个文件里已经干净地处理了同样的条件；这三
+  // 个测试确认另外三个子命令现在也一样干净。
+
+  it("grande status：不抛出，给出清晰消息且退出码非零", () => {
+    delete process.env.GRANDE_WORKSPACE;
+    let code!: number;
+    expect(() => {
+      code = runCli(["status"], out);
+    }).not.toThrow();
+    expect(code).not.toBe(0);
+    expect(text()).toContain("GRANDE_WORKSPACE");
+    expect(text()).toContain("未设置");
+  });
+
+  it("grande jobs：不抛出，给出清晰消息且退出码非零", () => {
+    delete process.env.GRANDE_WORKSPACE;
+    let code!: number;
+    expect(() => {
+      code = runCli(["jobs"], out);
+    }).not.toThrow();
+    expect(code).not.toBe(0);
+    expect(text()).toContain("GRANDE_WORKSPACE");
+    expect(text()).toContain("未设置");
+  });
+
+  it("grande audit：不抛出，给出清晰消息且退出码非零", () => {
+    delete process.env.GRANDE_WORKSPACE;
+    let code!: number;
+    expect(() => {
+      code = runCli(["audit"], out);
+    }).not.toThrow();
+    expect(code).not.toBe(0);
+    expect(text()).toContain("GRANDE_WORKSPACE");
+    expect(text()).toContain("未设置");
   });
 });
 
