@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { SandboxPaths } from "../src/sbpl.ts";
-import { runSandboxed } from "../src/sandbox.ts";
+import { defaultExecRoots, runSandboxed } from "../src/sandbox.ts";
 
 let root: string;
 let paths: SandboxPaths;
@@ -16,6 +16,7 @@ beforeEach(() => {
     jobTmp: join(root, "jobtmp"),
     controlRoot: join(root, "control"),
     worktreesRoot: join(root, "worktrees"),
+    execRoots: defaultExecRoots(),
   };
   for (const d of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
     mkdirSync(d, { recursive: true });
@@ -61,6 +62,48 @@ describe("runSandboxed()", () => {
     expect(r.exitCode).not.toBe(0);
   });
 
+  it("worktree 自己的 .git 也不可写（它是指向 canonical 的文件，改写会劫持后续 git 操作）", async () => {
+    // 真实 git worktree 的 .git 不是目录，是一个指向 canonical `.git/worktrees/<id>`
+    // 的文件。之前只测过 canonicalGit 那一侧（hooks 共享），worktree 这一侧的
+    // deny 规则连文本存在性检查都没有——这里补上行为级验证。
+    const worktreeGit = join(paths.worktree, ".git");
+    writeFileSync(worktreeGit, `gitdir: ${paths.canonicalGit}\n`);
+
+    const r = await runSandboxed({
+      argv: ["/bin/sh", "-c", `echo pwned > ${worktreeGit}`],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).not.toBe(0);
+    expect(readFileSync(worktreeGit, "utf8")).not.toContain("pwned");
+  });
+
+  it("同级 worktree 相互隔离：新建的兄弟 worktree 自动被挡住，无需逐个枚举", async () => {
+    // 让「本任务」的 worktree 真正嵌在 worktreesRoot 之下（贴近真实目录形状
+    // .grande-work/worktrees/<repo>/<task>/），再在它旁边造一个「隔壁任务」的
+    // worktree。deny worktreesRoot + allow worktree 的隔离设计能不能扛住，
+    // 全靠「最具体规则优先」——这里是唯一真正跑两个 worktree 互相看不见的用例，
+    // 之前只检查过 profile 文本里有没有这两行，没验证过行为。
+    const ownWorktree = join(paths.worktreesRoot, "task-own");
+    const siblingWorktree = join(paths.worktreesRoot, "task-sibling");
+    mkdirSync(ownWorktree, { recursive: true });
+    mkdirSync(siblingWorktree, { recursive: true });
+    writeFileSync(join(siblingWorktree, "secret.txt"), "SIBLING-SECRET");
+
+    const scopedPaths: SandboxPaths = { ...paths, worktree: ownWorktree };
+    const r = await runSandboxed({
+      argv: ["/bin/cat", join(siblingWorktree, "secret.txt")],
+      cwd: ownWorktree,
+      paths: scopedPaths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stdout).not.toContain("SIBLING-SECRET");
+  });
+
   it("网络被拒", async () => {
     const r = await runSandboxed({
       argv: ["/usr/bin/curl", "-sS", "--max-time", "5", "http://1.1.1.1"],
@@ -89,8 +132,31 @@ describe("runSandboxed()", () => {
     }
   });
 
+  it("execRoots 覆盖本机工具链：沙箱内可以执行 node（U2 的前提，不能是假 PASS）", async () => {
+    // 这是 finding 1 的决定性检查：之前硬编码的 exec 放行清单只覆盖
+    // /usr/bin、/bin、/usr/sbin、/opt/homebrew，本机的 node 装在 /usr/local/bin，
+    // 实测会被 Seatbelt 拒绝执行（execvp() ... Operation not permitted）。
+    // 如果这条不通过，U2「Seatbelt 下 node/npm/vitest 能不能跑」就会被误判为
+    // FAIL——而误判的原因跟 Seatbelt 本身无关，只是放行清单没跟上这台机器。
+    const r = await runSandboxed({
+      argv: [process.execPath, "-e", "console.log('sandboxed-node-ok')"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("sandboxed-node-ok");
+  });
+
   it("超时杀掉整个进程组，孤儿不残留", async () => {
-    const marker = join(root, "orphan-alive");
+    // marker 必须在 worktree 内：沙箱只放行 worktree 与 jobTmp 两个可写根，
+    // 放在 root 的兄弟目录（worktree 之外）会导致 `>>` 在 open() 那一步就被拒绝、
+    // 文件从未被创建——那样 before === after 恒成立（0 === 0），跟进程组有没有
+    // 真的被杀掉毫无关系，测试等于形同虚设。
+    const marker = join(paths.worktree, "orphan-alive");
+    const sizeOf = () => (existsSync(marker) ? readFileSync(marker, "utf8").length : 0);
+
     const r = await runSandboxed({
       // 子进程每秒往 marker 追加一行；父进程 sleep。超时后两者都应停止。
       argv: ["/bin/sh", "-c", `( while true; do echo x >> ${marker}; sleep 1; done ) & sleep 60`],
@@ -100,10 +166,14 @@ describe("runSandboxed()", () => {
       maxOutputBytes: 65_536,
     });
     expect(r.killedBy).toBe("timeout");
-    const { readFileSync, existsSync } = await import("node:fs");
-    const before = existsSync(marker) ? readFileSync(marker, "utf8").length : 0;
+
+    // 先证明子进程确实活过、确实写过——不然下面「不再增长」的断言在子进程
+    // 从未启动时也会平凡成立，等于什么都没证明。
+    const before = sizeOf();
+    expect(before, "runSandboxed 返回前子进程应已写入过至少一行，证明它确实启动并跑过").toBeGreaterThan(0);
+
     await new Promise((res) => setTimeout(res, 2500));
-    const after = existsSync(marker) ? readFileSync(marker, "utf8").length : 0;
+    const after = sizeOf();
     expect(after, "超时后子进程仍在写文件，说明进程组没杀干净").toBe(before);
   }, 10_000); // vitest 默认 testTimeout 5000ms < 本用例自身设计耗时(3000ms timeoutMs + 2500ms 观察窗口)，需单独放宽
 

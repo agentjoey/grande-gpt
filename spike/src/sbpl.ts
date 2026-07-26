@@ -12,6 +12,12 @@ export interface SandboxPaths {
   controlRoot: string;
   /** 全部 worktree 的父目录——先整体拒读，再单独放行本任务的 */
   worktreesRoot: string;
+  /** 允许 process-exec 的根目录列表。显式作为输入而非硬编码常量：node/pnpm 的
+   *  实际安装位置因安装方式而异（官方安装器、nvm、volta、asdf、Intel/Apple
+   *  Silicon Homebrew 各不相同），硬编码在换一台机器时会悄悄漏放行、
+   *  报 `Operation not permitted`。本机的默认值见 sandbox.ts 的 defaultExecRoots()
+   *  ——那里才是允许碰真实文件系统（realpathSync/which）的层。 */
+  execRoots: string[];
 }
 
 /** SBPL 字符串字面量里只需转义反斜杠与双引号 */
@@ -32,6 +38,11 @@ function q(path: string): string {
  * 意想不到的系统路径，逐目录白名单会陷入无穷调试；而全禁网意味着读到的东西出不去。
  */
 export function buildProfile(p: SandboxPaths): string {
+  if (p.execRoots.length === 0) {
+    throw new Error(
+      "execRoots 不能为空：空数组会让 (allow process-exec) 退化成不带过滤条件的规则，等于放行一切可执行文件",
+    );
+  }
   return [
     "(version 1)",
     "(deny default)",
@@ -49,8 +60,8 @@ export function buildProfile(p: SandboxPaths): string {
     `(deny file-write* (subpath "${q(p.canonicalGit)}"))`,
     `(deny file-write* (subpath "${q(p.worktree)}/.git"))`,
     "",
-    ";; 执行",
-    '(allow process-exec (subpath "/usr/bin") (subpath "/bin") (subpath "/usr/sbin") (subpath "/opt/homebrew"))',
+    ";; 执行：根目录列表由调用方传入（见 SandboxPaths.execRoots），不是硬编码常量",
+    `(allow process-exec ${p.execRoots.map((root) => `(subpath "${q(root)}")`).join(" ")})`,
     "(allow process-fork)",
     "(allow sysctl-read)",
     "",

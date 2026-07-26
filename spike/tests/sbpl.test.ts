@@ -7,6 +7,7 @@ const paths: SandboxPaths = {
   jobTmp: "/tmp/job_1",
   controlRoot: "/Users/u/.grande-control",
   worktreesRoot: "/W/.grande-work/worktrees",
+  execRoots: ["/usr/bin", "/bin", "/usr/sbin", "/opt/homebrew/bin"],
 };
 
 describe("buildProfile()", () => {
@@ -45,5 +46,28 @@ describe("buildProfile()", () => {
 
   it("拒绝相对路径——SBPL 的 subpath 必须是绝对路径", () => {
     expect(() => buildProfile({ ...paths, worktree: "relative/path" })).toThrow(/绝对路径/);
+  });
+
+  it("execRoots 逐条生成 subpath 规则，而不是硬编码常量", () => {
+    const p = buildProfile(paths);
+    const execLine = p.split("\n").find((l) => l.startsWith("(allow process-exec"));
+    expect(execLine).toBeDefined();
+    for (const root of paths.execRoots) {
+      expect(execLine).toContain(`(subpath "${root}")`);
+    }
+  });
+
+  it("execRoots 里的路径同样要求绝对路径", () => {
+    expect(() => buildProfile({ ...paths, execRoots: ["relative/bin"] })).toThrow(/绝对路径/);
+  });
+
+  it("execRoots 里的双引号同样被转义", () => {
+    const p = buildProfile({ ...paths, execRoots: ['/opt/weird"bin'] });
+    expect(p).toContain('/opt/weird\\"bin');
+    expect(p).not.toContain('"/opt/weird"bin"');
+  });
+
+  it("execRoots 为空数组时拒绝——否则 process-exec 会退化为放行一切可执行文件", () => {
+    expect(() => buildProfile({ ...paths, execRoots: [] })).toThrow();
   });
 });

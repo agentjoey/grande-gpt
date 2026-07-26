@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { buildProfile, type SandboxPaths } from "./sbpl.ts";
 
 export interface RunOptions {
@@ -19,6 +19,10 @@ export interface RunResult {
   stderr: string;
   truncated: boolean;
   killedBy: null | "timeout" | "rss" | "output";
+  /** killGroup 被触发时，若 child.pid 从未产生（pgid 退化为 0），信号从未真正
+   *  发出——process.kill(-0, …) 按 POSIX 语义会打到调用者自己的进程组，宁可
+   *  什么都不做也不能冒这个险。正常路径（拿到了 pid）恒为 false。 */
+  killSignalSkipped: boolean;
   durationMs: number;
   peakRssMb: number;
 }
@@ -34,6 +38,51 @@ function groupRssMb(pgid: number): number {
   } catch {
     return 0;
   }
+}
+
+/** 托管基础 coreutils（sh、cat、env、curl……）的系统路径，任何安装方式下都存在 */
+const STANDARD_EXEC_ROOTS = ["/usr/bin", "/bin", "/usr/sbin"];
+
+/** 需要在沙箱里放行的包管理器二进制。逐个用 `which` 探测——某个名字在本机
+ *  没装（比如没有独立的 npx）就跳过，不是错误。 */
+const PACKAGE_MANAGER_BINARIES = ["pnpm", "npm", "npx"];
+
+function resolveBinaryDir(name: string): string | null {
+  try {
+    const found = execFileSync("/usr/bin/which", [name], { encoding: "utf8" }).trim();
+    if (!found) return null;
+    // `which` 给的路径常常是符号链接（pnpm 的 shim 尤其如此：~/.local/bin/pnpm
+    // 实际指向 ~/.local/lib/node_modules/pnpm/bin/pnpm.cjs）。Seatbelt 在真正
+    // execve 时按内核解析后的真实路径比对 subpath，这里必须做同样的解析，
+    // 否则 allow 规则悄悄失配——跟 runSandboxed 里对 SandboxPaths 五个字段做
+    // realpathSync 是同一个道理。
+    return dirname(realpathSync(found));
+  } catch {
+    return null; // 本机没装这个二进制，跳过而不是报错
+  }
+}
+
+/**
+ * 返回本机实际需要放行的 process-exec 根目录：标准系统路径 + 当前 node 解释器
+ * 所在目录 + 解析后的包管理器二进制目录。
+ *
+ * 不做成硬编码常量的原因：node/pnpm 的安装位置因安装方式而异——官方安装器、
+ * nvm、volta、asdf、Intel/Apple Silicon Homebrew 各不相同。硬编码在换一台机器
+ * 时会悄悄漏放行，报 `sandbox-exec: execvp() of '...' failed: Operation not permitted`，
+ * 而这条路径很可能正是 node 本身——那样会把「Seatbelt 下 node 能不能跑」误判为
+ * FAIL，其实只是放行清单没跟上这台机器。
+ *
+ * 用 process.execPath 而不是 `which node`：它就是正在跑这段代码的那个 node
+ * 二进制，比 PATH 查找更权威（不依赖 PATH 里排最前面的恰好是同一个安装）。
+ */
+export function defaultExecRoots(): string[] {
+  const roots = new Set<string>(STANDARD_EXEC_ROOTS.map((r) => realpathSync(r)));
+  roots.add(dirname(realpathSync(process.execPath)));
+  for (const bin of PACKAGE_MANAGER_BINARIES) {
+    const dir = resolveBinaryDir(bin);
+    if (dir) roots.add(dir);
+  }
+  return [...roots];
 }
 
 export async function runSandboxed(o: RunOptions): Promise<RunResult> {
@@ -54,6 +103,9 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     jobTmp: realpathSync(o.paths.jobTmp),
     controlRoot: realpathSync(o.paths.controlRoot),
     worktreesRoot: realpathSync(o.paths.worktreesRoot),
+    // 同样的道理适用于 execRoots：调用方即便已经用 defaultExecRoots() 解析过，
+    // 这里仍统一再 realpathSync 一遍——不依赖调用方自律，跟上面五个字段一致。
+    execRoots: o.paths.execRoots.map((r) => realpathSync(r)),
   };
   writeFileSync(profilePath, buildProfile(canonicalPaths), "utf8");
 
@@ -79,11 +131,20 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   let bytes = 0;
   let truncated = false;
   let killedBy: RunResult["killedBy"] = null;
+  let killSignalSkipped = false;
   let peakRssMb = 0;
 
   const killGroup = (reason: NonNullable<RunResult["killedBy"]>) => {
     if (killedBy) return;
     killedBy = reason;
+    if (!pgid) {
+      // spawn 没能给出 pid，pgid 退化为 0。process.kill(-pgid, …) 就是
+      // process.kill(-0, …)，POSIX 语义下会把信号发给调用者自己的进程组——
+      // 也就是这个 orchestrator 进程自身，而不是某个不存在的子进程组。
+      // 宁可什么都不做、如实记录，也不能把信号打偏。
+      killSignalSkipped = true;
+      return;
+    }
     try {
       process.kill(-pgid, "SIGTERM");
     } catch {
@@ -134,5 +195,14 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   clearTimeout(timer);
   clearInterval(poller);
 
-  return { exitCode, stdout, stderr, truncated, killedBy, durationMs: Date.now() - started, peakRssMb };
+  return {
+    exitCode,
+    stdout,
+    stderr,
+    truncated,
+    killedBy,
+    killSignalSkipped,
+    durationMs: Date.now() - started,
+    peakRssMb,
+  };
 }
