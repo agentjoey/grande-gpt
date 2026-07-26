@@ -81,6 +81,8 @@ Seatbelt、worktree 与数据库，接上真实 ChatGPT 对话测五件事（验
 | D10 | S0 的运行状况查看用 CLI 而非网页 | 网页 = 新页面 = T3，须走完整 Mockup Gate | 观测能力弱于控制台，S2.5 补齐 |
 | D11 | **POC 先行，未通过不启动 S0** | 整个 55–85 人日押在一个 1–2 天可验证的假设上（模型能否自主轮询）；见 §13 | 多 1–2 人日，且这部分代码是一次性的 |
 | D12 | **必须确认 ChatGPT 账号的训练数据设置** | Plus/Free 消费者账号**默认**会用你的内容改进模型；私有代码会流经对话 | 若选择关闭 Data Controls 则接受其对个性化的影响；若改用 Business 账号则推翻「省钱」前提 |
+| D13 | **S0 接入改用 OpenAI Secure MCP Tunnel，Gateway 不暴露公网** | 本机跑 `tunnel-client`，只出不进。消除 POC 阶段的证据完整性风险（知道 URL 即可向观测日志注入伪造事件），且与「能力面最小」主线一致。详见 [调研 §5.1](../../research/2026-07-25-chatgpt-platform-constraints.md) | 需 OpenAI Platform 的 API key（与 ChatGPT 订阅是两回事），官方未公布价格；传输为长轮询，延迟特性未实测 |
+| D14 | **S0 之前先做 S0-0 风险验证 spike** | POC 已经证明这个模式有效：把可能推翻大量下游工作的未知，用 1–2 天先证伪。S0 剩三个此类未知：OAuth 握手（规格已记为「失败会阻塞 S0」）、Seatbelt 下 node/npm 能否运行、Tunnel 的延迟特性 | 多 2 人日；但任一项失败都会作废 13–19 人日中的大部分 |
 
 ### 3.1 三条铁律
 
