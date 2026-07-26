@@ -45,9 +45,20 @@ export function getTask(db: DatabaseSync, taskId: string): TaskRow | undefined {
   return r ? toRow(r as Record<string, unknown>) : undefined;
 }
 
+/**
+ * 按 `createdAt` 倒序；与 `listJobs`（见 `jobs.ts`）同样的 tiebreak 需要——
+ * `createdAt` 用 `Date.now()`（毫秒精度），同一毫秒内创建的多个 task 会打平，
+ * 单靠 `ORDER BY createdAt DESC` 顺序不确定。用 `rowid`（SQLite 隐式的插入
+ * 序，`task` 表未声明 WITHOUT ROWID）做第二排序键，倒序即“后插入的排前面”，
+ * 与“创建时间倒序”的语义一致。
+ *
+ * `grande status` 这类只读 CLI 直接把这个列表渲染给人看排障——调试时的不确
+ * 定顺序比大多数地方更容易误导人，所以即使目前没有测试断言多个同时创建的
+ * active task 之间的顺序，这里也不留这个口子。
+ */
 export function listActiveTasks(db: DatabaseSync): TaskRow[] {
   return db
-    .prepare("SELECT * FROM task WHERE state != 'CLOSED' ORDER BY createdAt DESC")
+    .prepare("SELECT * FROM task WHERE state != 'CLOSED' ORDER BY createdAt DESC, rowid DESC")
     .all()
     .map((r) => toRow(r as Record<string, unknown>));
 }
@@ -57,6 +68,11 @@ export function listActiveTasks(db: DatabaseSync): TaskRow[] {
  *
  * 规格 §7 的 `stateVersion` 是为了防止旧客户端覆盖新状态——ChatGPT 的对话可能
  * 分叉、重试、跨会话恢复，同一个 task 会被多个持有旧快照的调用方触及。
+ *
+ * 本函数不做状态转移合法性校验（例如是否允许从 `CLOSED` 转到 `RUNNING`）——
+ * 这是有意为之：转移图校验是调用方（工具处理层）在调用本函数之前的职责，
+ * 这里只保证 `stateVersion` 的 CAS 语义正确。调用方不能假设本函数会替它挡下
+ * 非法的状态转移。
  */
 export function updateTaskState(
   db: DatabaseSync,

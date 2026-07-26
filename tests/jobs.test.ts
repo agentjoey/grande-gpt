@@ -49,9 +49,25 @@ describe("job 读写", () => {
     const done = finishJob(db, "job_1", {
       state: "failed", exitCode: 1, artifactPath: "/a/1", summary: { failedTests: ["x"] },
     });
-    expect(done.state).toBe("failed");
-    expect(done.endedAt).not.toBeNull();
+    expect(done).toBeDefined();
+    expect(done?.state).toBe("failed");
+    expect(done?.endedAt).not.toBeNull();
     expect(getJob(db, "job_1")?.summary).toEqual({ failedTests: ["x"] });
+  });
+
+  it("对同一个 job 连续两次 finishJob——第二次是 no-op，终态不会被二次改写", () => {
+    createJob(db, { jobId: "job_double", taskId: "task_1", profile: "unit", argv: [], pgid: 1 });
+    const first = finishJob(db, "job_double", {
+      state: "passed", exitCode: 0, artifactPath: null, summary: null,
+    });
+    expect(first?.state).toBe("passed");
+
+    const second = finishJob(db, "job_double", {
+      state: "cancelled", exitCode: null, artifactPath: null, summary: null,
+    });
+    expect(second).toBeUndefined();
+    expect(getJob(db, "job_double")?.state).toBe("passed");
+    expect(getJob(db, "job_double")?.exitCode).toBe(0);
   });
 
   it("listJobs 可按 taskId 过滤，且按开始时间倒序", () => {
@@ -86,5 +102,24 @@ describe("reconcileRunningJobs()", () => {
     finishJob(db, "job_done", { state: "passed", exitCode: 0, artifactPath: null, summary: null });
     reconcileRunningJobs(db, () => false);
     expect(getJob(db, "job_done")?.state).toBe("passed");
+  });
+
+  it("探活的瞬间 job 自己已经跑完并写入真实结果——reconcile 不得覆盖", () => {
+    createJob(db, { jobId: "job_race", taskId: "task_1", profile: "unit", argv: [], pgid: 555 });
+    // 模拟 reconcileRunningJobs 的 read（listJobs 快照）与 write（finishJob）之间
+    // 没有原子性这件事的真实后果：isAlive(pgid) 被调用的那一刻，进程其实已经
+    // 正常退出，且退出处理路径抢先一步把真实结果写进了库——然后 isAlive 才告诉
+    // reconcile「进程组已经不在了」。
+    const isAlive = (_pgid: number) => {
+      finishJob(db, "job_race", {
+        state: "passed", exitCode: 0, artifactPath: null, summary: { real: true },
+      });
+      return false;
+    };
+    expect(reconcileRunningJobs(db, isAlive)).toBe(0);
+    const after = getJob(db, "job_race");
+    expect(after?.state).toBe("passed");
+    expect(after?.exitCode).toBe(0);
+    expect(after?.summary).toEqual({ real: true });
   });
 });

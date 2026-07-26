@@ -68,4 +68,18 @@ describe("task 读写", () => {
     updateTaskState(db, "task_2", "CLOSED", 1);
     expect(listActiveTasks(db).map((t) => t.taskId)).toEqual(["task_1"]);
   });
+
+  it("createdAt 撞车时仍然确定性排序——用 rowid 兜底", () => {
+    // 直接写原始 SQL 而不是调用 createTask()：需要两行的 createdAt 完全相同
+    // （而不是「大概率同一毫秒」），才能确定性地复现 ORDER BY createdAt DESC
+    // 单独作为排序键在打平时的不确定性，而不是靠连续调用两次撞运气。
+    const now = Date.now();
+    const insert = db.prepare(
+      `INSERT INTO task (taskId,repoId,branch,baseCommit,worktreePath,state,createdAt,updatedAt,stateVersion)
+       VALUES (?,?,?,?,?,?,?,?,1)`,
+    );
+    insert.run("task_a", base.repoId, base.branch, base.baseCommit, "/w/a", base.state, now, now);
+    insert.run("task_b", base.repoId, base.branch, base.baseCommit, "/w/b", base.state, now, now);
+    expect(listActiveTasks(db).map((t) => t.taskId)).toEqual(["task_b", "task_a"]);
+  });
 });
