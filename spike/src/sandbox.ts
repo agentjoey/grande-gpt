@@ -1,0 +1,138 @@
+import { execFileSync, spawn } from "node:child_process";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { buildProfile, type SandboxPaths } from "./sbpl.ts";
+
+export interface RunOptions {
+  argv: string[];
+  cwd: string;
+  paths: SandboxPaths;
+  timeoutMs: number;
+  maxOutputBytes: number;
+  /** 进程组总 RSS 上限（MB）。省略则不做内存兜底 */
+  maxRssMb?: number;
+}
+
+export interface RunResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  truncated: boolean;
+  killedBy: null | "timeout" | "rss" | "output";
+  durationMs: number;
+  peakRssMb: number;
+}
+
+/** 每 2 秒采一次进程组总 RSS。这不是 cgroup——采样窗口内仍可冲高，是已接受的取舍 */
+const RSS_POLL_MS = 2000;
+
+function groupRssMb(pgid: number): number {
+  try {
+    const out = execFileSync("/bin/ps", ["-o", "rss=", "-g", String(pgid)], { encoding: "utf8" });
+    const kb = out.split("\n").reduce((s, l) => s + (Number(l.trim()) || 0), 0);
+    return Math.round(kb / 1024);
+  } catch {
+    return 0;
+  }
+}
+
+export async function runSandboxed(o: RunOptions): Promise<RunResult> {
+  const home = join(o.paths.jobTmp, "home");
+  mkdirSync(home, { recursive: true });
+
+  // 实测发现（本机 macOS 26.5.1）：内核在做 Seatbelt subpath 匹配前会解析符号链接
+  // （/tmp -> /private/tmp、/var -> /private/var 等），但 profile 里的 subpath 字符串
+  // 不会被自动解析。两者形式不一致时 allow / deny 规则都会静默失配——worktree 的 allow
+  // 规则失配后整体拒写；controlRoot 的 deny 规则失配后回落到全局 (allow file-read*)、
+  // 泄漏本应受控的内容。这里统一转成真实路径再喂给 buildProfile，使其与内核实际比对的
+  // 路径一致。sbpl.ts 保持纯函数（测试要用不存在的假路径），解析放在这个本就与真实文件
+  // 系统打交道的层。
+  const profilePath = join(o.paths.jobTmp, "profile.sb");
+  const canonicalPaths: SandboxPaths = {
+    worktree: realpathSync(o.paths.worktree),
+    canonicalGit: realpathSync(o.paths.canonicalGit),
+    jobTmp: realpathSync(o.paths.jobTmp),
+    controlRoot: realpathSync(o.paths.controlRoot),
+    worktreesRoot: realpathSync(o.paths.worktreesRoot),
+  };
+  writeFileSync(profilePath, buildProfile(canonicalPaths), "utf8");
+
+  // 环境清洗：只传必需的四个。宿主的 *_TOKEN / *_API_KEY / DYLD_* 一律不进沙箱。
+  const env = {
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin",
+    HOME: home,
+    LANG: "en_US.UTF-8",
+    TMPDIR: o.paths.jobTmp,
+  };
+
+  const started = Date.now();
+  const child = spawn("/usr/bin/sandbox-exec", ["-f", profilePath, ...o.argv], {
+    cwd: o.cwd,
+    env,
+    detached: true, // 新进程组：能一次杀掉整棵进程树
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const pgid = child.pid ?? 0;
+  let stdout = "";
+  let stderr = "";
+  let bytes = 0;
+  let truncated = false;
+  let killedBy: RunResult["killedBy"] = null;
+  let peakRssMb = 0;
+
+  const killGroup = (reason: NonNullable<RunResult["killedBy"]>) => {
+    if (killedBy) return;
+    killedBy = reason;
+    try {
+      process.kill(-pgid, "SIGTERM");
+    } catch {
+      /* 已退出 */
+    }
+    setTimeout(() => {
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch {
+        /* 已退出 */
+      }
+    }, 5000).unref();
+  };
+
+  const collect = (chunk: Buffer, into: "out" | "err") => {
+    if (truncated) return;
+    const remaining = o.maxOutputBytes - bytes;
+    if (remaining <= 0) {
+      truncated = true;
+      killGroup("output");
+      return;
+    }
+    const slice = chunk.subarray(0, remaining);
+    bytes += slice.byteLength;
+    if (into === "out") stdout += slice.toString("utf8");
+    else stderr += slice.toString("utf8");
+    if (bytes >= o.maxOutputBytes) {
+      truncated = true;
+      killGroup("output");
+    }
+  };
+
+  child.stdout.on("data", (c: Buffer) => collect(c, "out"));
+  child.stderr.on("data", (c: Buffer) => collect(c, "err"));
+
+  const timer = setTimeout(() => killGroup("timeout"), o.timeoutMs);
+  const poller = setInterval(() => {
+    const mb = groupRssMb(pgid);
+    if (mb > peakRssMb) peakRssMb = mb;
+    if (o.maxRssMb !== undefined && mb > o.maxRssMb) killGroup("rss");
+  }, RSS_POLL_MS);
+
+  const exitCode = await new Promise<number | null>((resolve) => {
+    child.on("close", (code) => resolve(code));
+    child.on("error", () => resolve(null));
+  });
+
+  clearTimeout(timer);
+  clearInterval(poller);
+
+  return { exitCode, stdout, stderr, truncated, killedBy, durationMs: Date.now() - started, peakRssMb };
+}
