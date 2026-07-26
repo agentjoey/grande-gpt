@@ -1,7 +1,7 @@
 # GrandeGPT — 项目说明
 
 让用户在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行平台。
-当前处于**设计阶段**，S0 尚未开始实现。
+POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架）**。
 
 权威文档：[`docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md)
 
@@ -23,16 +23,27 @@
 | D8 | **S0 不做**：删除文件 / commit / push / GitHub / Checkpoint / Lease / 网络 | 保证 S0 快速拿到 ChatGPT 交互反馈 |
 | D11 | **POC 先行，未通过不启动 S0** | 55–85 人日押在一个 1–2 天可验证的假设上（模型能否自主轮询）。见规格 §13 |
 | D12 | **必须确认 ChatGPT 账号的训练数据设置** | Plus/Free 消费者账号**默认**用你的内容改进模型；私有代码会流经对话 |
+| D16 | **S0 接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | D13/D15 已作废：OpenAI Secure MCP Tunnel 需要 Platform API key（另一套计费），与「用 chat 额度」的初衷冲突 |
+| D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp/<repoId>` | 已实测跑通 |
 
-## 当前状态：待 POC
+## 当前状态：S0-A 实现中
 
-**S0 尚未获准启动。** POC（1–2 人日，假 MCP 服务端 + 硬编码数据）是硬门禁，验收标准见规格 §9.1。
+**POC 已通过**（观察记录 [`docs/research/2026-07-26-poc-observation.md`](docs/research/2026-07-26-poc-observation.md)）——
+hard gate P-1「模型自主轮询」4/4 通过，最长自主链 17 次调用；40 次工具调用只消耗 5 条用户消息，无额度提示。
 
-其中 **P-1「模型是否自主轮询」是 hard gate** —— 不通过则暂停项目、重新设计交互模型，
-**不得直接进入 S0**。POC 的代码是一次性的，不进入 S0 代码库；产出是观察记录 + 对规格的修订。
+**S0-0 spike 已通过**：
+- **U2**（Seatbelt）—— 真实 135 测试的 pnpm/vitest 套件在 `deny default` + `deny network*` 下跑通，
+  见 [`spike/findings/U2-seatbelt.md`](spike/findings/U2-seatbelt.md)
+- **U1**（OAuth）—— ChatGPT 真实握手跑通，DCR + PKCE(S256)，令牌 `aud` 精确绑定端点（D5 端到端坐实），
+  见 [`spike/findings/U1-oauth.md`](spike/findings/U1-oauth.md)。
+  ⚠️ **实测发现 refresh_token 缺口**：ChatGPT 注册时请求 `refresh_token` grant，我们不签发，
+  1 小时后连接断开。**S0-D 必须实现 refresh_token**，见规格 §4.4
+
+`poc/` 与 `spike/` 是一次性代码，**S0 的 `src/` 不得从它们 import**。
+（例外：`spike/oauth/server.ts` 是 S0-D 认证层的直接原型，届时按原型重写而非 import。）
 
 方向层面的五个风险（额度、自主轮询、context rot、ToS 与训练数据、投入产出比）见规格 §13。
-**该节不是「已解决的风险清单」，是「尚未证伪的怀疑」。**
+**该节不是「已解决的风险清单」，是「尚未证伪的怀疑」** —— POC 只证伪了其中的「自主轮询」与部分「额度」。
 
 ## 三条铁律
 
