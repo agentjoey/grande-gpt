@@ -72,7 +72,7 @@ export function truncateList<T>(items: T[], max: number, offset?: number): { ite
 |---|---|
 | `src/policy.ts` | AC-14 仓内敏感路径拒绝表：加载 + 判定 |
 | `src/repoMap.ts` | 目录树 + 关键文件识别 |
-| `src/repoSearch.ts` | 文本/正则搜索，带时间预算 |
+| `src/repoSearch.ts` | 文本搜索（字面量，不支持正则），带时间预算 |
 | `src/repoFile.ts` | 读（返 sha256）与改（校验 sha256），二者共享同一契约故同文件 |
 
 四个任务，一一对应。
@@ -92,6 +92,7 @@ export function truncateList<T>(items: T[], max: number, offset?: number): { ite
   - `interface DenyRules { prefixes: readonly string[] }`
   - `function loadDenyRules(layout: Layout): DenyRules`
   - `function assertWritable(relativePath: string, rules: DenyRules): void`
+  - `function assertWritableResolved(repoRoot: string, absolutePath: string, rules: DenyRules): void`
 
 **为什么它必须存在**：规格 §4.6 —— `resolveInRepo` 的契约只有「在仓库之内」，
 而 `.git/hooks/pre-commit` 确实在仓库之内，所以是合法目标。写入由 Gateway 执行，
@@ -140,16 +141,6 @@ describe("loadDenyRules()", () => {
     expect(rules.prefixes).toContain(".git/");
   });
 
-  it("从控制平面的 deny.yaml 读取，并与内置默认值合并（配置只能加严，不能放宽）", () => {
-    const l = loadLayout();
-    ensureLayout(l);
-    writeFileSync(join(l.configDir, "deny.yaml"), "prefixes:\n  - node_modules/\n", "utf8");
-    const rules = loadDenyRules(l);
-    expect(rules.prefixes).toContain("node_modules/");
-    // 关键：用户配置【不能】把 .git 放出来——这是 AC-14 的底线
-    expect(rules.prefixes).toContain(".git/");
-  });
-
   it("配置格式非法时响亮地失败，而不是静默退回默认值", () => {
     const l = loadLayout();
     ensureLayout(l);
@@ -157,15 +148,42 @@ describe("loadDenyRules()", () => {
     expect(() => loadDenyRules(l)).toThrow(expect.objectContaining({ code: "BAD_CONFIG" }));
   });
 
-  it("绝不从仓库内读配置（铁律一）：仓库里放同名文件不产生任何影响", () => {
+  it("用户配置无法移除内置项：显式给空表也拿不掉 .git（AC-14 的底线）", () => {
     const l = loadLayout();
     ensureLayout(l);
-    const repo = join(l.workspaceRoot, "demo");
-    mkdirSync(repo, { recursive: true });
-    // 仓库内伪造一份想把 .git 放行的配置
-    writeFileSync(join(repo, "deny.yaml"), "prefixes: []\n", "utf8");
+    // 这才是真正的攻击形状：不是「忘了写 .git」，是「刻意写一张不含 .git 的表」。
+    writeFileSync(join(l.configDir, "deny.yaml"), "prefixes: []\n", "utf8");
+    expect(loadDenyRules(l).prefixes).toContain(".git/");
+  });
+
+  it("配置只能追加不能替换：给了别的前缀，.git 依然在表里", () => {
+    const l = loadLayout();
+    ensureLayout(l);
+    writeFileSync(join(l.configDir, "deny.yaml"), "prefixes:\n  - node_modules/\n", "utf8");
     const rules = loadDenyRules(l);
+    expect(rules.prefixes).toContain("node_modules/");
     expect(rules.prefixes).toContain(".git/");
+  });
+
+  it("拒绝表只从控制平面读：函数签名里根本没有仓库路径这个入口", () => {
+    // 铁律一是**结构性**保证，不是运行时检查：loadDenyRules 只拿 Layout，
+    // 没有任何参数能让它去看仓库。这条断言把这个形状钉住，防止以后有人
+    // 「顺手」加一个 repoRoot 参数做「项目级 deny 覆盖」。
+    expect(loadDenyRules.length).toBe(1);
+  });
+
+  it("拒绝以 / 开头的 prefixes 条目（响亮失败，而不是留一条永远不会命中的规则）", () => {
+    const l = loadLayout();
+    ensureLayout(l);
+    writeFileSync(join(l.configDir, "deny.yaml"), "prefixes:\n  - /etc/passwd\n", "utf8");
+    expect(() => loadDenyRules(l)).toThrow(expect.objectContaining({ code: "BAD_CONFIG" }));
+  });
+
+  it("拒绝包含 .. 的 prefixes 条目（拒绝表只表达仓库内相对路径，不该有向上穿越的能力）", () => {
+    const l = loadLayout();
+    ensureLayout(l);
+    writeFileSync(join(l.configDir, "deny.yaml"), "prefixes:\n  - ../outside\n", "utf8");
+    expect(() => loadDenyRules(l)).toThrow(expect.objectContaining({ code: "BAD_CONFIG" }));
   });
 });
 
@@ -208,8 +226,8 @@ Expected: FAIL —— `Cannot find module '../src/policy.ts'`
 `src/policy.ts`：
 
 ```typescript
-import { existsSync, readFileSync } from "node:fs";
-import { join, normalize } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { join, normalize, relative, sep } from "node:path";
 import { parse } from "yaml";
 import type { Layout } from "./layout.ts";
 
@@ -263,6 +281,19 @@ export function loadDenyRules(layout: Layout): DenyRules {
           if (typeof p !== "string" || p.length === 0) {
             throw new PolicyError("BAD_CONFIG", `${file} 的 prefixes 每一项必须是非空字符串`);
           }
+          // 拒绝表只应表达仓库内相对路径的收窄，没有理由指向仓库之外或向上穿越——
+          // `/` 开头看着像绝对路径（对拒绝表没有意义），`..` 试图向上走出仓库。
+          // 两者都不是「配置写错了会漏拒绝」，而是「配置写错了会拒绝到奇怪的地方」；
+          // 响亮地拒绝配置本身，好过默默留一条永远不会命中的规则。
+          if (p.startsWith("/")) {
+            throw new PolicyError(
+              "BAD_CONFIG",
+              `${file} 的 prefixes 条目不能以 / 开头（拒绝表只表达仓库内相对路径）：${p}`,
+            );
+          }
+          if (p.split("/").includes("..")) {
+            throw new PolicyError("BAD_CONFIG", `${file} 的 prefixes 条目不能包含 ..：${p}`);
+          }
           extra.push(p.endsWith("/") ? p : `${p}/`);
         }
       }
@@ -274,19 +305,24 @@ export function loadDenyRules(layout: Layout): DenyRules {
 }
 
 /**
- * 判定一个**仓库内相对路径**是否可写。
+ * 判定一个**已解析**的仓库内相对路径是否可写。三件事缺一不可：
  *
- * 先 `normalize` 再判断，否则 `src/../.git/config` 这种绕行写法会漏网。
- * 注意这里只做语义判定，不碰文件系统——路径的物理安全由 `resolveInRepo` 负责，
- * 两者是两道独立的关卡，缺一不可。
+ * 1. 先 `normalize`，否则 `src/../.git/config` 这种绕行写法会漏网；
+ * 2. **大小写不敏感比对** —— macOS APFS 默认大小写不敏感，`.GIT/hooks/pre-commit`
+ *    落盘就是 `.git/hooks/pre-commit`（已实测写穿）。在大小写敏感的文件系统上这会误杀
+ *    一个真名叫 `.GIT` 的目录 —— 那是安全的失败方向，接受；
+ * 3. **内置项恒生效**：不管调用方传进来的 `rules` 是什么，`BUILTIN_PREFIXES` 都参与比对。
+ *    否则 `repoEdit(root, ops, { prefixes: [] })` 一行就关掉了 AC-14，硬门禁降级成
+ *    「调用方自觉」（铁律三）。
+ *
+ * **必须传解析后的路径**（见 `assertWritableResolved`）：拿模型给的原始字符串判定会被
+ * 仓内符号链接绕过（`vendor -> .git`，已实测写穿到 `.git/hooks/pre-commit`）。
  */
 export function assertWritable(relativePath: string, rules: DenyRules): void {
-  const norm = normalize(relativePath);
-  for (const prefix of rules.prefixes) {
-    // prefix 恒以 "/" 结尾，因此 `.gitignore` 不会被 `.git/` 误伤，
-    // 而 `.git` 目录本身需要单独比对（去掉尾斜杠后全等）
+  const probe = normalize(relativePath).split(sep).join("/").toLowerCase();
+  for (const prefix of [...BUILTIN_PREFIXES, ...rules.prefixes]) {
     const bare = prefix.slice(0, -1);
-    if (norm === bare || norm.startsWith(prefix)) {
+    if (probe === bare.toLowerCase() || probe.startsWith(prefix.toLowerCase())) {
       throw new PolicyError(
         "POLICY_DENIED",
         `${relativePath} 命中仓内敏感路径拒绝表（${bare}）。` +
@@ -296,16 +332,32 @@ export function assertWritable(relativePath: string, rules: DenyRules): void {
     }
   }
 }
+
+/**
+ * 规格 §4.6 字面要求的那道门：**在 `resolveInRepo` 之后**，用解析结果相对 canonical
+ * 仓库根算出的路径再过一次拒绝表。这是唯一能挡住仓内符号链接的形式 —— `resolveInRepo`
+ * 只保证「解析后仍在仓库之内」，而 `vendor -> .git` 完全满足这一条。
+ * 原始字符串那一道（`assertWritable`）仍然保留：它便宜，且报错时引用的是模型自己给的
+ * 路径，比引用一个它没见过的绝对路径有用。
+ */
+export function assertWritableResolved(repoRoot: string, absolutePath: string, rules: DenyRules): void {
+  const realRoot = realpathSync(repoRoot);
+  const rel = relative(realRoot, absolutePath).split(sep).join("/");
+  if (rel === "" || rel === ".." || rel.startsWith("../")) {
+    throw new PolicyError("POLICY_DENIED", `${absolutePath} 解析后不在仓库 ${realRoot} 之内`);
+  }
+  assertWritable(rel, rules);
+}
 ```
 
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run tests/policy.test.ts`
-Expected: PASS（4 + 10 = 14 个用例）
+Expected: PASS（7 + 10 = 17 个用例）
 
 - [ ] **Step 5: 承重性验证**
 
-把 `assertWritable` 里的 `norm` 改回 `relativePath`（即去掉 `normalize`），
+把 `assertWritable` 里 `probe` 的赋值改成直接用 `relativePath`（即去掉 `normalize`），
 确认 `src/../.git/config` 那一行变红，再还原。**把观察结果写进报告。**
 
 - [ ] **Step 6: 提交**
@@ -326,6 +378,7 @@ git commit -m "feat(s0-b): AC-14 仓内敏感路径拒绝表"
 **Interfaces:**
 - Consumes: `resolveInRepo`
 - Produces:
+  - `class MapError extends Error { readonly code: string }`
   - `interface MapEntry { path: string; kind: "file" | "dir"; bytes: number | null }`
   - `interface MapResult { truncated: boolean; nextCursor: string | null; entries: MapEntry[]; keyFiles: string[] }`
   - `function repoMap(root: string, opts?: { maxEntries?: number; cursor?: string | null }): MapResult`
@@ -380,10 +433,13 @@ describe("repoMap()", () => {
     expect(paths).toContain("src/a.ts");
   });
 
-  it("顺序确定：同一棵树跑两次结果逐字节相同", () => {
-    // 目录遍历顺序不是保证的（readdir 依赖文件系统），不显式排序就会出现
-    // 「同样的仓库两次调用给模型看到不同顺序」——在长会话里这是隐蔽的困惑源。
+  it("顺序确定且是全局字典序：同一棵树跑两次结果逐字节相同", () => {
+    // 目录遍历顺序不是保证的（readdir 依赖文件系统），不显式排序就会出现「同样的仓库
+    // 两次调用给模型看到不同顺序」——在长会话里这是隐蔽的困惑源。
+    // 注意 src.ts：只在 src/ 一个目录里放文件的话，DFS 顺序碰巧就等于全局字典序，
+    // 去掉 all.sort() 这条测试也不会变红，承重性验证就是空转。
     for (const n of ["z.ts", "a.ts", "m.ts", "B.ts"]) file(`src/${n}`);
+    file("src.ts");
     const a = repoMap(root).entries.map((e) => e.path);
     const b = repoMap(root).entries.map((e) => e.path);
     expect(a).toEqual(b);
@@ -419,6 +475,18 @@ describe("repoMap()", () => {
     expect([...first.entries, ...second.entries].map((e) => e.path)).toEqual(all.entries.map((e) => e.path));
   });
 
+  it("翻页时不重复给 keyFiles：只在 cursor 缺省的首页给出", () => {
+    // keyFiles 描述的是整棵树，与「这一页有哪些条目」无关；翻页时重复发送同一份
+    // 数据纯粹浪费 ChatGPT 那个会静默截断的响应预算。
+    file("package.json", '{"name":"x"}');
+    for (let i = 0; i < 5; i++) file(`src/f${i}.ts`);
+    const first = repoMap(root, { maxEntries: 2 });
+    expect(first.truncated).toBe(true);
+    expect(first.keyFiles).toContain("package.json");
+    const second = repoMap(root, { maxEntries: 2, cursor: first.nextCursor });
+    expect(second.keyFiles).toEqual([]);
+  });
+
   it("字段声明顺序：truncated/nextCursor 必须排在 entries 之前", () => {
     file("a.ts");
     const keys = Object.keys(repoMap(root));
@@ -449,6 +517,15 @@ Expected: FAIL —— `Cannot find module '../src/repoMap.ts'`
 import { readdirSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
+export class MapError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = `MapError [${code}]`;
+    this.code = code;
+  }
+}
+
 export interface MapEntry {
   path: string;
   kind: "file" | "dir";
@@ -475,20 +552,31 @@ const KEY_ENTRY_PATHS = ["src/index.ts", "src/main.ts", "src/index.js", "main.py
 const KEY_DIR_NAMES = new Set(["tests", "test", "__tests__", "spec"]);
 
 function walk(root: string, dir: string, out: MapEntry[]): void {
-  // readdirSync 的顺序不是保证的——显式排序，否则同一棵树两次调用可能给出不同顺序
-  const names = readdirSync(dir).sort();
+  // readdirSync 的顺序不是保证的——显式排序，否则同一棵树两次调用可能给出不同顺序。
+  // 读取失败必须分两种：根目录读不到是调用方的错，要报出来；子目录读不到
+  // （权限/竞态删除）不该让整棵树失败——下面 statSync 的 catch 只覆盖单个条目。
+  let names: string[];
+  try {
+    names = readdirSync(dir).sort();
+  } catch (e) {
+    if (dir === root) {
+      throw new MapError("INVALID_INPUT", `无法读取仓库根 ${root}：${(e as Error).message}`);
+    }
+    return;
+  }
   for (const name of names) {
+    if (SKIP_DIRS.has(name)) continue; // 连目录项本身都不列：与 repoSearch 的 listFiles 一致
     const abs = join(dir, name);
     const rel = relative(root, abs).split(sep).join("/");
     let st;
     try {
       st = statSync(abs);
     } catch {
-      continue; // 竞态删除或权限问题：跳过而不是整棵树失败
+      continue; // 竞态删除或对该条目的权限问题：跳过而不是整棵树失败
     }
     if (st.isDirectory()) {
       out.push({ path: rel, kind: "dir", bytes: null });
-      if (!SKIP_DIRS.has(name)) walk(root, abs, out);
+      walk(root, abs, out);
     } else if (st.isFile()) {
       out.push({ path: rel, kind: "file", bytes: st.size });
     }
@@ -500,7 +588,9 @@ function walk(root: string, dir: string, out: MapEntry[]): void {
  * `task.worktreePath` 提供）—— 本函数不做路径安全校验，那是 `paths.ts` 的职责。
  *
  * `cursor` 是上一次返回的 `nextCursor`，即「已经给过多少条」的十进制偏移量。
- * 用偏移量而非「最后一条的路径」是因为条目已全局排序，偏移量足够且更便宜。
+ * 用偏移量而非「最后一条的路径」是因为条目已全局排序，偏移量在同一棵**未变化**
+ * 的树上可复现——它不是稳定标识符：两次调用之间如果仓库内容变了（文件增删），
+ * 同一个偏移量可能对应不同的条目。调用方在续取页之间不应该修改仓库。
  */
 export function repoMap(
   root: string,
@@ -509,7 +599,7 @@ export function repoMap(
   const maxEntries = opts?.maxEntries ?? 500;
   const offset = opts?.cursor ? Number.parseInt(opts.cursor, 10) : 0;
   if (!Number.isInteger(offset) || offset < 0) {
-    throw new RangeError(`cursor 必须是非负整数，收到：${opts?.cursor}`);
+    throw new MapError("INVALID_INPUT", `cursor 必须是非负整数，收到：${opts?.cursor}`);
   }
 
   const all: MapEntry[] = [];
@@ -520,18 +610,24 @@ export function repoMap(
   const consumed = offset + slice.length;
   const truncated = consumed < all.length;
 
-  const paths = new Set(all.map((e) => e.path));
-  const keyFiles = [
-    ...all.filter((e) => e.kind === "file" && KEY_FILE_NAMES.has(e.path.split("/").pop()!) && !e.path.includes("/")).map((e) => e.path),
-    ...KEY_ENTRY_PATHS.filter((p) => paths.has(p)),
-    ...all.filter((e) => e.kind === "dir" && KEY_DIR_NAMES.has(e.path)).map((e) => e.path),
-  ].sort();
+  // keyFiles 描述的是【整棵树】的关键文件，与本页无关；只在首页（无 cursor）给一次，
+  // 翻页时重复发送同一份数据纯粹浪费 ChatGPT 那个会静默截断的响应预算。
+  let keyFiles: string[] = [];
+  if (!opts?.cursor) {
+    const paths = new Set(all.map((e) => e.path));
+    keyFiles = [
+      ...all.filter((e) => e.kind === "file" && KEY_FILE_NAMES.has(e.path.split("/").pop()!) && !e.path.includes("/")).map((e) => e.path),
+      ...KEY_ENTRY_PATHS.filter((p) => paths.has(p)),
+      ...all.filter((e) => e.kind === "dir" && KEY_DIR_NAMES.has(e.path)).map((e) => e.path),
+    ].sort();
+    keyFiles = [...new Set(keyFiles)];
+  }
 
   return {
     truncated,
     nextCursor: truncated ? String(consumed) : null,
     entries: slice,
-    keyFiles: [...new Set(keyFiles)],
+    keyFiles,
   };
 }
 ```
@@ -539,11 +635,11 @@ export function repoMap(
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run tests/repoMap.test.ts`
-Expected: PASS（7 个用例）
+Expected: PASS（8 个用例）
 
 - [ ] **Step 5: 承重性验证**
 
-去掉 `all.sort(...)` 那一行，确认「顺序确定」那条变红；还原后确认变绿。
+去掉 `all.sort(...)` 那一行，确认「顺序确定且是全局字典序」那条变红；还原后确认变绿。
 **把观察结果写进报告。**
 
 - [ ] **Step 6: 提交**
@@ -566,12 +662,19 @@ git commit -m "feat(s0-b): repoMap 目录树与关键文件识别"
   `repoMap.ts` 导出内部常量 —— 那会把一个内部细节变成跨模块契约）
 - Produces:
   - `interface SearchMatch { path: string; line: number; text: string; before: string[]; after: string[] }`
-  - `interface SearchResult { truncated: boolean; nextCursor: string | null; timedOut: boolean; matches: SearchMatch[] }`
-  - `function repoSearch(root: string, pattern: string, opts?: { regex?: boolean; maxMatches?: number; budgetMs?: number; cursor?: string | null }): SearchResult`
+  - `interface SearchResult { truncated: boolean; nextCursor: string | null; timedOut: boolean; skippedOversized: number; matches: SearchMatch[] }`
+  - `function repoSearch(root: string, pattern: string, opts?: { maxMatches?: number; budgetMs?: number; cursor?: string | null }): SearchResult`
 
-**规格 §5.4②**：上限 50 条匹配 / 每条 3 行上下文 / **4s 预算**。
-到点即返回已有结果并标 `truncated`，**而不是搜到底** —— 搜到底会撞上 ChatGPT
-那个不可配置的 ~60s 工具超时。
+**规格 §5.4②**：上限 50 条匹配 / 每条 3 行上下文（`CONTEXT_LINES = 1`：1 行前 + 命中行本身
++ 1 行后）/ **4s 预算**。到点即返回已有结果并标 `truncated`，**而不是搜到底** —— 搜到底
+会撞上 ChatGPT 那个不可配置的 ~60s 工具超时。
+
+**S0 只做字面量搜索，不支持调用方提供的正则**（范围收窄，详见下方实现的 JSDoc 与本文档
+末尾「本切片明确不做」表）：`new RegExp("(a+)+$").test("a".repeat(40)+"b")` 在实测环境里
+耗时 55,661 ms —— 一个 40 字节的输入就能把 ChatGPT 那个不可配置的 ~60s 工具超时撑爆，而
+Node 的 `RegExp` 没有内置超时。把预算检查放进逐行循环挡不住这个：检查只在两次 `re.test()`
+之间才有机会运行，单次 `re.test()` 本身就可能不返回。这是无界 CPU 消耗，违反铁律二
+「没有通用逃生舱」。
 
 - [ ] **Step 1: 写失败测试**
 
@@ -605,27 +708,24 @@ describe("repoSearch()", () => {
     expect(m.path).toBe("src/a.ts");
     expect(m.line).toBe(3);
     expect(m.text).toBe("NEEDLE here");
-    expect(m.before).toEqual(["line1", "line2"]);
-    expect(m.after).toEqual(["line4", "line5"]);
+    expect(m.before).toEqual(["line2"]);
+    expect(m.after).toEqual(["line4"]);
   });
 
-  it("regex 模式生效，且非 regex 模式下特殊字符按字面量处理", () => {
+  it("pattern 恒按字面量处理，特殊字符不被当成正则元字符；调用方传 regex 选项直接拒绝", () => {
+    // S0 不支持调用方提供的正则：进程内跑调用方给的正则是无界 CPU 逃生舱
+    // （见 repoSearch 顶部 JSDoc 的实测数据），违反铁律二。
     file("src/a.ts", "a.b\naxb\n");
-    expect(repoSearch(root, "a.b", { regex: false }).matches.map((m) => m.text)).toEqual(["a.b"]);
-    expect(repoSearch(root, "a.b", { regex: true }).matches.map((m) => m.text)).toEqual(["a.b", "axb"]);
-  });
-
-  it("非法正则响亮地失败，而不是静默返回空结果", () => {
-    file("src/a.ts", "x\n");
-    expect(() => repoSearch(root, "a(", { regex: true })).toThrow(
-      expect.objectContaining({ code: "INVALID_INPUT" }),
-    );
+    expect(repoSearch(root, "a.b").matches.map((m) => m.text)).toEqual(["a.b"]);
+    expect(() =>
+      repoSearch(root, "a.b", { regex: true } as unknown as Parameters<typeof repoSearch>[2]),
+    ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 
   it("跳过 .git、node_modules 与二进制文件", () => {
     file(".git/config", "NEEDLE\n");
     file("node_modules/p/i.js", "NEEDLE\n");
-    file("bin.dat", "NEEDLE binary\n");
+    file("bin.dat", "NEEDLE\0binary\n");
     file("src/ok.ts", "NEEDLE\n");
     const paths = repoSearch(root, "NEEDLE").matches.map((m) => m.path);
     expect(paths).toEqual(["src/ok.ts"]);
@@ -642,26 +742,43 @@ describe("repoSearch()", () => {
     expect(new Set(allPaths).size).toBe(10);
   });
 
-  it("顺序确定：两次相同搜索结果逐项相同", () => {
+  it("顺序确定且是全局字典序（跨目录也成立）", () => {
+    // 只在一个目录里放文件的话，DFS 顺序碰巧等于全局字典序，这条断言就抓不到东西。
+    // src/ 与 src.ts 才是分水岭："." (0x2E) < "/" (0x2F)。
     for (const n of ["z.ts", "a.ts", "m.ts"]) file(`src/${n}`, "NEEDLE\n");
+    file("src.ts", "NEEDLE\n");
     const a = repoSearch(root, "NEEDLE").matches.map((m) => m.path);
     expect(a).toEqual(repoSearch(root, "NEEDLE").matches.map((m) => m.path));
     expect(a).toEqual([...a].sort());
   });
 
-  it("时间预算到点即返回，标记 timedOut，且【已找到的结果不丢】", () => {
+  it("时间预算到点即返回，标记 timedOut，且【已找到的结果不丢】、仍可续取", () => {
     // budgetMs=0 保证第一次检查就超预算。关键断言是 timedOut 为 true 而不是抛错——
     // 撞上 ChatGPT 那个不可配置的 ~60s 超时的后果，比返回部分结果糟糕得多。
-    for (let i = 0; i < 50; i++) file(`src/f${i}.ts`, "NEEDLE\n");
+    for (let i = 0; i < 50; i++) file(`src/f${String(i).padStart(2, "0")}.ts`, "NEEDLE\n");
     const r = repoSearch(root, "NEEDLE", { budgetMs: 0 });
     expect(r.timedOut).toBe(true);
     expect(r.truncated).toBe(true);
+    expect(r.matches).toHaveLength(1); // 已找到的不丢
+    expect(r.matches[0]!.path).toBe("src/f00.ts");
+    expect(r.nextCursor).toBe("1"); // 可续取
+
+    const rest = repoSearch(root, "NEEDLE", { cursor: r.nextCursor, maxMatches: 100 });
+    expect(rest.matches.map((m) => m.path)).not.toContain("src/f00.ts");
   });
 
-  it("字段声明顺序：truncated/nextCursor/timedOut 必须排在 matches 之前", () => {
+  it("超过大小上限的文件被跳过，但计数体现在 skippedOversized 里而不是静默消失", () => {
+    file("src/ok.ts", "NEEDLE\n");
+    file("src/huge.ts", `NEEDLE\n${"x".repeat(2 * 1024 * 1024)}`);
+    const r = repoSearch(root, "NEEDLE");
+    expect(r.matches.map((m) => m.path)).toEqual(["src/ok.ts"]);
+    expect(r.skippedOversized).toBe(1);
+  });
+
+  it("字段声明顺序：truncated/nextCursor/timedOut/skippedOversized 必须排在 matches 之前", () => {
     file("a.ts", "NEEDLE\n");
     const keys = Object.keys(repoSearch(root, "NEEDLE"));
-    for (const k of ["truncated", "nextCursor", "timedOut"]) {
+    for (const k of ["truncated", "nextCursor", "timedOut", "skippedOversized"]) {
       expect(keys.indexOf(k)).toBeLessThan(keys.indexOf("matches"));
     }
   });
@@ -702,16 +819,29 @@ export interface SearchResult {
   truncated: boolean;
   nextCursor: string | null;
   timedOut: boolean;
+  skippedOversized: number;
   matches: SearchMatch[];
 }
 
 /** 与 repoMap 各自声明一份：跳过哪些目录是每个模块自己的策略，不是跨模块契约 */
 const SKIP_DIRS = new Set([".git", "node_modules", ".grande-work"]);
-const CONTEXT_LINES = 2;
+// 规格 §5.4②：每条 3 行上下文 = 1 行前 + 命中行本身 + 1 行后。
+const CONTEXT_LINES = 1;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
-function listFiles(root: string, dir: string, out: string[]): void {
-  for (const name of readdirSync(dir).sort()) {
+function listFiles(root: string, dir: string, out: string[], stats: { skippedOversized: number }): void {
+  // 根目录读不到是调用方的错，要报出来；子目录读不到（权限/竞态删除）不该让
+  // 整棵搜索失败——与 repoMap 的 walk 同一套区分方式。
+  let names: string[];
+  try {
+    names = readdirSync(dir).sort();
+  } catch (e) {
+    if (dir === root) {
+      throw new SearchError("INVALID_INPUT", `无法读取仓库根 ${root}：${(e as Error).message}`);
+    }
+    return;
+  }
+  for (const name of names) {
     if (SKIP_DIRS.has(name)) continue;
     const abs = join(dir, name);
     let st;
@@ -720,8 +850,12 @@ function listFiles(root: string, dir: string, out: string[]): void {
     } catch {
       continue;
     }
-    if (st.isDirectory()) listFiles(root, abs, out);
-    else if (st.isFile() && st.size <= MAX_FILE_BYTES) out.push(abs);
+    if (st.isDirectory()) {
+      listFiles(root, abs, out, stats);
+    } else if (st.isFile()) {
+      if (st.size <= MAX_FILE_BYTES) out.push(abs);
+      else stats.skippedOversized++; // 静默跳过会让模型误以为「搜过了没有」；在结果里报出计数
+    }
   }
 }
 
@@ -735,12 +869,28 @@ function escapeRegExp(s: string): string {
  * **时间预算是硬要求，不是优化**：ChatGPT 的工具调用 ~60s 超时不可配置，
  * 搜到底可能直接撑爆它。到点返回部分结果 + `timedOut: true`，
  * 让模型知道结果不完整，远好过整个调用失败。
+ *
+ * **只支持字面量匹配，不支持调用方提供的正则**（S0 范围收窄，见 CLAUDE.md 铁律二
+ * 「没有通用逃生舱」）：正则的灾难性回溯是无界 CPU 消耗，且 Node 的 `RegExp` 没有
+ * 内置超时——`new RegExp("(a+)+$").test("a".repeat(40)+"b")` 在这台机器上实测耗时
+ * 55,661 ms，一个 40 字节的输入就能把 ChatGPT 那个不可配置的 ~60s 工具超时撑爆。
+ * 把预算检查放进逐行循环挡不住这个：预算检查是在两次 `re.test()` 之间才有机会
+ * 运行，而单次 `re.test()` 本身就可能不返回。要重新开放正则匹配，必须先把匹配
+ * 移进 Worker/子进程并对它做硬性 kill（`terminate()`/`SIGKILL`），留给后续切片。
  */
 export function repoSearch(
   root: string,
   pattern: string,
-  opts?: { regex?: boolean; maxMatches?: number; budgetMs?: number; cursor?: string | null },
+  opts?: { maxMatches?: number; budgetMs?: number; cursor?: string | null },
 ): SearchResult {
+  if (opts && "regex" in opts) {
+    throw new SearchError(
+      "INVALID_INPUT",
+      "S0 只支持字面量搜索，不支持调用方提供的正则：进程内运行调用方给的正则是一个" +
+        "无界 CPU 逃生舱（灾难性回溯可以让单次匹配耗时数万毫秒，且 Node 的 RegExp 没有" +
+        "超时机制），违反铁律二「没有通用逃生舱」。",
+    );
+  }
   const maxMatches = opts?.maxMatches ?? 50;
   const budgetMs = opts?.budgetMs ?? 4000;
   const offset = opts?.cursor ? Number.parseInt(opts.cursor, 10) : 0;
@@ -749,16 +899,25 @@ export function repoSearch(
   }
   if (pattern.length === 0) throw new SearchError("INVALID_INPUT", "pattern 不能为空");
 
+  // pattern 恒按字面量处理：escapeRegExp 把每个正则特殊字符都转义掉，理论上不应该
+  // 再编译失败。仍然保留这层 try/catch（而不是假设它绝对安全）——万一某个未预见的
+  // 输入让编译失败，也要转成带 .code 的 SearchError，而不是让裸 SyntaxError 逃出
+  // 本模块（I1 的同一条要求：每条失败都带结构化 .code）。
   let re: RegExp;
   try {
-    re = new RegExp(opts?.regex === true ? pattern : escapeRegExp(pattern));
+    re = new RegExp(escapeRegExp(pattern));
   } catch (e) {
-    throw new SearchError("INVALID_INPUT", `正则非法：${(e as Error).message}`);
+    throw new SearchError("INVALID_INPUT", `pattern 无法用于匹配：${(e as Error).message}`);
   }
 
   const started = Date.now();
   const files: string[] = [];
-  listFiles(root, root, files);
+  const stats = { skippedOversized: 0 };
+  listFiles(root, root, files, stats);
+  // 与 repoMap 一致：全局排序。listFiles 只在每个目录内排序，得到的是 DFS 顺序 ——
+  // `src/a.ts` 与 `src.ts` 就会排反（"." < "/"）。cursor 是偏移量，续取的正确性
+  // 依赖两次调用的顺序完全一致，不排就只是「碰巧一致」。
+  files.sort();
 
   const found: SearchMatch[] = [];
   let timedOut = false;
@@ -767,23 +926,20 @@ export function repoSearch(
   const need = offset + maxMatches + 1;
 
   outer: for (const abs of files) {
-    if (Date.now() - started > budgetMs) {
-      timedOut = true;
-      break;
-    }
     let content: string;
     try {
       content = readFileSync(abs, "utf8");
     } catch {
       continue;
     }
-    if (content.includes(" ")) continue; // 二进制
+    // 二进制判定：NUL 字节。写成 \0 转义而不是源码里嵌一个真的 NUL —— 那个字节
+    // 在任何渲染器/编辑器/剪贴板里都是不可见的，抄错了没人看得出来。
+    if (content.includes("\0")) continue;
 
     const lines = content.split("\n");
     const rel = relative(root, abs).split(sep).join("/");
     for (let i = 0; i < lines.length; i++) {
       if (!re.test(lines[i]!)) continue;
-      re.lastIndex = 0;
       found.push({
         path: rel,
         line: i + 1,
@@ -793,6 +949,15 @@ export function repoSearch(
       });
       if (found.length >= need) break outer;
     }
+
+    // 预算检查放在**处理完一个文件之后**，两个理由：
+    // ① 保证每次调用至少推进一个文件，否则 budgetMs=0 的行为取决于 Date.now() 的
+    //    毫秒边界 —— 实测 100 次里有 8 次「还没超预算」，是一条会随机变红的测试；
+    // ② 到点时已找到的结果留在 found 里，这才是「已找到的结果不丢」。
+    if (Date.now() - started >= budgetMs) {
+      timedOut = true;
+      break;
+    }
   }
 
   const slice = found.slice(offset, offset + maxMatches);
@@ -801,8 +966,9 @@ export function repoSearch(
 
   return {
     truncated,
-    nextCursor: truncated && !timedOut ? String(consumed) : null,
+    nextCursor: truncated ? String(consumed) : null,
     timedOut,
+    skippedOversized: stats.skippedOversized,
     matches: slice,
   };
 }
@@ -815,8 +981,8 @@ Expected: PASS（8 个用例）
 
 - [ ] **Step 5: 承重性验证**
 
-把预算检查 `if (Date.now() - started > budgetMs)` 改成恒 `false`，确认「时间预算」
-那条变红；还原后确认变绿。**把观察结果写进报告。**
+把循环末尾的预算检查 `if (Date.now() - started >= budgetMs)` 改成恒 `false`，确认
+「时间预算到点即返回」那条变红；还原后确认变绿。**把观察结果写进报告。**
 
 - [ ] **Step 6: 提交**
 
@@ -834,8 +1000,8 @@ git commit -m "feat(s0-b): repoSearch 带时间预算的仓库搜索"
 - Test: `tests/repoFile.test.ts`
 
 **Interfaces:**
-- Consumes: `resolveInRepo`（`src/paths.ts`）、`assertWritable` 与 `DenyRules`（`src/policy.ts`）、
-  `truncateText`（`src/envelope.ts`）
+- Consumes: `resolveInRepo`（`src/paths.ts`）、`assertWritable`、`assertWritableResolved` 与
+  `DenyRules`（`src/policy.ts`）、`truncateText`（`src/envelope.ts`）
 - Produces:
   - `interface ReadResult { truncated: boolean; path: string; sha256: string; bytes: number; totalLines: number; content: string }`
   - `function repoRead(root: string, relativePath: string, opts?: { maxBytes?: number; lineRange?: [number, number] }): ReadResult`
@@ -857,12 +1023,20 @@ git commit -m "feat(s0-b): repoSearch 带时间预算的仓库搜索"
 
 ```typescript
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { DenyRules } from "../src/policy.ts";
-import { repoEdit, repoRead } from "../src/repoFile.ts";
+import { repoEdit, repoRead, type EditOp } from "../src/repoFile.ts";
 
 let root: string;
 const RULES: DenyRules = { prefixes: [".git/"] };
@@ -909,12 +1083,36 @@ describe("repoRead()", () => {
     expect(r.sha256).toBe(sha("l1\nl2\nl3\nl4\nl5\n"));
   });
 
+  it("lineRange 覆盖到文件真实末尾（含末尾换行）时不误标 truncated", () => {
+    // full.split("\n") 对以换行结尾的文件会多出一个幻影空行；lineRange 取到「真实
+    // 最后一行」时，若拿幻影行的下标去比较，会把「已经给了整份文件」误判成截断。
+    file("a.ts", "l1\nl2\nl3\n");
+    const r = repoRead(root, "a.ts", { lineRange: [1, 3] });
+    expect(r.content).toBe("l1\nl2\nl3");
+    expect(r.truncated).toBe(false);
+  });
+
   it("文件不存在时抛带码的错误", () => {
     expect(() => repoRead(root, "nope.ts")).toThrow(expect.objectContaining({ code: "FILE_NOT_FOUND" }));
   });
 
   it("路径逃逸被 resolveInRepo 挡住", () => {
     expect(() => repoRead(root, "../outside.ts")).toThrow(expect.objectContaining({ code: "PATH_ESCAPE" }));
+  });
+
+  it("拒绝读取二进制文件（含 NUL 字节）：不产出可被 repoEdit 复用的 sha256", () => {
+    // 直接按 utf8 解码二进制内容会产出 U+FFFD 乱码；若照旧返回一个 sha256，
+    // repoEdit 的 staleness 校验会「对上」这个乱码的哈希，modify 就能用文本内容
+    // 覆盖掉二进制文件——这一步在 S0（无 Checkpoint）不可逆。
+    const p = join(root, "img.png");
+    writeFileSync(p, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d, 0x0a]));
+    expect(() => repoRead(root, "img.png")).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+  });
+
+  it("拒绝读取超过 8MB 的文件，不整份读入内存", () => {
+    const p = join(root, "huge.txt");
+    writeFileSync(p, Buffer.alloc(8 * 1024 * 1024 + 1, "a"));
+    expect(() => repoRead(root, "huge.txt")).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 
   it("字段声明顺序：truncated 必须排在 content 之前", () => {
@@ -971,6 +1169,46 @@ describe("repoEdit()", () => {
       .toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
   });
 
+  it("拒绝表用【解析后】的路径判定：仓内符号链接不能绕过 AC-14", () => {
+    // resolveInRepo 的契约只有「解析后仍在仓库之内」，vendor -> .git 完全满足这一条。
+    // 用模型给的原始字符串判拒绝表，这一条就直接写穿到 .git/hooks/pre-commit。
+    mkdirSync(join(root, ".git", "hooks"), { recursive: true });
+    symlinkSync(join(root, ".git"), join(root, "vendor"));
+    expect(() =>
+      repoEdit(root, [{ op: "create", path: "vendor/hooks/pre-commit", content: "#!/bin/sh\n" }], RULES),
+    ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
+    expect(existsSync(join(root, ".git", "hooks", "pre-commit"))).toBe(false);
+  });
+
+  it("拒绝表大小写不敏感：macOS APFS 上 .GIT/ 就是 .git/", () => {
+    mkdirSync(join(root, ".git", "hooks"), { recursive: true });
+    expect(() =>
+      repoEdit(root, [{ op: "create", path: ".GIT/hooks/pre-commit", content: "#!/bin/sh\n" }], RULES),
+    ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
+    expect(existsSync(join(root, ".git", "hooks", "pre-commit"))).toBe(false);
+  });
+
+  it("内置拒绝项不可由调用方参数放宽（铁律三：硬门禁不接受调用方自觉）", () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    expect(() =>
+      repoEdit(root, [{ op: "create", path: ".git/config", content: "x" }], { prefixes: [] }),
+    ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
+  });
+
+  it("同一批里对同一路径的不同写法也被拒（./x.ts 与 x.ts 是同一个文件）", () => {
+    expect(() =>
+      repoEdit(
+        root,
+        [
+          { op: "create", path: "x.ts", content: "a" },
+          { op: "create", path: "./x.ts", content: "b" },
+        ],
+        RULES,
+      ),
+    ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    expect(existsSync(join(root, "x.ts"))).toBe(false);
+  });
+
   it("先全量校验再落盘：一批里有一个非法 op，则【整批都不写】", () => {
     // 这是本任务最重要的性质。S0 没有事务性 patch（留 S1），但「校验全部通过才开始写」
     // 是免费的，而且它决定了失败时仓库处于可理解的状态而不是改了一半。
@@ -1005,11 +1243,15 @@ describe("repoEdit()", () => {
     expect(() => repoEdit(root, [], RULES)).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 
-  it("不提供删除能力：类型层面没有 delete op（本条是文档性断言）", () => {
+  it("不提供删除能力：运行时拒绝任何未知 op，包括 delete（规格 §5.3）", () => {
     // 规格 §5.3：S0 没有 Checkpoint，删除不可撤销。若支持删除就必须标
     // destructiveHint: true，导致每次弹框且无法「记住」。
-    const ops = ["create", "modify", "move"];
-    expect(ops).not.toContain("delete");
+    // 类型层挡不住 S0-D 那边解出来的 JSON —— 所以运行时也要挡。
+    file("a.ts", "v1");
+    expect(() =>
+      repoEdit(root, [{ op: "delete", path: "a.ts" } as unknown as EditOp], RULES),
+    ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    expect(read("a.ts")).toBe("v1");
   });
 });
 ```
@@ -1029,7 +1271,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { dirname } from "node:path";
 import { truncateText } from "./envelope.ts";
 import { resolveInRepo } from "./paths.ts";
-import { assertWritable, type DenyRules } from "./policy.ts";
+import { assertWritable, assertWritableResolved, type DenyRules } from "./policy.ts";
 
 export class EditError extends Error {
   readonly code: string;
@@ -1050,6 +1292,7 @@ export interface ReadResult {
 }
 
 const DEFAULT_MAX_BYTES = 64 * 1024;
+const MAX_READ_BYTES = 8 * 1024 * 1024;
 
 function sha256Of(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
@@ -1071,7 +1314,18 @@ export function repoRead(
   if (!existsSync(abs) || !statSync(abs).isFile()) {
     throw new EditError("FILE_NOT_FOUND", `文件不存在：${relativePath}`);
   }
-  const full = readFileSync(abs, "utf8");
+  // 按字节读、按字节判定，再决定要不要解成字符串。
+  // 直接 readFileSync(abs,"utf8") 会把非法字节换成 U+FFFD，而 repoEdit 的 staleness
+  // 校验哈希的是同一个解码结果 —— sha256 会「对得上」，modify 于是放行，二进制文件
+  // 被一堆 U+FFFD 覆盖。S0 没有 Checkpoint（§5.3），这一步不可逆。
+  const raw = readFileSync(abs);
+  if (raw.byteLength > MAX_READ_BYTES) {
+    throw new EditError("INVALID_INPUT", `${relativePath} 超过 ${MAX_READ_BYTES} 字节，拒绝整文件读入`);
+  }
+  if (raw.includes(0)) {
+    throw new EditError("INVALID_INPUT", `${relativePath} 是二进制文件（含 NUL 字节）；S0 的读写工具只处理文本`);
+  }
+  const full = raw.toString("utf8");
   const digest = sha256Of(full);
   const lines = full.split("\n");
 
@@ -1083,7 +1337,9 @@ export function repoRead(
       throw new EditError("INVALID_INPUT", `lineRange 非法：[${from}, ${to}]`);
     }
     body = lines.slice(from - 1, to).join("\n");
-    truncated = from > 1 || to < lines.length;
+    // full.split("\n") 在文件以换行结尾时会多出一个幻影空行（"a\n".split("\n") ===
+    // ["a", ""]）；不扣掉它，读到真正的文件末尾也会被误判成 truncated。
+    truncated = from > 1 || to < lines.length - (full.endsWith("\n") ? 1 : 0);
   }
 
   const capped = truncateText(body, opts?.maxBytes ?? DEFAULT_MAX_BYTES);
@@ -1091,7 +1347,7 @@ export function repoRead(
     truncated: truncated || capped.truncated,
     path: relativePath,
     sha256: digest,
-    bytes: Buffer.byteLength(full, "utf8"),
+    bytes: raw.byteLength,
     totalLines: lines.length,
     content: capped.text,
   };
@@ -1123,28 +1379,38 @@ export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules)
   if (ops.length === 0) throw new EditError("INVALID_INPUT", "ops 不能为空");
 
   // ── 阶段一：全量校验，不碰磁盘内容 ──
+  // `seen` 按**解析后的绝对路径**去重，不按原始字符串：`x.ts` 与 `./x.ts` 是同一个文件，
+  // 按字符串去重会让同一批里的第二个 op 静默覆盖第一个（已实测）。
   const seen = new Set<string>();
   const resolved: { op: EditOp; abs: string; absTo?: string }[] = [];
 
   for (const op of ops) {
+    if (op.op !== "create" && op.op !== "modify" && op.op !== "move") {
+      throw new EditError("INVALID_INPUT", `不支持的 op：${JSON.stringify((op as { op: unknown }).op)}`);
+    }
+
+    const abses: string[] = [];
     for (const p of pathsOf(op)) {
-      assertWritable(p, rules); // 抛 PolicyError（code=POLICY_DENIED）
-      if (seen.has(p)) {
+      assertWritable(p, rules);                // 廉价前置判定，报错引用模型给的原始路径
+      const a = resolveInRepo(root, p);        // 路径物理安全：穿越 / 绝对 / 符号链接逃逸
+      assertWritableResolved(root, a, rules);  // 规格 §4.6：resolveInRepo **之后**再过一道
+      if (seen.has(a)) {
         throw new EditError("INVALID_INPUT", `同一批中对 ${p} 有多个操作；请拆成多次调用`);
       }
-      seen.add(p);
+      seen.add(a);
+      abses.push(a);
     }
 
     if (op.op === "move") {
-      const from = resolveInRepo(root, op.from);
-      const to = resolveInRepo(root, op.to);
+      const from = abses[0]!;
+      const to = abses[1]!;
       if (!existsSync(from)) throw new EditError("FILE_NOT_FOUND", `源文件不存在：${op.from}`);
       if (existsSync(to)) throw new EditError("FILE_EXISTS", `目标已存在：${op.to}`);
       resolved.push({ op, abs: from, absTo: to });
       continue;
     }
 
-    const abs = resolveInRepo(root, op.path);
+    const abs = abses[0]!;
     if (op.op === "create") {
       if (existsSync(abs)) {
         throw new EditError("FILE_EXISTS", `文件已存在：${op.path}。修改已有文件请用 modify。`);
@@ -1183,7 +1449,7 @@ export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules)
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `pnpm vitest run tests/repoFile.test.ts`
-Expected: PASS（6 + 10 = 16 个用例）
+Expected: PASS（9 + 14 = 23 个用例）
 
 - [ ] **Step 5: 承重性验证**
 
@@ -1211,3 +1477,5 @@ git commit -m "feat(s0-b): repoFile 读写与 staleness 校验"
 | 内部异常 → 工具错误码映射 | S0-D（规格 §7.1） |
 | MCP 工具注册、`readOnlyHint` 等注解 | S0-D |
 | worktree 的创建 | S0-C |
+| 正则搜索 | 后续切片，需在 Worker/子进程里跑并硬性 kill（进程内跑调用方提供的正则是无界 CPU 逃生舱：`new RegExp("(a+)+$").test("a".repeat(40)+"b")` 实测耗时 55,661 ms，把预算检查放进逐行循环挡不住单次 `re.test()` 不返回） |
+| `repoMap` 的时间预算 | 未设计：`repoSearch` 有 `budgetMs` 是因为逐文件扫描天然可在文件边界打断；`repoMap` 的 `walk` 是否也需要同等的可中断预算、中断后如何续page，是独立的设计问题，不在本切片顺手加 |
