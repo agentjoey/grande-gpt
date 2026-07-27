@@ -556,6 +556,29 @@ S0 的失败解析**只做 exit code + 尾部日志 + 可配置的失败行正�
 `TASK_NOT_FOUND` 的错误信息必须列出活跃任务及其分支与变更数 —— 这是 `taskId` 丢失时的兜底路径，
 比干巴巴报错有用得多。
 
+### 7.0 三条 S0-D 硬要求（S0-B/C 收尾审查催生）
+
+**① 审计必须是结构性的，不能靠调用方自觉。**
+
+S0-B/C 交付时，`repoEdit` 与 `startJob` —— 本切片仅有的两个变更操作 —— **一行审计
+代码都没有**。`audit.ts` 自 S0-A 就存在，但没有任何生产调用方。若 S0-D 用「在工具
+处理器里包一层 beginAudit」来补，那正是**铁律三禁止的形状**：能做成硬约束却做成了
+软约束，而且和 §4.6 反对写工具自行判断敏感路径是同一个错误。
+
+> **要求**：`repoEdit` 与 `startJob` 的签名**必须**带一个 `AuditHandle` 参数。
+> 没有句柄就调不动它们 —— 想变更就必然先留下 `INTENT`。这会改动两个已合并函数的
+> 签名，但 S0-D 是它们唯一的调用方，改动面最小的时刻就是现在。
+
+**② `NETWORK_DENIED` 目前完全没有信号。** 沙箱里的联网尝试只表现为作业日志里的
+一个非零退出码，与普通测试失败无法区分。**AC-5 的验收断言（「断言失败且错误为网络
+拒绝」）按现状不可满足。** S0-D 需在 runner 层识别并升格为该错误码 —— 最低成本的
+做法是让 SBPL 的 deny 规则产生可辨识的痕迹，或在摘要解析阶段匹配常见的网络错误特征
+并明确标注这是**启发式**而非沙箱的权威信号。
+
+**③ `reconcileRunningJobs` 至今没有生产调用方。** S0-A 实现并测试了它，但没有任何
+东西在启动时调用它，**AC-11 在系统层面不成立**。S0-D 必须把它接到 Gateway 启动流程，
+且必须在开始接受工具调用**之前**跑完 —— 否则新 job 会与对账竞争。
+
 ### 7.1 内部异常 → 工具错误码的映射（**S0-D** 实现）
 
 上表是**工具层**（发给 ChatGPT 的 `error{code,...}`）的词汇表。S0-A 的内部模块抛的是别的东西，
@@ -583,9 +606,30 @@ S0 的失败解析**只做 exit code + 尾部日志 + 可配置的失败行正�
 | `jobs.ts` 的 `JOB_NOT_FOUND` | `INVALID_INPUT` |
 | `layout.ts` / `registry.ts` 的启动期错误 | 不映射 —— 这些应让 Gateway **启动失败**，而不是变成一次工具调用的错误 |
 
-S0-C 的错误码（`JOB_TIMEOUT` / `RESOURCE_EXHAUSTED` / `NETWORK_DENIED` /
-`PROFILE_NOT_FOUND` / `WORKTREE_DIRTY` / `CANONICAL_BUSY`）同样只需带结构化 `.code` 抛出，
-由 S0-D 一并映射。
+**S0-B/C 实际抛出的完整清单**（收尾审查逐模块清点，与本节原有设想对不齐，以此为准）：
+
+| 内部码 | 抛出方 | → 工具错误码 |
+|---|---|---|
+| `PATH_ESCAPE` | paths | `POLICY_DENIED` |
+| `POLICY_DENIED` | policy、runner | `POLICY_DENIED` |
+| `REPO_NOT_REGISTERED` / `REPO_NOT_FOUND` | paths | `REPO_NOT_REGISTERED` |
+| `INVALID_INPUT` | paths、repoMap、repoSearch、repoFile、worktree | `INVALID_INPUT` |
+| `STALE_FILE` | repoFile | `STALE_FILE` |
+| `FILE_NOT_FOUND` / `FILE_EXISTS` | repoFile | `INVALID_INPUT` |
+| `PROFILE_NOT_FOUND` | profiles | `PROFILE_NOT_FOUND` |
+| `BAD_CONFIG` | policy、profiles | `POLICY_DENIED`（配置坏了不该让模型以为是自己参数错） |
+| `GIT_FAILED` / `WORKTREE_EXISTS` | worktree | `INVALID_INPUT` |
+| `CANONICAL_BUSY` | worktree | `CANONICAL_BUSY` |
+| `JOB_NOT_FOUND` | runner | `INVALID_INPUT` |
+| `TASK_NOT_FOUND` | tasks | `TASK_NOT_FOUND`（并按上文补齐活跃任务清单） |
+
+**声明了但没有任何模块抛出的四个**：`WORKTREE_DIRTY`、`JOB_TIMEOUT`、
+`RESOURCE_EXHAUSTED`、`NETWORK_DENIED`。前三个的真实信号在 `jobReport` 的
+`state` 与 `summary.killedBy` 里（`timeout` / `rss`），**S0-D 必须从那里映射，
+而不是等某个模块抛出它们**。`NETWORK_DENIED` 见 §7.0②，目前无信号。
+
+**注意 `killedBy: "output"` 已在 S0-B/C 收尾审查中移除** —— 输出超限现在只截断、
+不杀作业（规格 §6.4/§6.5 本就如此要求）。因此它**不**映射到 `RESOURCE_EXHAUSTED`。
 
 **注意 AC-1 的验收断言写的是 `POLICY_DENIED`**，而 `paths.ts` 实际抛 `PATH_ESCAPE`。
 上表第一行就是这条断言得以成立的前提 —— 没有这层映射，AC-1 到 S0-D 会验收不过。
