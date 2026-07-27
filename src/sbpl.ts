@@ -1,5 +1,23 @@
 import { isAbsolute, join } from "node:path";
 
+/**
+ * I3：`sbpl.ts` 里此前有两处裸 `Error`（`q()` 的相对路径校验、`buildProfile()`
+ * 的空 `execRoots` 校验），二者都经由 `runSandboxed`/`startJob` 可达
+ * `grande_run` 这条工具调用路径。规格 §7.1 要求任何能到达工具层的异常都带
+ * 结构化 `.code`——裸 `Error` 没有，响应信封的 `{code, message}` 没法按码分支，
+ * 调用方只能靠正则匹配 message（已实测：`sbpl.test.ts` 曾经就是这么测的，
+ * message 文案一改这类测试就跟着悄悄失真）。形状与 `PathSecurityError` 保持
+ * 一致：`.code` 是结构化字段，`name` 带码供日志/堆栈定位，`message` 保持干净。
+ */
+export class SbplError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = `SbplError [${code}]`;
+    this.code = code;
+  }
+}
+
 export interface SandboxPaths {
   /** 当前任务 worktree —— 唯一可写的仓库路径 */
   worktree: string;
@@ -22,7 +40,9 @@ export interface SandboxPaths {
 
 /** SBPL 字符串字面量里只需转义反斜杠与双引号 */
 function q(path: string): string {
-  if (!isAbsolute(path)) throw new Error(`SBPL 的 subpath 必须是绝对路径，收到：${path}`);
+  if (!isAbsolute(path)) {
+    throw new SbplError("INVALID_INPUT", `SBPL 的 subpath 必须是绝对路径，收到：${path}`);
+  }
   return path.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
@@ -39,7 +59,8 @@ function q(path: string): string {
  */
 export function buildProfile(p: SandboxPaths): string {
   if (p.execRoots.length === 0) {
-    throw new Error(
+    throw new SbplError(
+      "INVALID_INPUT",
       "execRoots 不能为空：空数组会让 (allow process-exec) 退化成不带过滤条件的规则，等于放行一切可执行文件",
     );
   }

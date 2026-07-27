@@ -3,6 +3,20 @@ import { mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { buildProfile, type SandboxPaths } from "../src/sbpl.ts";
 
+/**
+ * I3：`assertOnDiskSpelling` 此前抛裸 `Error`，同样经由 `runSandboxed` 可达
+ * `grande_run`。形状与 `PathSecurityError`/`SbplError` 保持一致——见 `sbpl.ts`
+ * 里 `SbplError` 的 JSDoc，理由相同，不重复。
+ */
+export class SandboxError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = `SandboxError [${code}]`;
+    this.code = code;
+  }
+}
+
 export interface RunOptions {
   argv: string[];
   cwd: string;
@@ -20,7 +34,7 @@ export interface RunResult {
   stdout: string;
   stderr: string;
   truncated: boolean;
-  killedBy: null | "timeout" | "rss" | "output";
+  killedBy: null | "timeout" | "rss";
   /** killGroup 被触发时，若 child.pid 从未产生（pgid 退化为 0），信号从未真正
    *  发出——process.kill(-0, …) 按 POSIX 语义会打到调用者自己的进程组，宁可
    *  什么都不做也不能冒这个险。正常路径（拿到了 pid）恒为 false。 */
@@ -102,7 +116,8 @@ function assertOnDiskSpelling(label: string, p: string): void {
   let dir = dirname(cur);
   while (dir !== cur) {
     if (!readdirSync(dir).includes(basename(cur))) {
-      throw new Error(
+      throw new SandboxError(
+        "PATH_SPELLING_MISMATCH",
         `SBPL 路径 ${label} 的拼写与磁盘不一致：${dir} 下没有逐字节等于 ` +
           `${JSON.stringify(basename(cur))} 的条目（${p}）。Seatbelt 按字节匹配策略路径，` +
           `拼写不一致会让 deny 规则静默失效（规格 §11）。`,
@@ -202,12 +217,18 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     }, 5000).unref();
   };
 
+  // I2：命中输出上限只停止收集，绝不杀进程。规格 §6.4/§6.5 要求的是「截断并
+  // 停止收集」，不是「杀」——这里此前混淆了两者，命中 cap 会触发跟 timeout/rss
+  // 完全一样的 killGroup。后果已实测：一个 3000 行输出、cap 4KB、`exit 0` 的
+  // 通过用例被报成 `state: killed, exitCode: null`；默认 cap 是 1MiB，一次
+  // verbose 的 `pnpm test` 轻易越过它——模型会被告知自己刚跑过的、真正通过的
+  // 测试套件被杀了。timeout 与 rss 两条杀进程路径不受影响：它们各自在下面
+  // 独立调用 killGroup("timeout")/killGroup("rss")，与这里完全无关。
   const collect = (chunk: Buffer, into: "out" | "err") => {
     if (truncated) return;
     const remaining = o.maxOutputBytes - bytes;
     if (remaining <= 0) {
       truncated = true;
-      killGroup("output");
       return;
     }
     const slice = chunk.subarray(0, remaining);
@@ -216,7 +237,6 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     else stderr += slice.toString("utf8");
     if (bytes >= o.maxOutputBytes) {
       truncated = true;
-      killGroup("output");
     }
   };
 

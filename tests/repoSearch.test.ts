@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -46,6 +46,45 @@ describe("repoSearch()", () => {
     file("src/ok.ts", "NEEDLE\n");
     const paths = repoSearch(root, "NEEDLE").matches.map((m) => m.path);
     expect(paths).toEqual(["src/ok.ts"]);
+  });
+
+  it("跳过指向仓库外的符号链接，不跟随、不搜索链接目标里的内容（C2）", () => {
+    const outside = mkdtempSync(join(tmpdir(), "srch-outside-"));
+    try {
+      writeFileSync(join(outside, "id_rsa"), "PRIVATE-KEY-MATERIAL-NEEDLE", "utf8");
+      symlinkSync(outside, join(root, "vendor"));
+      const r = repoSearch(root, "NEEDLE");
+      expect(r.matches).toEqual([]);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("跳过给 .git 起别名的符号链接，即使目录名不叫 .git（C2）：SKIP_DIRS 只按名字过滤，" +
+     "一个叫别的名字的链接会绕过它，除非改成不跟随符号链接", () => {
+    mkdirSync(join(root, ".git"), { recursive: true });
+    writeFileSync(
+      join(root, ".git", "config"),
+      "url = https://x-token:ghp_SECRETTOKEN@example.com/a/b.git\n",
+      "utf8",
+    );
+    symlinkSync(join(root, ".git"), join(root, "gitalias"));
+    const r = repoSearch(root, "ghp_");
+    expect(r.matches).toEqual([]);
+  });
+
+  it("普通文件不受符号链接修复影响，仍然正常被搜索到（不过度拒绝）", () => {
+    file("src/ok.ts", "NEEDLE\n");
+    const r = repoSearch(root, "NEEDLE");
+    expect(r.matches.map((m) => m.path)).toEqual(["src/ok.ts"]);
+  });
+
+  it("步骤三复核：指向仓库内一个普通文件的合法符号链接被跳过（不报错、不崩溃）——" +
+     "这是本次选择的 skip-symlinks 策略的自然代价，不是过度拒绝的 bug", () => {
+    file("real.ts", "NEEDLE\n");
+    symlinkSync(join(root, "real.ts"), join(root, "alias.ts"));
+    const r = repoSearch(root, "NEEDLE");
+    expect(r.matches.map((m) => m.path)).toEqual(["real.ts"]); // 只有真实文件命中一次，链接不重复命中
   });
 
   it("超过 maxMatches 时截断并给 nextCursor，续取不重不漏", () => {

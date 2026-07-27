@@ -5,7 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { truncateText } from "./envelope.ts";
 import type { Layout } from "./layout.ts";
 import { createJob, finishJob, getJob, type JobState } from "./jobs.ts";
-import { resolveRepoPath } from "./paths.ts";
+import { assertTaskId, resolveRepoPath } from "./paths.ts";
 import { getProfile } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
 import { defaultExecRoots, runSandboxed } from "./sandbox.ts";
@@ -95,13 +95,26 @@ export function startJob(
   const { db, layout } = deps;
 
   // 先校验——抛错时不能留下任何痕迹
+  // C4：taskId 会被直接拼进 artifactDir（`join(layout.artifactsDir, a.taskId, jobId)`，
+  // 见下方），必须先于任何副作用校验形状——worktree.ts 早先给 openWorktree 加过
+  // 同一条校验，但这里（taskId 第二次被拼进文件系统路径的地方）从未补上，
+  // 一个 `../../../../tmp/evil` 形状的 taskId 能把 job 的 stdout/stderr 写到
+  // 控制平面之外的任意路径。
+  assertTaskId(a.taskId);
   const profile = getProfile(layout, a.repoId, a.profileName);
   // repoId 必须过注册与路径逃逸门禁：startJob 的 worktreePath 会变成
   // `allow file-write*` 的 subpath，裸 join(workspaceRoot, repoId) 等于没有门禁（C-6）。
   const canonicalGit = join(resolveRepoPath(layout, a.repoId, registeredIds(layout)), ".git");
   const worktree = realpathSync(a.worktreePath);
   const worktreesRoot = realpathSync(layout.worktreesRoot);
-  if (worktree !== worktreesRoot && !worktree.startsWith(worktreesRoot + sep)) {
+  // C1：必须是【严格】包含——worktree === worktreesRoot 这个值本身也要被拒绝。
+  // 此前 `worktree !== worktreesRoot &&` 这个短路条件恰好放行了最危险的那个
+  // 输入：调用方传 worktreesRoot 自己作为 worktreePath，会让整个 worktrees 根
+  // （所有任务的 worktree 的共同父目录）变成沙箱的 `allow file-write*` 子路径，
+  // 一次调用即可读写任意其他任务的 worktree，AC-3 的跨任务隔离形同虚设。
+  // `startsWith(worktreesRoot + sep)` 单独就已经正确表达「严格子路径」：
+  // worktree === worktreesRoot 时它没有多出的分隔符可以匹配，天然为 false。
+  if (!worktree.startsWith(worktreesRoot + sep)) {
     throw new RunnerError(
       "POLICY_DENIED",
       `worktreePath 必须在 ${worktreesRoot} 之下，收到：${worktree}。` +
@@ -135,43 +148,71 @@ export function startJob(
   const artifactDir = join(layout.artifactsDir, a.taskId, jobId);
   const artifactPath = join(artifactDir, "output.log");
 
-  createJob(db, { jobId, taskId: a.taskId, profile: profile.name, argv: [...profile.argv], pgid });
+  // C3：rejection handler 必须在 createJob 之前接上 run。createJob 可能同步抛出
+  // （例如未知 taskId 撞上 job.taskId 的外键约束——ERR_SQLITE_ERROR），若此刻
+  // run 还没有 `.catch`、之后又在某个微任务里 reject，Node 24 默认
+  // `--unhandled-rejections=throw` 会直接杀掉整个 Gateway 进程。这正是
+  // inFlight/safeFinish 那一轮已经在 `.then` 链*内部*修好的失败模式，在链被
+  // 真正接上之前的这段窗口原样重现——不是同一处回归，是同一类问题在更早的
+  // 时间点又出现了一次。
+  const settled = run
+    .then((r) => {
+      safeWrite(artifactPath, `${r.stdout}\n--- stderr ---\n${r.stderr}\n`);
+      // I2：命中输出上限不再是一种 killedBy 原因（sandbox.ts 的 collect() 现在
+      // 只截断、不杀进程），所以这里不再有 "output" 分支——一个真实 exit 0 的
+      // 通过用例即使输出越过了 cap，也会正常落到下面的 "passed"，`truncated`
+      // 字段（见下面 summary）仍然如实反映「日志被截断了」。
+      const state: Exclude<JobState, "running"> =
+        r.killedBy === "timeout" ? "timeout"
+        : r.killedBy === "rss" ? "killed"
+        : r.exitCode === 0 ? "passed" : "failed";
+      const won = safeFinish(db, jobId, {
+        state, exitCode: r.exitCode, artifactPath,
+        summary: { truncated: r.truncated, killedBy: r.killedBy ?? null, durationMs: r.durationMs, peakRssMb: r.peakRssMb },
+      });
+      if (!won) {
+        // finishJob 的 CAS 输了：别人（多半是 reconcileRunningJobs）已经把这行判成终态。
+        // **不覆盖**，但必须留痕——否则真实结果连同 artifactPath 一起悄无声息地消失。
+        console.error(
+          `[runner] ${jobId} 的真实结果（${state}, exit=${r.exitCode}）晚于收敛写入、已被丢弃；` +
+            `完整日志仍在 ${artifactPath}`,
+        );
+      }
+    })
+    .catch((e: unknown) => {
+      safeWrite(artifactPath, `runner 内部错误：${(e as Error).message}\n`);
+      safeFinish(db, jobId, { state: "killed", exitCode: null, artifactPath, summary: { error: (e as Error).message } });
+    })
+    .finally(() => { inFlight.delete(jobId); });
+
+  try {
+    createJob(db, { jobId, taskId: a.taskId, profile: profile.name, argv: [...profile.argv], pgid });
+  } catch (e) {
+    // createJob 没能落库：没有任何 job 行记录这个进程组的 pgid，
+    // `reconcileRunningJobs` 的探活兜底靠的正是那一列——一行都没有，它永远不会
+    // 被扫到，沙箱进程就变成一个真正意义上的孤儿（还在跑，没有任何记录指向它）。
+    // 此刻唯一还知道 pgid 的就是这个闭包，必须在这里主动杀掉整个进程组再把
+    // 错误抛出去，不能指望调用方或后台收尾路径替它兜底。上面的 `settled` 链
+    // 仍然会在 run 结束后跑一次，但只是徒劳地尝试 safeFinish 一个不存在的 job
+    // 行——finishJob 对不存在的 jobId 抛 JOB_NOT_FOUND，会被 safeFinish 的
+    // try/catch 吞掉、记一条 console.error，不会二次抛出（见 safeFinish）。
+    if (pgid) {
+      try {
+        process.kill(-pgid, "SIGKILL");
+      } catch {
+        /* 已退出 */
+      }
+    }
+    throw e;
+  }
 
   // artifactDir 特意挪到 createJob 成功之后再建（MINOR 修复）：jobTmp 没法这样
   // 处理（上面解释过的顺序依赖），但 artifactDir 在 job 行落库之前完全用不上——
-  // 挪到这里之后，createJob 失败时只留一个空目录（jobTmp），不是两个。下面的
-  // `.then`/`.catch` 回调保证只会在这次同步调用返回之后才运行（Promise 语义），
-  // 不存在「回调抢在 mkdirSync 前面执行」的竞态。
+  // 挪到这里之后，createJob 失败时只留一个空目录（jobTmp），不是两个。`settled`
+  // 挂的回调保证只会在这次同步调用返回之后才运行（Promise 语义），不存在
+  // 「回调抢在 mkdirSync 前面执行」的竞态。
   mkdirSync(artifactDir, { recursive: true });
-
-  inFlight.set(
-    jobId,
-    run
-      .then((r) => {
-        safeWrite(artifactPath, `${r.stdout}\n--- stderr ---\n${r.stderr}\n`);
-        const state: Exclude<JobState, "running"> =
-          r.killedBy === "timeout" ? "timeout"
-          : r.killedBy === "rss" || r.killedBy === "output" ? "killed"
-          : r.exitCode === 0 ? "passed" : "failed";
-        const won = safeFinish(db, jobId, {
-          state, exitCode: r.exitCode, artifactPath,
-          summary: { truncated: r.truncated, killedBy: r.killedBy ?? null, durationMs: r.durationMs, peakRssMb: r.peakRssMb },
-        });
-        if (!won) {
-          // finishJob 的 CAS 输了：别人（多半是 reconcileRunningJobs）已经把这行判成终态。
-          // **不覆盖**，但必须留痕——否则真实结果连同 artifactPath 一起悄无声息地消失。
-          console.error(
-            `[runner] ${jobId} 的真实结果（${state}, exit=${r.exitCode}）晚于收敛写入、已被丢弃；` +
-              `完整日志仍在 ${artifactPath}`,
-          );
-        }
-      })
-      .catch((e: unknown) => {
-        safeWrite(artifactPath, `runner 内部错误：${(e as Error).message}\n`);
-        safeFinish(db, jobId, { state: "killed", exitCode: null, artifactPath, summary: { error: (e as Error).message } });
-      })
-      .finally(() => { inFlight.delete(jobId); }),
-  );
+  inFlight.set(jobId, settled);
 
   return { jobId, state: "running", pollAfterSeconds: pollHint(profile.timeoutSeconds) };
 }
@@ -181,7 +222,7 @@ export interface JobReport {
   state: JobState;
   exitCode: number | null;
   outputTruncated: boolean;
-  killedBy: "timeout" | "rss" | "output" | null;
+  killedBy: "timeout" | "rss" | null;
   durationMs: number | null;
   artifactPath: string | null;
   summary: string;

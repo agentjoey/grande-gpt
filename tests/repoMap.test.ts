@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -39,6 +39,47 @@ describe("repoMap()", () => {
     expect(paths.some((p) => p.startsWith("node_modules"))).toBe(false);
     expect(paths.some((p) => p.startsWith(".grande-work"))).toBe(false);
     expect(paths).toContain("src/a.ts");
+  });
+
+  it("跳过指向仓库外的符号链接，不跟随（C2）：链接目标里的内容不会泄漏进结果", () => {
+    const outside = mkdtempSync(join(tmpdir(), "map-outside-"));
+    try {
+      writeFileSync(join(outside, "id_rsa"), "PRIVATE-KEY-MATERIAL", "utf8");
+      symlinkSync(outside, join(root, "vendor"));
+      const paths = repoMap(root).entries.map((e) => e.path);
+      expect(paths).not.toContain("vendor");
+      expect(paths.some((p) => p.startsWith("vendor/"))).toBe(false);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("跳过给 .git 起别名的符号链接，即使目录名不叫 .git（C2）：SKIP_DIRS 只按名字过滤，" +
+     "一个叫别的名字的链接会绕过它，除非改成不跟随符号链接", () => {
+    mkdirSync(join(root, ".git", "hooks"), { recursive: true });
+    writeFileSync(join(root, ".git", "config"), "url = https://x-token:ghp_SECRETTOKEN@example.com/a/b.git", "utf8");
+    symlinkSync(join(root, ".git"), join(root, "gitalias"));
+    const paths = repoMap(root).entries.map((e) => e.path);
+    expect(paths).not.toContain("gitalias");
+    expect(paths.some((p) => p.startsWith("gitalias/"))).toBe(false);
+  });
+
+  it("普通文件与普通子目录不受符号链接修复影响，仍然正常列出（不过度拒绝）", () => {
+    file("normal/dir/file.ts");
+    const paths = repoMap(root).entries.map((e) => e.path);
+    expect(paths).toContain("normal");
+    expect(paths).toContain("normal/dir");
+    expect(paths).toContain("normal/dir/file.ts");
+  });
+
+  it("步骤三复核：指向仓库内一个普通文件的合法符号链接被跳过（不报错、不崩溃）——" +
+     "这是本次选择的 skip-symlinks 策略的自然代价，不是过度拒绝的 bug", () => {
+    file("real.ts", "x");
+    symlinkSync(join(root, "real.ts"), join(root, "alias.ts"));
+    const r = repoMap(root);
+    const paths = r.entries.map((e) => e.path);
+    expect(paths).toContain("real.ts"); // 真实文件仍然照常列出
+    expect(paths).not.toContain("alias.ts"); // 链接本身被跳过，而不是报错或列出两次
   });
 
   it("顺序确定且是全局字典序：同一棵树跑两次结果逐字节相同", () => {

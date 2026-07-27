@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 export class SearchError extends Error {
@@ -49,10 +49,20 @@ function listFiles(root: string, dir: string, out: string[], stats: { skippedOve
     const abs = join(dir, name);
     let st;
     try {
-      st = statSync(abs);
+      // C2：lstatSync（不跟随符号链接）而不是 statSync——与 repoMap 的 walk 同一
+      // 个根因、同一个修法。statSync 跟随符号链接会把「指向仓库外的链接」
+      // （repo/vendor -> /outside）与「给 .git 起别名的链接」（repo/gitalias ->
+      // repo/.git，SKIP_DIRS 只按名字过滤、"gitalias" 不在集合里）都当成普通
+      // 目录递归进去，NEEDLE 搜索命中的内容会被原样返回给 ChatGPT。
+      st = lstatSync(abs);
     } catch {
       continue;
     }
+    // 不跟随、直接跳过（fail closed，与 repoMap.walk 选择同一种修法——两个模块
+    // 各自维护一份 SKIP_DIRS 已经是既有约定，这里同样各自实现而不是提取共享
+    // helper，见两个文件顶部注释）。代价与 repoMap 相同：仓库内指向普通文件的
+    // 符号链接不会被搜索到。
+    if (st.isSymbolicLink()) continue;
     if (st.isDirectory()) {
       listFiles(root, abs, out, stats);
     } else if (st.isFile()) {

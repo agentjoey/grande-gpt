@@ -18,6 +18,10 @@ let root: string;
 const RULES: DenyRules = { prefixes: [".git/"] };
 
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
+// I1：原始字节的哈希——用于「即使 sha256 恰好算对了，二进制守卫也必须独立拒绝」
+// 这类测试，故意不经过任何字符串解码（跟 repoRead/repoEdit 内部 sha256OfBuffer
+// 的算法保持一致）。
+const sha256 = (raw: Buffer) => createHash("sha256").update(raw).digest("hex");
 function file(rel: string, content: string) {
   const p = join(root, rel);
   mkdirSync(join(p, ".."), { recursive: true });
@@ -85,6 +89,14 @@ describe("repoRead()", () => {
     expect(() => repoRead(root, "img.png")).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 
+  it("拒绝读取非法 UTF-8 但不含 NUL 的文件（如 Latin-1 编码，I1：纯 NUL 检查漏掉了这类编码）", () => {
+    // 0xE9 0xE8：Latin-1 下是两个普通高位字符，但不是合法 UTF-8（0xE9 是 3 字节
+    // 序列引导字节，要求两个 0x80-0xBF 的延续字节，0xE8 不满足）。没有 NUL。
+    const raw = Buffer.from([0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0xe9, 0xe8, 0x0a]);
+    writeFileSync(join(root, "latin1.txt"), raw);
+    expect(() => repoRead(root, "latin1.txt")).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+  });
+
   it("拒绝读取超过 8MB 的文件，不整份读入内存", () => {
     const p = join(root, "huge.txt");
     writeFileSync(p, Buffer.alloc(8 * 1024 * 1024 + 1, "a"));
@@ -125,6 +137,28 @@ describe("repoEdit()", () => {
       repoEdit(root, [{ op: "modify", path: "a.ts", content: "v2", expectedSha256: sha("WRONG") }], RULES),
     ).toThrow(expect.objectContaining({ code: "STALE_FILE" }));
     expect(read("a.ts")).toBe("v1");
+  });
+
+  it("modify 拒绝二进制文件（Latin-1，非法 UTF-8，无 NUL）：即使提供的 sha256 恰好对得上，" +
+     "也不放行——这不是 staleness 校验能不能过的问题（I1）", () => {
+    const raw = Buffer.from([0x48, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0xe9, 0xe8, 0x0a]); // "Hello éè\n"（Latin-1）
+    writeFileSync(join(root, "latin1.txt"), raw);
+    const expectedSha256 = sha256(raw); // 对原始字节算出的、真正「正确」的哈希
+    expect(() =>
+      repoEdit(root, [{ op: "modify", path: "latin1.txt", content: "REPLACED\n", expectedSha256 }], RULES),
+    ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    expect(readFileSync(join(root, "latin1.txt"))).toEqual(raw); // 原始字节完好无损
+  });
+
+  it("modify 拒绝含 NUL 字节的文件，即使提供的 sha256 恰好对得上（I1：repoRead 会拒绝读它，" +
+     "modify 此前完全没有独立的二进制守卫，只要哈希对得上就会用文本内容整份覆盖）", () => {
+    const raw = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d, 0x0a]); // PNG 魔数，含 NUL
+    writeFileSync(join(root, "img.png"), raw);
+    const expectedSha256 = sha256(raw);
+    expect(() =>
+      repoEdit(root, [{ op: "modify", path: "img.png", content: "REPLACED\n", expectedSha256 }], RULES),
+    ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    expect(readFileSync(join(root, "img.png"))).toEqual(raw);
   });
 
   it("move 移动文件，源消失目标出现", () => {

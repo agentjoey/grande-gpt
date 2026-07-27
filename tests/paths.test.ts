@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Layout } from "../src/layout.ts";
 import { loadLayout } from "../src/layout.ts";
-import { PathSecurityError, assertValidId, resolveInRepo, resolveRepoPath } from "../src/paths.ts";
+import { PathSecurityError, assertTaskId, assertValidId, resolveInRepo, resolveRepoPath } from "../src/paths.ts";
 
 // Round 2 复审 C：guardFs 窄化测试要伪造一个「非 fs 错误」，但 node:fs 是内置模块，
 // ESM 的模块命名空间不可配置——`vi.spyOn(fs, "realpathSync")` 会直接抛
@@ -436,5 +436,42 @@ describe("assertValidId()（fix round item 7：taskId/jobId 这类 id 字符串�
       expect((e as PathSecurityError).message).not.toMatch(/^INVALID_INPUT/);
       expect((e as PathSecurityError).name).toBe("PathSecurityError [INVALID_INPUT]");
     }
+  });
+});
+
+describe("assertTaskId()（C4：taskId 会被直接拼进 worktree 目录名与 job artifact 路径的" +
+         "单一权威校验，worktree.ts/runner.ts/tasks.ts 三处共用）", () => {
+  it("接受形状合法的 taskId：字母数字下划线连字符，首字符字母或数字", () => {
+    for (const ok of ["task_abcd", "task-1", "T1", "1task", "abc_123"]) {
+      expect(() => assertTaskId(ok)).not.toThrow();
+    }
+  });
+
+  it.each([
+    "../../../../tmp/evil",
+    "..",
+    ".",
+    "a/b",
+    "a\\b",
+    "task abcd",
+    "",
+    "-leading-dash",
+  ])("拒绝不适合拼进文件系统路径的 taskId 形状：%s", (bad) => {
+    expect(() => assertTaskId(bad)).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+  });
+
+  it("比 assertValidId 严格：合法的『id 语境』字符串（含空格/斜杠）在这里必须被拒绝", () => {
+    // assertValidId 的契约是「id 字符串不参与路径拼接，不必挡分隔符」——
+    // taskId 恰恰打破了这个前提（见 worktree.ts/runner.ts 两处 join），所以
+    // assertValidId 认为合法的输入，assertTaskId 必须更严格。
+    expect(() => assertValidId("task/with-dash and space", "taskId")).not.toThrow();
+    expect(() => assertTaskId("task/with-dash and space")).toThrow(
+      expect.objectContaining({ code: "INVALID_INPUT" }),
+    );
+  });
+
+  it("非 ASCII 字符被拒绝——与 assertValidId 故意放行非 ASCII 字母不同，" +
+     "taskId 这里只要求 ASCII 字母数字下划线连字符", () => {
+    expect(() => assertTaskId("我的任务_1")).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 });

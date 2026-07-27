@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { assertTaskId } from "./paths.ts";
 
 export type TaskState = "CREATING" | "READY" | "RUNNING" | "CLOSED";
 
@@ -32,6 +33,11 @@ export function createTask(
   db: DatabaseSync,
   t: Omit<TaskRow, "createdAt" | "updatedAt" | "stateVersion">,
 ): TaskRow {
+  // C4：taskId 从这里落库后，会被 runner.ts 的 startJob 直接拼进 artifactDir
+  // （`join(layout.artifactsDir, taskId, jobId)`）——那里现在也校验了，但「能做
+  // 成硬约束的绝不做成软约束」（铁律三）：不能指望每一个把 taskId 拼进路径的
+  // 调用点都记得自己校验一遍，落库这道口子本身就应该拒绝形状非法的 taskId。
+  assertTaskId(t.taskId);
   const now = Date.now();
   db.prepare(
     `INSERT INTO task (taskId,repoId,branch,baseCommit,worktreePath,state,createdAt,updatedAt,stateVersion)

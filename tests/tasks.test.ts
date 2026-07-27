@@ -50,6 +50,14 @@ describe("task 读写", () => {
     expect(() => createTask(db, { taskId: "task_1", ...base })).toThrow();
   });
 
+  it("taskId 路径穿越被拒（C4）：createTask 不能只信任调用方——runner.ts 的 startJob " +
+     "会直接拿落库的 taskId 拼 artifactDir，落库这道口子本身就该拒绝形状非法的 taskId", () => {
+    expect(() => createTask(db, { taskId: "../../../../tmp/evil", ...base })).toThrow(
+      expect.objectContaining({ code: "INVALID_INPUT" }),
+    );
+    expect(getTask(db, "../../../../tmp/evil")).toBeUndefined();
+  });
+
   it("状态变更递增 stateVersion", () => {
     createTask(db, { taskId: "task_1", ...base });
     expect(updateTaskState(db, "task_1", "RUNNING", 1).stateVersion).toBe(2);

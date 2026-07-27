@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 export class MapError extends Error {
@@ -54,10 +54,21 @@ function walk(root: string, dir: string, out: MapEntry[]): void {
     const rel = relative(root, abs).split(sep).join("/");
     let st;
     try {
-      st = statSync(abs);
+      // C2：用 lstatSync（不跟随符号链接）而不是 statSync。statSync 会跟随符号
+      // 链接，对一个指向仓库外的链接（如 repo/vendor -> /outside）会把外部目录
+      // 当成普通目录递归进去列出来；对一个把 .git 起了别名的链接（如
+      // repo/gitalias -> repo/.git）同样会照单全收——SKIP_DIRS 只按目录项
+      // **名字**过滤，`gitalias` 这个名字不在集合里，从未被拦下。这两条路径的
+      // 后果都是 repoMap 把仓库外/`.git` 内的文件路径原样返回给 ChatGPT。
+      st = lstatSync(abs);
     } catch {
       continue; // 竞态删除或对该条目的权限问题：跳过而不是整棵树失败
     }
+    // 不跟随、直接跳过：这是两种可选修复里更简单、且失败方向更安全的一种
+    // （fail closed——该放行的合法内部符号链接被跳过，好过该拒绝的越权链接被
+    // 放行）。代价是仓库内指向仓库内普通文件的符号链接也不会被列出；权衡说明
+    // 见 tests/repoMap.test.ts 里 C2 那几条用例的注释。
+    if (st.isSymbolicLink()) continue;
     if (st.isDirectory()) {
       out.push({ path: rel, kind: "dir", bytes: null });
       walk(root, abs, out);

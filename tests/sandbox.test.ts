@@ -52,14 +52,21 @@ describe("runSandboxed()", () => {
   });
 
   it("canonical 的 .git 不可写", async () => {
+    // I6：此前只断言 exitCode !== 0——AC-7 要求的是「断言被拒且文件未创建」，
+    // 单看 exitCode 证明不了 shell 重定向真的没能创建/写入那个文件（比如
+    // exitCode 非 0 也可能来自其它无关原因）。下面 worktree 自己 .git 的用例
+    // 已经用「内容不含 pwned」正确验证过这一类情况，这里的 probe 是全新文件
+    // （之前不存在），对应的断言形状是「文件压根没被建出来」。
+    const probe = join(paths.canonicalGit, "hooks-probe");
     const r = await runSandboxed({
-      argv: ["/bin/sh", "-c", `echo x > ${paths.canonicalGit}/hooks-probe`],
+      argv: ["/bin/sh", "-c", `echo x > ${probe}`],
       cwd: paths.worktree,
       paths,
       timeoutMs: 10_000,
       maxOutputBytes: 65_536,
     });
     expect(r.exitCode).not.toBe(0);
+    expect(existsSync(probe)).toBe(false);
   });
 
   it("worktree 自己的 .git 也不可写（它是指向 canonical 的文件，改写会劫持后续 git 操作）", async () => {

@@ -97,8 +97,15 @@ describe("openWorktree()", () => {
       expect(() => openWorktree(layout, "demo", "s", bad)).toThrow(
         expect.objectContaining({ code: "INVALID_INPUT" }),
       );
-      // 关键在于「worktree 没被建到工作区外面」，不只是「抛了个错」
-      expect(existsSync("/tmp/evil")).toBe(false);
+      // 关键在于「worktree 没被建到工作区外面」，不只是「抛了个错」——断言的是
+      // 漏洞真正会产生的那个 join 结果本身不存在。此前这里断言的是硬编码的
+      // `/tmp/evil`：ws/layout.worktreesRoot 来自 mkdtempSync，在 macOS 上落在
+      // `/var/folders/.../T/wt-ws-XXXXXX/...` 之下（tmpdir() 不是字面量
+      // `/tmp`），`../../../../tmp/evil` 从这么深的 worktreesRoot 向上走 4 层
+      // 也走不到字面量 `/tmp` 之下——`existsSync("/tmp/evil")` 无论校验有没有
+      // 生效都恒为 false，这条断言从未真正验证过任何东西（空转）。
+      const wouldBeTarget = join(layout.worktreesRoot, "demo", bad);
+      expect(existsSync(wouldBeTarget)).toBe(false);
     },
   );
 

@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Layout } from "./layout.ts";
-import { assertValidId, resolveRepoPath } from "./paths.ts";
+import { assertTaskId, assertValidId, resolveRepoPath } from "./paths.ts";
 import { loadDepDirs } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
 
@@ -98,15 +98,6 @@ function assertCanonicalIdle(repoRoot: string): void {
 }
 
 /**
- * `taskId` 会**直接成为 worktree 的目录名**，因此这里要的比 `assertValidId` 更严。
- * `assertValidId` 的 JSDoc 明确写着「id 字符串从不参与路径拼接，不必挡分隔符」——
- * 本函数打破了那个前提，就必须自己补上：实测 `assertValidId("../../../../tmp/evil")`
- * 通过，而 `join(worktreesRoot, repoId, "../../../../tmp/evil")` = `/tmp/evil`，
- * 随后它会作为 `allow file-write*` 的 subpath 进 SBPL。（C-4）
- */
-const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
-
-/**
  * 为一个任务派生 worktree 与分支。
  *
  * **绝不 `git fetch`**（规格 §5.4①）：大仓库上 fetch 可能几十秒，直接撑爆 ChatGPT
@@ -122,14 +113,11 @@ export function openWorktree(
   taskId: string,
 ): WorktreeInfo {
   assertValidId(taskId, "taskId");
-  if (!TASK_ID_RE.test(taskId)) {
-    throw new GitError(
-      "INVALID_INPUT",
-      `taskId 必须是 1–64 个 ASCII 字母/数字/下划线/连字符且首字符为字母或数字，` +
-        `收到：${JSON.stringify(taskId)}。taskId 会直接成为 worktree 目录名，` +
-        `路径分隔符与 .. 会让 worktree 落到工作区之外。`,
-    );
-  }
+  // C4：taskId 的路径形状校验现在单一权威定义在 paths.ts（assertTaskId），
+  // worktree.ts/runner.ts/tasks.ts 三处共用同一份，不再各自维护拷贝。
+  // assertTaskId 抛的是 PathSecurityError（.code 同样是 INVALID_INPUT），
+  // 调用方只应依赖 .code，不应依赖具体的 Error 子类。
+  assertTaskId(taskId);
   if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(slug)) {
     throw new GitError("INVALID_INPUT", `slug 必须是 1–40 个小写字母、数字或连字符，收到：${slug}`);
   }

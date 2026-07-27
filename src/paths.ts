@@ -206,6 +206,37 @@ export function assertValidId(id: string, label: string): void {
 }
 
 /**
+ * `taskId` 的合法形状：比 `assertValidId` 严格得多，因为 `taskId` 不只是被
+ * 存储/回显的标识符——它会被**直接拼进文件系统路径**：`worktree.ts` 的
+ * `join(layout.worktreesRoot, repoId, taskId)`（worktree 目录名）与
+ * `runner.ts` 的 `join(layout.artifactsDir, taskId, jobId)`（job artifact
+ * 目录）。`assertValidId` 的 JSDoc 明确写着「id 字符串从不参与路径拼接，
+ * 不必挡分隔符」——这两个调用点恰恰打破了那个前提，因此不能只靠
+ * `assertValidId`，必须额外要求 1–64 个 ASCII 字母/数字/下划线/连字符、
+ * 首字符为字母或数字：不允许 `/`、`\`、`..`、前导空白，这些都可能在拼接后
+ * 把路径带出 worktreesRoot/artifactsDir（已实测：`taskId =
+ * "../../../../../../../../tmp/grande-review-evil2"` 未经校验时，
+ * `join(layout.artifactsDir, taskId, jobId)` 会解析到控制平面之外）。
+ *
+ * **单一权威定义（C4）**：`worktree.ts`、`runner.ts`、`tasks.ts` 的
+ * `createTask` 三处共用这一份，不允许各自维护拷贝——C4 复现的成因正是
+ * `worktree.ts` 有一份本地校验，`runner.ts`/`tasks.ts` 没有，而后两者一样
+ * 会把 taskId 拼进文件系统路径或信任它被拼进文件系统路径的下游代码。
+ */
+const TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+export function assertTaskId(taskId: string): void {
+  if (!TASK_ID_RE.test(taskId)) {
+    throw new PathSecurityError(
+      "INVALID_INPUT",
+      `taskId 必须是 1–64 个 ASCII 字母/数字/下划线/连字符且首字符为字母或数字，` +
+        `收到：${JSON.stringify(taskId)}。taskId 会被直接拼进 worktree 目录名与 job ` +
+        `artifact 路径，路径分隔符与 .. 会让这些路径落到工作区/控制平面之外。`,
+    );
+  }
+}
+
+/**
  * `repoId` → 仓库根的绝对路径。
  *
  * `repoId` 就是 `GPT_Workspace` 下的目录名（规格 §4.2），**不是任意路径**。因此这里
