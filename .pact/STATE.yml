@@ -1,0 +1,73 @@
+project: grande-gpt
+working_tree_holder: null
+agents:
+  - { id: orch, roles: [orchestrator] }
+  - { id: w1, roles: [worker] }
+  - { id: w2, roles: [worker] }
+  - { id: rev, roles: [reviewer] }
+features:
+  - id: s0b
+    branch: feat/s0b-repo-read-write
+    status: in_progress
+    tasks:
+      - id: s0b-1-policy
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0b-1-policy.md
+        evidence: All 17 tests pass:  Test Files  1 passed (1)       Tests  17 passed (17)    Start at  12:22:21    Duration  101ms (transform 16ms, setup 0ms, import 31ms, tests 14ms, environment 0ms)
+      - id: s0b-2-repomap
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0b-2-repomap.md
+        evidence: All 8 tests pass: - 列出文件与目录，路径是仓库内相对路径且用 / 分隔 - 跳过 .git、node_modules 与 .grande-work，不把它们的内容铺开 - 顺序确定且是全局字典序：同一棵树跑两次结果逐字节相同 - 识别关键文件：package.json、测试目录、入口 - 超过 maxEntries 时截断并给出 nextCursor，用它能取到剩下的且不重不漏 - 翻页时不重复给 keyFiles：只在 cursor 缺省的首页给出 - 字段声明顺序：truncated/nextCursor 必须排在 entries 之前 - 文件给出字节数，目录为 null  Stress test: removing all.sort() causes the ordering test to fail; restoring it makes all 8 pass again.  Test Files  1 passed (1) Tests  8 passed (8)
+      - id: s0b-3-reposearch
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0b-3-reposearch.md
+        evidence: All 8 tests pass: - 找到字面量匹配，带行号与上下文 - pattern 恒按字面量处理，特殊字符不被当成正则元字符；调用方传 regex 选项直接拒绝 - 跳过 .git、node_modules 与二进制文件 - 超过 maxMatches 时截断并给 nextCursor，续取不重不漏 - 顺序确定且是全局字典序（跨目录也成立） - 时间预算到点即返回，标记 timedOut，且【已找到的结果不丢】、仍可续取 - 超过大小上限的文件被跳过，但计数体现在 skippedOversized 里而不是静默消失 - 字段声明顺序：truncated/nextCursor/timedOut/skippedOversized 必须排在 matches 之前  Stress test: changing budget check to always-false causes the timedOut test to fail; reverting restores all 8 passing. Full suite: 12 files, 204 tests all pass.  Test Files  1 passed (1) Tests  8 passed (8) Duration  86ms
+      - id: s0b-4-repofile
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0b-4-repofile.md
+        evidence: All 23 tests pass. Full suite: 13 files, 227 tests pass. Typecheck clean.  Test output:  ✓ tests/repoFile.test.ts (23 tests) 106ms    repoRead() (9): 内容/sha256/截断标记/lineRange/末尾不误标truncated/不存在抛FILE_NOT_FOUND/路径逃逸抛PATH_ESCAPE/二进制NUL抛INVALID_INPUT/超8MB抛INVALID_INPUT/字段声明顺序    repoEdit() (14): create新文件/create不覆盖已存在/modify匹配写入/modify不匹配抛STALE_FILE/move移动/move的from与to都被拒绝/符号链接绕过被挡/大小写不敏感/内置拒绝项不可放宽/同一路径不同写法被拒/先全量校验再落盘/同一路径重复操作被拒/空ops被拒/不提供删除  Stress test: 合并两阶段为单循环 → "先全量校验再落盘" 测试变红（第一个合法op已被写入）。恢复两阶段设计 → 变绿。
+        deps: [s0b-1-policy]
+  - id: s0c
+    branch: feat/s0c-worktree-sandbox
+    status: in_progress
+    tasks:
+      - id: s0c-1-profiles
+        owner: w2
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0c-1-profiles.md
+        evidence: typecheck clean; 19/19 tests pass (profiles.test.ts); full suite: 190/190 tests pass across 10 files.
+      - id: s0c-2-sbpl
+        owner: w2
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0c-2-sbpl.md
+        evidence: typecheck clean; 11/11 tests pass (sbpl.test.ts)
+      - id: s0c-3-sandbox
+        owner: w2
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0c-3-sandbox.md
+        evidence: typecheck clean; 15/15 tests pass (sandbox.test.ts)
+        deps: [s0c-2-sbpl]
+      - id: s0c-4-worktree
+        owner: w2
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0c-4-worktree.md
+        evidence: typecheck clean; 26/26 tests pass (worktree.test.ts); full suite: 242/242 tests pass across 13 files. Stress test verification: removing .sort() caused "顺序确定" test to fail (returned ["z.ts","b.ts"] instead of ["b.ts","z.ts"]); removing files.length > 0 guard caused "单个超过 maxLines" test to fail (first.files was [] instead of ["big.ts"]). Both guards restored, all 26 tests green.
+      - id: s0c-5-runner
+        owner: w2
+        status: accepted
+        reviewer: rev
+        spec: .pact/tasks/s0c-5-runner.md
+        evidence: typecheck clean; 13/13 tests pass (runner.test.ts); full suite: 255/255 tests pass across 14 files. Stress verification: moving getProfile() after createJob() caused "未注册的 profile 抛 PROFILE_NOT_FOUND，且【不】留下 running 的 job 行" to fail (expected 0, received 1 — zombie job row left behind). Reverting getProfile to before createJob restored all 13 tests to green, confirming validation-before-mutation ordering is correct.
+        deps: [s0c-1-profiles, s0c-3-sandbox]
