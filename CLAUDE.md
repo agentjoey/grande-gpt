@@ -29,7 +29,8 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 
 ## 当前状态：S0 全部实现完毕，已在真实 ChatGPT 上跑通
 
-**S0-A / S0-B / S0-C / S0-D 均已合并到 `main`。** 479 测试通过，typecheck 干净。
+**S0-A / S0-B / S0-C / S0-D 均已合并到 `main`，整分支审查已跑完。**
+482 测试通过，typecheck 干净。**GrandeGPT 可以给任意已注册 repo 用了。**
 
 **已在真实 ChatGPT 普通对话里验证通过的三件事**：
 
@@ -47,13 +48,29 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
    「自主轮询」与「被用户推着走」无法区分。另外网关日志必须带时间戳，
    否则只能数次数、量不出间隔。
 
+**有界审查（2026-07-29，范围 `43ec654..HEAD`）**
+
+不做无限制扫描——探针对准本项目**已重复犯过**的四类错误：
+
+| 探针 | 结果 |
+|---|---|
+| **P-A 接线**（四次「模块写好但没接上线」） | ❌ 第五次：`awaitJobSettled` 从未被关停路径调用 |
+| **P-B 反向测试**（`destructiveHint: true` 曾把 bug 钉成规范） | ✅ 注解与规格 §5.2 一致 |
+| **P-C 同源漏改**（两次「修复只改一个调用点」） | ❌ `isValidResource` 守 `/authorize` 不守 refresh |
+| **P-D 安全边界**（CRITICAL-1；audience 是唯一防跨应用提权的检查） | ✅ fail-closed、gate 在 `/authorize` 第一行、`/token` 的 aud 恒从服务端配置推导 |
+
+两个 ❌ 已修（`ae81b48`），各带回归测试 + load-bearing 证明。
+**教训**：接线类缺陷单元测试天然抓不到——它们检查的是「谁调用了谁」，
+不是「函数算得对不对」。P-A 那个「遍历所有导出、查生产调用点」的机械探针
+值得每轮都跑一次。
+
 **已知遗留**（按优先级）：
 
 | # | 问题 | 状态 |
 |---|---|---|
-| 1 | S0-D 与其后一连串实测修复**没有跑过整分支审查** | 待办 |
+| 1 | `removeWorktree` 与 `TaskState "CLOSED"` 无生产入口——规格 §5.2 的 S0 只有 9 个工具、没有 `task_close` | S1 范畴。后果：worktree 与分支会累积，无回收路径 |
 | 2 | 沙箱内 `git` 需要 Xcode developer dir，环境清洗后不可用 | 仅影响调 git 的项目（本仓库自身），普通项目无感 |
-| 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项 |
+| 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项，单次样本 |
 
 
 **POC 已通过**（观察记录 [`docs/research/2026-07-26-poc-observation.md`](docs/research/2026-07-26-poc-observation.md)）——
