@@ -71,3 +71,13 @@ features:
         spec: .pact/tasks/s0c-5-runner.md
         evidence: typecheck clean; 13/13 tests pass (runner.test.ts); full suite: 255/255 tests pass across 14 files. Stress verification: moving getProfile() after createJob() caused "未注册的 profile 抛 PROFILE_NOT_FOUND，且【不】留下 running 的 job 行" to fail (expected 0, received 1 — zombie job row left behind). Reverting getProfile to before createJob restored all 13 tests to green, confirming validation-before-mutation ordering is correct.
         deps: [s0c-1-profiles, s0c-3-sandbox]
+  - id: s0d
+    branch: feat/s0d-mcp-oauth
+    status: in_progress
+    tasks:
+      - id: s0d-1-errors
+        owner: w1
+        status: assigned
+        reviewer: rev
+        spec: .pact/tasks/s0d-1-errors.md
+        evidence: null
