@@ -83,10 +83,10 @@ features:
         evidence: Verify gate PASS: "pnpm test && pnpm typecheck" - Test Files 19 passed (19), Tests 362 passed (362) - typecheck: clean (tsc --noEmit no errors)  Root cause: node_modules was missing on fresh checkout (vitest binary not found). Fixed by running pnpm install.
       - id: s0d-2-oauth
         owner: w1
-        status: in_progress
+        status: awaiting_review
         reviewer: rev
         spec: .pact/tasks/s0d-2-oauth.md
-        evidence: null
+        evidence: All 393 tests pass (21 test files), including 31 new tests (6 accessGate + 25 oauth).   Load-bearing verification (all 6 checks confirmed): 1. code_challenge required → TEST RED when removed, GREEN when restored 2. refresh resource equality → TEST RED when removed, GREEN when restored 3. CRITICAL-3: codes.delete() before await → TEST RED when moved after JWT signing (3 fulfilled instead of 1), GREEN when restored 4. CRITICAL-4: redirect_uri exact match → TEST RED when changed to startsWith (resolved instead of rejecting), GREEN when restored 5. I-11: refresh replay chain invalidation → TEST RED when only rejecting (new RT still usable), GREEN when restored 6. I-9: algorithms:["HS256"] lock → Manual probe: without algorithms constraint, HS512 token ACCEPTED (vulnerable). With constraint, REJECTED. Confirmed load-bearing.
       - id: s0d-3-tools
         owner: w1
         status: assigned
