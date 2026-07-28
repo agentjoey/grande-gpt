@@ -223,7 +223,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           },
           required: ["taskId", "slug"],
         },
-        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         handler: async (args) =>
           wrap(deps, args.taskId as string, () => {
             const taskId = args.taskId as string;
@@ -252,7 +252,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           },
           required: ["taskId", "profile"],
         },
-        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         handler: async (args) =>
           wrap(deps, args.taskId as string, () => {
             const taskId = args.taskId as string;
@@ -291,7 +291,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           },
           required: ["ops"],
         },
-        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         handler: async (args) =>
           wrap(deps, (args.taskId as string) ?? null, () => {
             const ops = args.ops as EditOp[];

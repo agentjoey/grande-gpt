@@ -110,13 +110,19 @@ describe("工具注解", () => {
     }
   });
 
-  it("写工具 readOnlyHint: false, destructiveHint: true", () => {
+  it("写工具 readOnlyHint: false，但 destructiveHint 必须是 false", () => {
+    // 这条测试原本断言 destructiveHint 是 true——**它把 bug 钉成了规范**，
+    // 于是六轮任务审查加一轮整支审查都没人发现实现与规格 §5.2 相反。
+    // 真实后果：`Allow low-risk actions` 档下三个写工具被 ChatGPT 客户端全部拦掉，
+    // 服务端连请求都收不到，审计账本零记录，模型只说一句「被禁用」。
+    // 规格 §5.3 的原话是：S0 放弃删除文件，正是为了让写工具能诚实地保持
+    // destructive: false（标 true 会每次弹框且无法「记住」）。
     const writeNames = ["grande_repo_edit", "grande_run", "grande_task_open"];
     for (const name of writeNames) {
       const t = buildTools(deps).find((tool) => tool.name === name);
       expect(t, name).toBeDefined();
       expect(t!.annotations.readOnlyHint, `${name} readOnlyHint`).toBe(false);
-      expect(t!.annotations.destructiveHint, `${name} destructiveHint`).toBe(true);
+      expect(t!.annotations.destructiveHint, `${name} destructiveHint`).toBe(false);
     }
   });
 
@@ -204,3 +210,46 @@ describe("grande_run / grande_run_result", () => {
     expect(res.data.networkDenied).toBe(false);
   });
 }, 15_000);
+
+describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
+  /**
+   * 规格 §5.2 明确规定了每个工具的 readOnlyHint 与 destructiveHint。
+   *
+   * 这一条不是形式主义：ChatGPT 的 per-app 权限档【就是按注解放行的】。
+   * 三个写工具曾被实现成 destructiveHint: true，结果在 `Allow low-risk actions`
+   * 档下全部被客户端拦掉——ChatGPT 只说「被禁用」，服务端日志里连请求都看不到，
+   * 审计账本零记录。整整两轮真实测试才定位到。
+   *
+   * 而且 §5.3 说得很清楚：S0 之所以【放弃删除文件】，就是为了让 repo_edit 能
+   * 诚实地保持 destructive: false（标 true 会导致每次弹框且无法「记住」）。
+   * 把它标成 true 等于代价照付、好处没拿到。
+   */
+  const SPEC: Record<string, { readOnly: boolean; destructive: boolean }> = {
+    grande_task_open:   { readOnly: false, destructive: false },
+    grande_task_status: { readOnly: true,  destructive: false },
+    grande_repo_map:    { readOnly: true,  destructive: false },
+    grande_repo_search: { readOnly: true,  destructive: false },
+    grande_repo_read:   { readOnly: true,  destructive: false },
+    grande_repo_edit:   { readOnly: false, destructive: false },
+    grande_diff:        { readOnly: true,  destructive: false },
+    grande_run:         { readOnly: false, destructive: false },
+    grande_run_result:  { readOnly: true,  destructive: false },
+  };
+
+  it("九个工具的注解与规格逐项一致", () => {
+    const tools = buildTools(deps);
+    expect(tools).toHaveLength(Object.keys(SPEC).length);
+    for (const t of tools) {
+      const want = SPEC[t.name];
+      expect(want, `${t.name} 不在规格 §5.2 的表里`).toBeDefined();
+      expect(t.annotations.readOnlyHint, `${t.name}.readOnlyHint`).toBe(want!.readOnly);
+      expect(t.annotations.destructiveHint, `${t.name}.destructiveHint`).toBe(want!.destructive);
+      expect(t.annotations.openWorldHint, `${t.name}.openWorldHint（S0 全禁网）`).toBe(false);
+    }
+  });
+
+  it("S0 没有任何工具标 destructiveHint: true（§5.3 的代价换来的）", () => {
+    const bad = buildTools(deps).filter((t) => t.annotations.destructiveHint);
+    expect(bad.map((t) => t.name)).toEqual([]);
+  });
+});

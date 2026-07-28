@@ -142,6 +142,10 @@ export function createApp(cfg: AppConfig): Hono {
       return c.redirect(redirect.toString(), 302);
     } catch (e) {
       if (e instanceof OAuthError) {
+        // 出错时也是 302（把 error 带回 redirect_uri，这是 OAuth 的规定动作），
+        // 所以光看状态码分不清成功与失败——必须把错误码记进服务端日志，
+        // 否则「ChatGPT 显示连接失败」时我们只能猜是哪一步。
+        console.error(`[gw] /authorize 拒绝: ${e.code} — ${e.message}`);
         if (q.redirect_uri) {
           const redirect = new URL(q.redirect_uri);
           redirect.searchParams.set("error", e.code);
