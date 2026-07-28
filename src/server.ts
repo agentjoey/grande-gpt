@@ -84,11 +84,20 @@ export function createApp(cfg: AppConfig): Hono {
     issuer,
     endpointFor: (repoId) => `${issuer}/mcp/${repoId}`,
     isRegistered: (repoId) => registeredIds(layout).has(repoId),
+    registeredRepoIds: () => [...registeredIds(layout)].sort(),
     keyPath: join(layout.controlRoot, "secrets", "oauth-key"),
   };
   const oauth = createOAuth(oauthCfg);
 
   const app = new Hono();
+
+  // 请求日志。spike 版有、本实现漏了——结果是「ChatGPT 报连接失败」时我们只能猜，
+  // 因为分不清请求根本没到、还是到了但被某一步拒了。诊断信息只进服务端日志，不回给调用方。
+  app.use("*", async (c, next) => {
+    const t0 = Date.now();
+    await next();
+    console.log(`[gw] ${c.req.method} ${new URL(c.req.url).pathname} → ${c.res.status} (${Date.now() - t0}ms)`);
+  });
 
   app.post("/register", async (c) => {
     try {

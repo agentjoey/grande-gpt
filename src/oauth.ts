@@ -6,6 +6,9 @@ export interface OAuthConfig {
   issuer: string;
   endpointFor(repoId: string): string;
   isRegistered(repoId: string): boolean;
+  /** 已注册的全部 repoId。仅用于 AS 元数据的 scopes_supported——
+   *  客户端据此判断能请求哪些 scope，空数组会让它认为无 scope 可用。 */
+  registeredRepoIds?: () => string[];
   keyPath: string;
 }
 
@@ -313,10 +316,16 @@ export function createOAuth(cfg: OAuthConfig) {
     );
   }
 
+  /** 本 AS 使用的 scope 形态：每 repo 一个，与 `aud` 一起构成 D5 的隔离 */
+  const scopeFor = (repoId: string): string => `grande:repo:${repoId}`;
+
   function protectedResourceMetadata(repoId: string) {
     return {
       resource: cfg.endpointFor(repoId),
       authorization_servers: [cfg.issuer],
+      // spike 版带了这个字段而本实现漏了。客户端据此决定要请求什么 scope——
+      // 缺失时它只能猜，或者干脆判定这个资源不可用。
+      scopes_supported: [scopeFor(repoId)],
     };
   }
 
@@ -327,7 +336,9 @@ export function createOAuth(cfg: OAuthConfig) {
       token_endpoint: `${cfg.issuer}/token`,
       registration_endpoint: `${cfg.issuer}/register`,
       jwks_uri: `${cfg.issuer}/jwks`,
-      scopes_supported: [],
+      // 硬编码空数组是错的：客户端据此判断能请求哪些 scope。
+      // 由 isRegistered 之外再要一份「有哪些 repo」的能力不划算，所以让调用方注入。
+      scopes_supported: (cfg.registeredRepoIds?.() ?? []).map(scopeFor),
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
