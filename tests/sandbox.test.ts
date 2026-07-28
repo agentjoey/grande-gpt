@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -414,4 +415,112 @@ describe("PATH 与 execRoots 同源（回归：修复前二者是两处独立硬
     expect(line).toBeDefined();
     expect(line!.slice("PATH=".length).split(":").sort()).toEqual([...roots].sort());
   }, 25_000);
+});
+
+describe("git 在沙箱内可用", () => {
+  let root: string;
+  let paths: SandboxPaths;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "git-sbx-"));
+    paths = {
+      worktree: join(root, "worktree"),
+      canonicalGit: join(root, "canonical", ".git"),
+      jobTmp: join(root, "jobtmp"),
+      controlRoot: join(root, "control"),
+      worktreesRoot: join(root, "worktrees"),
+      execRoots: defaultExecRoots(),
+    };
+    for (const d of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
+      mkdirSync(d, { recursive: true });
+    }
+    execFileSync("git", ["init"], { cwd: paths.worktree });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: paths.worktree });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: paths.worktree });
+    writeFileSync(join(paths.worktree, "README.md"), "# Test\n");
+    execFileSync("git", ["add", "."], { cwd: paths.worktree });
+    execFileSync("git", ["commit", "-m", "init"], { cwd: paths.worktree });
+  });
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("沙箱内 git rev-parse HEAD 返回 40 位 sha", async () => {
+    const r = await runSandboxed({
+      argv: ["git", "rev-parse", "HEAD"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("沙箱内 git status --short 在干净 worktree 上返回空", async () => {
+    const r = await runSandboxed({
+      argv: ["git", "status", "--short"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("");
+  });
+
+  it("沙箱内 git log --oneline -1 返回最新的 commit（形如 'sha msg'）", async () => {
+    const r = await runSandboxed({
+      argv: ["git", "log", "--oneline", "-1"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toMatch(/^[0-9a-f]{7,} init$/);
+  });
+
+  it("沙箱内 git diff --stat HEAD 返回空（HEAD 自身无 diff）", async () => {
+    const r = await runSandboxed({
+      argv: ["git", "diff", "--stat", "HEAD"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("");
+  });
+
+  it("反向：沙箱内写 worktree 之外路径仍被拒（真实可写路径，不是系统密封卷）", async () => {
+    // 在 root 下建一个兄弟目录——磁盘上真实可写，但不在 sandbox 的 file-write* allow 清单里。
+    // /pwned.txt 是在 macOS 密封系统卷上，没沙箱时也被拒 (Read-only file system)，是恒真断言。
+    // ~/pwned.txt 也不行：runSandboxed 把 HOME 重映射到 jobTmp/home，那里本来就可写。
+    const outside = join(root, "outside");
+    mkdirSync(outside, { recursive: true });
+    const target = join(outside, "pwned.txt");
+    const r = await runSandboxed({
+      argv: ["/bin/sh", "-c", `echo x > ${target}`],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).not.toBe(0);
+    expect(r.stderr + r.stdout).toMatch(/not permitted/i);
+    // I7：既要断言行文信息，也要断言目标文件真的没被创建——
+    // 不能只靠 stderr 文字（万一 sandbox 报的是别的 permission 错误、文件已经落盘了）
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it("反向：沙箱内 git ls-remote 仍失败（网络仍被拒）", async () => {
+    const r = await runSandboxed({
+      argv: ["git", "ls-remote", "https://github.com/anomalyco/opencode.git"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 15_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).not.toBe(0);
+  });
 });

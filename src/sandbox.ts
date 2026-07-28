@@ -61,7 +61,7 @@ const STANDARD_EXEC_ROOTS = ["/usr/bin", "/bin", "/usr/sbin"];
 
 /** 需要在沙箱里放行的包管理器二进制。逐个用 `which` 探测——某个名字在本机
  *  没装（比如没有独立的 npx）就跳过，不是错误。 */
-const PACKAGE_MANAGER_BINARIES = ["pnpm", "npm", "npx"];
+const PACKAGE_MANAGER_BINARIES = ["pnpm", "npm", "npx", "git"];
 
 /**
  * BUG 2 实测复现（本机 2026-07-28）：`which pnpm` → `~/.local/bin/pnpm`，
@@ -87,8 +87,18 @@ const PACKAGE_MANAGER_BINARIES = ["pnpm", "npm", "npx"];
  */
 function resolveBinaryDirs(name: string): string[] {
   try {
-    const found = execFileSync("/usr/bin/which", [name], { encoding: "utf8" }).trim();
+    let found = execFileSync("/usr/bin/which", [name], { encoding: "utf8" }).trim();
     if (!found) return [];
+    if (name === "git") {
+      // 只有 which 返回 /usr/bin/git（macOS 的 xcrun shim，不是真二进制）时才退回到 xcrun 查找。
+      // Homebrew / CLT 安装下 which git 本来就指向真二进制，直接沿用——不静默切换安装来源。
+      if (found === "/usr/bin/git") {
+        try {
+          const real = execFileSync("/usr/bin/xcrun", ["--find", "git"], { encoding: "utf8" }).trim();
+          if (real) found = real;
+        } catch { /* xcrun 不可用，沿用 which 结果（shim 在沙箱里会挂，由其它放行规则兜底） */ }
+      }
+    }
     return [...new Set([dirname(found), dirname(realpathSync(found))])];
   } catch {
     return []; // 本机没装这个二进制，跳过而不是报错
@@ -109,12 +119,16 @@ function resolveBinaryDirs(name: string): string[] {
  * 二进制，比 PATH 查找更权威（不依赖 PATH 里排最前面的恰好是同一个安装）。
  */
 export function defaultExecRoots(): string[] {
+  const gitDirs = resolveBinaryDirs("git");
   const roots = new Set<string>(STANDARD_EXEC_ROOTS.map((r) => realpathSync(r)));
   roots.add(dirname(realpathSync(process.execPath)));
   for (const bin of PACKAGE_MANAGER_BINARIES) {
+    if (bin === "git") continue; // 已单独解析，放在最前面确保 PATH 优先级
     for (const dir of resolveBinaryDirs(bin)) roots.add(dir);
   }
-  return [...roots];
+  // git 的真实二进制目录必须排在 /usr/bin 之前：macOS 上 /usr/bin/git 是 xcrun shim，
+  // 按 PATH 顺序最先被 execvp 找到——真实二进制目录排在前才能让 execvp 跳过 shim。
+  return [...new Set([...gitDirs, ...roots])];
 }
 
 /**

@@ -5,6 +5,7 @@ import { ensureLayout, loadLayout } from "./layout.ts";
 import { startGateway } from "./server.ts";
 import { loadAccessConfig } from "./accessGate.ts";
 import { awaitAllJobsSettled } from "./runner.ts";
+import { planGc, applyGc } from "./worktreeGc.ts";
 
 /**
  * Gateway 的进程入口。
@@ -34,6 +35,20 @@ async function main(): Promise<void> {
   console.log(`[gateway] listening on 127.0.0.1:${port}  issuer=${issuer}`);
   console.log(`[gateway] workspace=${layout.workspaceRoot}`);
   console.log(`[gateway] control=${layout.controlRoot}`);
+
+  // 方向 B：幽灵 task → CLOSED（纯数据修复，零风险——worktree 目录已经不存在，
+  // 没有东西可删）。不修的话 `grande_task_status` 会一直列出根本不存在的任务。
+  const gcPlan = planGc(db, layout);
+  if (gcPlan.ghostTasks.length > 0) {
+    const { closed } = applyGc(db, layout, { orphanWorktrees: [], ghostTasks: gcPlan.ghostTasks });
+    console.log(`[gateway] 启动对账：关闭了 ${closed} 个幽灵 task（worktree 已不存在的 task 记录）`);
+  }
+
+  // 方向 A：孤儿 worktree（磁盘有、库里没有）绝不在启动时自动删除——删文件必须是
+  // 人显式 `grande gc --apply` 的动作。只提示有 N 个孤儿、建议跑 grande gc。
+  if (gcPlan.orphanWorktrees.length > 0) {
+    console.log(`[gateway] 发现 ${gcPlan.orphanWorktrees.length} 个孤儿 worktree（磁盘上有但没有对应 task 记录），建议运行 \`grande gc\` 查看详情`);
+  }
 
   // 优雅关停：先停止接受新连接，**再等在途的后台 job 收尾写完 artifact**，最后才
   // 关库退出。硬杀会让 runner 的 .then 链在 db.close() 之后落地——那正是 S0-C 修过的

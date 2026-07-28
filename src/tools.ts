@@ -3,7 +3,7 @@ import { ok, err, type TaskContext } from "./envelope.ts";
 import { toToolError, redact, StateError } from "./errors.ts";
 import { PathSecurityError, resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
-import { getTask, listActiveTasks, createTask } from "./tasks.ts";
+import { getTask, listActiveTasks, createTask, updateTaskState } from "./tasks.ts";
 import { loadProfiles } from "./profiles.ts";
 import { getJob, listJobs } from "./jobs.ts";
 import { jobReport, jobStateToError, startJob } from "./runner.ts";
@@ -11,7 +11,7 @@ import { repoRead } from "./repoFile.ts";
 import { repoEdit, type EditOp } from "./repoFile.ts";
 import { repoSearch } from "./repoSearch.ts";
 import { repoMap } from "./repoMap.ts";
-import { listChangedFiles, repoDiff, openWorktree } from "./worktree.ts";
+import { listChangedFiles, repoDiff, openWorktree, removeWorktree } from "./worktree.ts";
 import type { Layout } from "./layout.ts";
 import { loadDenyRules } from "./policy.ts";
 import { beginAudit } from "./audit.ts";
@@ -43,11 +43,15 @@ function makeTaskContext(db: DatabaseSync, layout: Layout, taskId: string): Task
   const t = getTask(db, taskId);
   if (!t) return null;
   const jobs = listJobs(db, taskId);
-  return {
-    branch: t.branch,
-    filesChanged: listChangedFiles(t.worktreePath, t.baseCommit).length,
-    lastJob: jobs.length > 0 ? `${jobs[0]!.jobId} (${jobs[0]!.state})` : null,
-  };
+  try {
+    return {
+      branch: t.branch,
+      filesChanged: listChangedFiles(t.worktreePath, t.baseCommit).length,
+      lastJob: jobs.length > 0 ? `${jobs[0]!.jobId} (${jobs[0]!.state})` : null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -421,7 +425,10 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             return ok({
               taskId,
               data: { taskId: t.taskId, branch: t.branch, baseCommit: t.baseCommit, worktreePath: t.worktreePath },
-              hint: `已创建任务 ${t.taskId}，分支 ${t.branch}，worktree：${t.worktreePath}`,
+              hint: `任务 ${t.taskId} 已创建并处于 READY 状态——分支 ${t.branch} 与 worktree 已就绪，` +
+                `可以开始工作。下一步：使用 grande_repo_edit (taskId="${t.taskId}") 修改文件，` +
+                `或 grande_run (taskId="${t.taskId}") 运行测试。` +
+                `完成后调用 grande_task_close (taskId="${t.taskId}") 回收资源。`,
               taskContext: makeTaskContext(db, layout, taskId),
             });
           }),
@@ -538,37 +545,93 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           });
         }),
     },
-    {
-      name: "grande_run_result",
-      description: "获取指定 job 的执行结果与日志尾部",
-      inputSchema: {
-        type: "object",
-        properties: {
-          jobId: { type: "string", description: "作业ID" },
+      {
+        name: "grande_run_result",
+        description: "获取指定 job 的执行结果与日志尾部",
+        inputSchema: {
+          type: "object",
+          properties: {
+            jobId: { type: "string", description: "作业ID" },
+          },
+          required: ["jobId"],
         },
-        required: ["jobId"],
+        annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+        handler: async (args) =>
+          wrap(deps, null, () => {
+            const jobId = args.jobId as string;
+            const r = jobReport(db, jobId);
+            const j = getJob(db, jobId);
+            const taskId = j?.taskId ?? null;
+            const jobErr = jobStateToError(r);
+            if (jobErr) {
+              return err({ code: jobErr.code, message: jobErr.message, retryable: jobErr.retryable, details: jobErr.details, taskId });
+            }
+            return ok({
+              taskId,
+              data: r,
+              hint: r.state === "running"
+                ? `Job ${jobId} 仍在运行中`
+                : `Job ${jobId} 状态：${r.state}${r.exitCode !== null ? `，exitCode: ${r.exitCode}` : ""}${r.networkDenied ? "（疑似网络被拒——启发式判定，非沙箱权威信号）" : ""}`,
+              truncated: r.truncated,
+              taskContext: taskId ? makeTaskContext(db, layout, taskId) : null,
+            })
+          }),
       },
-      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-      handler: async (args) =>
-        wrap(deps, null, () => {
-          const jobId = args.jobId as string;
-          const r = jobReport(db, jobId);
-          const j = getJob(db, jobId);
-          const taskId = j?.taskId ?? null;
-          const jobErr = jobStateToError(r);
-          if (jobErr) {
-            return err({ code: jobErr.code, message: jobErr.message, retryable: jobErr.retryable, details: jobErr.details, taskId });
-          }
-          return ok({
-            taskId,
-            data: r,
-            hint: r.state === "running"
-              ? `Job ${jobId} 仍在运行中`
-              : `Job ${jobId} 状态：${r.state}${r.exitCode !== null ? `，exitCode: ${r.exitCode}` : ""}${r.networkDenied ? "（疑似网络被拒——启发式判定，非沙箱权威信号）" : ""}`,
-            truncated: r.truncated,
-            taskContext: taskId ? makeTaskContext(db, layout, taskId) : null,
-          })
-        }),
-    },
-  ];
-}
+      {
+        name: "grande_task_close",
+        description: "关闭任务，删除 worktree 与分支，回收磁盘空间。任务必须没有还在运行的 job——" +
+          "close 不会替你去杀 job，你需要先等 job 结束（grande_run_result 轮询至终态），再关任务。" +
+          "关闭是不可逆操作：worktree 里的改动如果没提交，将被永久丢弃。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskId: { type: "string", description: "要关闭的任务ID" },
+          },
+          required: ["taskId"],
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        handler: async (args) =>
+          wrap(deps, args.taskId as string, () => {
+            const taskId = args.taskId as string;
+            const t = getTask(db, taskId);
+            if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+            if (t.state === "CLOSED") {
+              return ok({
+                taskId,
+                data: { taskId: t.taskId, repoId: t.repoId, branch: t.branch, worktreePath: t.worktreePath },
+                hint: `任务 ${taskId} 此前已关闭（幂等）。worktree：${t.worktreePath}，分支：${t.branch}`,
+                taskContext: makeTaskContext(db, layout, taskId),
+              });
+            }
+            const running = listJobs(db, taskId).filter((j) => j.state === "running");
+            if (running.length > 0) {
+              throw new StateError(
+                "JOB_RUNNING",
+                `任务 ${taskId} 仍有一个在跑的 job：${running[0]!.jobId}。` +
+                  `请先用 grande_run_result 轮询该 job 至终态（passed/failed/timeout/killed/cancelled），` +
+                  `再关闭任务。`,
+              );
+            }
+            const h = beginAudit(db, { taskId, tool: "grande_task_close", input: { taskId } });
+            h.allowed();
+            if (!h.executing()) {
+              throw new StateError("STALE_STATE", `任务 ${taskId} 的审计句柄无法推进到 EXECUTING。`);
+            }
+            try {
+              removeWorktree(layout, { repoId: t.repoId, worktreePath: t.worktreePath, branch: t.branch });
+            } catch (e) {
+              h.failed((e as Error).message);
+              throw e;
+            }
+            updateTaskState(db, taskId, "CLOSED", t.stateVersion);
+            h.succeeded([t.worktreePath]);
+            return ok({
+              taskId,
+              data: { taskId: t.taskId, repoId: t.repoId, branch: t.branch, worktreePath: t.worktreePath },
+              hint: `任务 ${taskId} 已关闭——worktree ${t.worktreePath} 与分支 ${t.branch} 已被删除。` +
+                `磁盘空间已回收。`,
+            });
+          }),
+      },
+    ];
+  }

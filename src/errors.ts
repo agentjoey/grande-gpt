@@ -57,6 +57,7 @@ const MAP: Record<string, { code: ToolErrorCode; retryable: boolean }> = {
   // 多半说明它记错了名字而不是状态丢了——标 retryable 容易鼓励它反复瞎猜同一个
   // 错的名字，而不是先去确认可用列表。
   TASK_NOT_FOUND:          { code: "TASK_NOT_FOUND",      retryable: true  },
+  JOB_RUNNING:             { code: "INVALID_INPUT",       retryable: true  },
   // C-5 新增：STALE_STATE 是 updateTaskState 的乐观并发失败，语义与 STALE_FILE
   // 一致（重读后重试），只是工具码按规格 §7.1 收敛到通用的 INVALID_INPUT。
   STALE_STATE:             { code: "INVALID_INPUT",       retryable: true  },

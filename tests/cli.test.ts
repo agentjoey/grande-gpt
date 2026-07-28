@@ -298,7 +298,7 @@ describe("命令行本身", () => {
     expect(text()).toContain("doctor");
   });
 
-  it("CLI 不提供任何变更能力——用法里没有任何写操作命令", () => {
+  it("USAGE 不提供除 gc --apply 外的变更命令", () => {
     runCli([], out);
     for (const verb of ["create", "delete", "remove", "run", "edit", "register"]) {
       expect(text().toLowerCase()).not.toContain(`grande ${verb}`);
