@@ -81,3 +81,9 @@ features:
         reviewer: rev
         spec: .pact/tasks/s0d-1-errors.md
         evidence: null
+      - id: s0d-2-oauth
+        owner: w1
+        status: assigned
+        reviewer: rev
+        spec: .pact/tasks/s0d-2-oauth.md
+        evidence: null
