@@ -8,10 +8,13 @@ import { getTask, listActiveTasks } from "./tasks.ts";
 import { getJob, listJobs } from "./jobs.ts";
 import { jobReport } from "./runner.ts";
 import { repoRead } from "./repoFile.ts";
+import { repoEdit, type EditOp } from "./repoFile.ts";
 import { repoSearch } from "./repoSearch.ts";
 import { repoMap } from "./repoMap.ts";
 import { listChangedFiles, repoDiff } from "./worktree.ts";
 import type { Layout } from "./layout.ts";
+import { loadDenyRules } from "./policy.ts";
+import { beginAudit } from "./audit.ts";
 
 export interface ToolDef {
   name: string;
@@ -205,12 +208,44 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             hint: r.truncated
               ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），内容已截断（返回了 ${Buffer.byteLength(r.content, "utf8")} 字节）`
               : `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节）`,
-            truncated: r.truncated,
-          });
-        }),
-    },
-    {
-      name: "grande_diff",
+              truncated: r.truncated,
+            });
+          }),
+      },
+      {
+        name: "grande_repo_edit",
+        description: "批量修改仓库文件：create（新建）、modify（修改，需要 expectedSha256 防冲突）、move（移动）。不支持删除",
+        inputSchema: {
+          type: "object",
+          properties: {
+            ops: {
+              type: "array",
+              items: { type: "object" },
+              description: "修改操作数组，每项含 op/create/modify/move 等字段",
+            },
+            taskId: { type: "string", description: "可选的任务ID，关联审计记录" },
+          },
+          required: ["ops"],
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        handler: async (args) =>
+          wrap(deps, (args.taskId as string) ?? null, () => {
+            const ops = args.ops as EditOp[];
+            const rules = loadDenyRules(layout);
+            const h = beginAudit(db, { taskId: (args.taskId as string) ?? null, tool: "grande_repo_edit", input: { ops } });
+            h.allowed();
+            const r = repoEdit(repoRoot, ops, rules, h);
+            const paths = r.applied.map((a) => a.path);
+            return ok({
+              taskId: (args.taskId as string | undefined),
+              data: r,
+              hint: `已应用 ${r.applied.length} 个操作：${paths.join(", ")}`,
+              taskContext: (args.taskId as string) ? makeTaskContext(db, layout, args.taskId as string) : null,
+            });
+          }),
+      },
+      {
+        name: "grande_diff",
       description: "查看任务 worktree 相对 base 的改动（diff），按文件分页",
       inputSchema: {
         type: "object",

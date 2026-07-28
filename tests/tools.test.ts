@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -78,28 +78,37 @@ const READ_ONLY = [
 ] as const;
 
 describe("工具注解", () => {
-  it("恰好注册六个只读工具，且名字与规格 §5.2 一致", () => {
-    expect(buildTools(deps).map((t) => t.name).sort()).toEqual([...READ_ONLY].sort());
-    expect(buildTools(deps)).toHaveLength(READ_ONLY.length);
+  it("恰好注册六个只读工具与一个写工具，且名字与规格 §5.2 一致", () => {
+    const names = buildTools(deps).map((t) => t.name).sort();
+    expect(names.filter((n) => READ_ONLY.includes(n as typeof READ_ONLY[number]))).toEqual([...READ_ONLY].sort());
+    expect(names).toContain("grande_repo_edit");
+    expect(names).toHaveLength(READ_ONLY.length + 1);
   });
 
   it("六个只读工具全部 readOnlyHint: true", () => {
-    const tools = buildTools(deps);
+    const tools = buildTools(deps).filter((t) => READ_ONLY.includes(t.name as typeof READ_ONLY[number]));
     expect(tools).toHaveLength(READ_ONLY.length);
     for (const t of tools) {
       expect(t.annotations.readOnlyHint, `${t.name} 应为只读`).toBe(true);
     }
   });
 
+  it("写工具 readOnlyHint: false, destructiveHint: true", () => {
+    const edit = buildTools(deps).find((t) => t.name === "grande_repo_edit");
+    expect(edit).toBeDefined();
+    expect(edit!.annotations.readOnlyHint).toBe(false);
+    expect(edit!.annotations.destructiveHint).toBe(true);
+  });
+
   it("所有工具 openWorldHint: false（S0 全禁网）", () => {
     const tools = buildTools(deps);
-    expect(tools).toHaveLength(READ_ONLY.length);
+    expect(tools.length).toBeGreaterThan(0);
     for (const t of tools) expect(t.annotations.openWorldHint).toBe(false);
   });
 
   it("repoId 不出现在任何工具的入参 schema 里（D5：由端点决定）", () => {
     const tools = buildTools(deps);
-    expect(tools).toHaveLength(READ_ONLY.length);
+    expect(tools.length).toBeGreaterThan(0);
     for (const t of tools) {
       expect(t.inputSchema.properties, t.name).toBeDefined();
       expect(Object.keys(t.inputSchema.properties ?? {}), t.name).not.toContain("repoId");
@@ -131,5 +140,15 @@ describe("响应信封", () => {
   it("错误消息里不含 layout.workspaceRoot 这个绝对路径前缀", async () => {
     const r = JSON.parse(await callTool("grande_repo_read", { path: "../outside.ts" }));
     expect(JSON.stringify(r)).not.toContain(layout.workspaceRoot);
+  });
+
+  it("写工具用的是控制平面里的拒绝表，不是空表（AC-14 第二条断言）", async () => {
+    const canonical = join(layout.workspaceRoot, "demo");
+    const r = JSON.parse(await callTool("grande_repo_edit", {
+      ops: [{ op: "create", path: ".git/hooks/pre-commit", content: "#!/bin/sh\n" }],
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe("POLICY_DENIED");
+    expect(existsSync(join(canonical, ".git/hooks/pre-commit"))).toBe(false);
   });
 });
