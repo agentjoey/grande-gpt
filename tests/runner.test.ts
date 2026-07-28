@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import type { Layout } from "../src/layout.ts";
-import { getJob } from "../src/jobs.ts";
+import { getJob, listJobs } from "../src/jobs.ts";
 import { createTask } from "../src/tasks.ts";
-import { awaitJobSettled, jobReport, startJob } from "../src/runner.ts";
+import { awaitJobSettled, jobReport, jobStateToError, startJob } from "../src/runner.ts";
+import { getAudit, beginAudit, type AuditHandle } from "../src/audit.ts";
+import { allowedHandle } from "./_audit.ts";
 
 let ws: string, ctrl: string, layout: Layout, db: ReturnType<typeof openDb>, wt: string;
 let savedWs: string | undefined, savedCtrl: string | undefined;
@@ -23,7 +25,7 @@ const waitFor = async (p: () => boolean, ms = 20_000) => {
 
 const started: string[] = [];
 const start = (profileName: string) => {
-  const s = startJob({ db, layout }, { taskId: "task_abcd", repoId: "demo", worktreePath: wt, profileName });
+  const s = startJob({ db, layout }, { taskId: "task_abcd", repoId: "demo", worktreePath: wt, profileName }, allowedHandle(db, "grande_run"));
   started.push(s.jobId);
   return s;
 };
@@ -143,6 +145,7 @@ describe("startJob()", () => {
       startJob(
         { db, layout },
         { taskId: "task_abcd", repoId: "demo", worktreePath: layout.worktreesRoot, profileName: "ok" },
+        allowedHandle(db, "grande_run"),
       ),
     ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
     const rows = db.prepare("SELECT COUNT(*) AS n FROM job").get() as { n: number };
@@ -158,7 +161,7 @@ describe("startJob()", () => {
   it("taskId 路径穿越被拒，且不会在控制平面之外产生任何目录（C4）", () => {
     const evil = "../../../../../../../../tmp/grande-review-evil2";
     expect(() =>
-      startJob({ db, layout }, { taskId: evil, repoId: "demo", worktreePath: wt, profileName: "ok" }),
+      startJob({ db, layout }, { taskId: evil, repoId: "demo", worktreePath: wt, profileName: "ok" }, allowedHandle(db, "grande_run")),
     ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
     // 关键在于「没有任何目录出现在控制平面之外」，不只是「抛了个错」——断言的是
     // 漏洞真正会产生的那个 join 结果本身不存在。
@@ -202,6 +205,7 @@ describe("startJob()", () => {
         startJob(
           { db, layout },
           { taskId: "task_does_not_exist", repoId: "demo", worktreePath: wt, profileName: "orphanProbe" },
+          allowedHandle(db, "grande_run"),
         ),
       ).toThrow();
 
@@ -223,6 +227,50 @@ describe("startJob()", () => {
       process.off("unhandledRejection", onUnhandled);
     }
   }, 10_000);
+
+  it("startJob 在 spawn【之前】把句柄推进到 EXECUTING", async () => {
+    const marker = join(wt, "marker");
+    writeFileSync(
+      join(layout.configDir, "profiles.yaml"),
+      `repos:\n  demo:\n    touch: { argv: ["/usr/bin/touch", "${marker}"], timeoutSeconds: 10 }\n`,
+      "utf8",
+    );
+    const h = allowedHandle(db, "grande_run");
+    let markerExistedAtAdvance: boolean | null = null;
+    const spy: AuditHandle = { ...h, executing: () => {
+      markerExistedAtAdvance = existsSync(marker);
+      return h.executing();
+    } };
+    const s = startJob({ db, layout }, { taskId: "task_abcd", repoId: "demo", worktreePath: wt, profileName: "touch" }, spy);
+    started.push(s.jobId);
+    await awaitJobSettled(s.jobId);
+    expect(markerExistedAtAdvance).toBe(false);
+    expect(existsSync(marker)).toBe(true);
+    expect(getAudit(db, h.opId)!.state).toBe("SUCCEEDED");
+  });
+
+  it("句柄推进失败时【不 spawn】", () => {
+    const h = beginAudit(db, { taskId: null, tool: "grande_run", input: {} });
+    // 故意不调用 allowed()
+    expect(() =>
+      startJob({ db, layout }, { taskId: "task_abcd", repoId: "demo", worktreePath: wt, profileName: "ok" }, h),
+    ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
+    expect(listJobs(db, "task_abcd")).toHaveLength(0);
+  });
+
+  it("失败时句柄落到 FAILED 且带 reason", () => {
+    const h = allowedHandle(db, "grande_run");
+    expect(() =>
+      startJob({ db, layout }, { taskId: "task_abcd", repoId: "demo", worktreePath: wt, profileName: "does-not-exist" }, h),
+    ).toThrow();
+    const row = getAudit(db, h.opId)!;
+    expect(row.state).toBe("FAILED");
+    expect(row.reason).toBeTruthy();
+  });
+
+  it("startJob 的形参数量仍是 3（tsc 才是真正拦住漏传 audit 的那道关卡）", () => {
+    expect(startJob.length).toBe(3);
+  });
 }, 30_000);
 
 describe("jobReport()", () => {
@@ -284,3 +332,32 @@ describe("jobReport()", () => {
     );
   });
 }, 30_000);
+
+import type { JobReport } from "../src/runner.ts";
+
+const BASE_REPORT: JobReport = {
+  truncated: false, state: "passed", exitCode: 0, outputTruncated: false,
+  killedBy: null, durationMs: 100, peakRssMb: 50, artifactPath: null,
+  summary: "ok", networkDenied: false,
+};
+
+describe("jobStateToError()", () => {
+  it("timeout 终态映射到 JOB_TIMEOUT", () => {
+    const r = { ...BASE_REPORT, state: "timeout", killedBy: "timeout" } as JobReport;
+    expect(jobStateToError(r)?.code).toBe("JOB_TIMEOUT");
+  });
+
+  it("killed + killedBy rss 映射到 RESOURCE_EXHAUSTED", () => {
+    const r = { ...BASE_REPORT, state: "killed", killedBy: "rss", peakRssMb: 4200 } as JobReport;
+    expect(jobStateToError(r)?.code).toBe("RESOURCE_EXHAUSTED");
+  });
+
+  it("passed/failed 终态不映射（不是异常）", () => {
+    expect(jobStateToError({ ...BASE_REPORT, state: "passed", killedBy: null } as JobReport)).toBeNull();
+    expect(jobStateToError({ ...BASE_REPORT, state: "failed", killedBy: null } as JobReport)).toBeNull();
+  });
+
+  it("running 终态不映射（还没到终态）", () => {
+    expect(jobStateToError({ ...BASE_REPORT, state: "running", killedBy: null } as JobReport)).toBeNull();
+  });
+});

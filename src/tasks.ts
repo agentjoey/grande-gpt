@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { assertTaskId } from "./paths.ts";
+import { StateError } from "./errors.ts";
 
 export type TaskState = "CREATING" | "READY" | "RUNNING" | "CLOSED";
 
@@ -96,13 +97,14 @@ export function updateTaskState(
 
   if (res.changes === 0) {
     const cur = getTask(db, taskId);
-    if (!cur) throw new Error(`TASK_NOT_FOUND: ${taskId}`);
-    throw new Error(
-      `STALE_STATE: 任务 ${taskId} 的 stateVersion 已是 ${cur.stateVersion}，` +
-        `而本次更新携带的是 ${expectedVersion}。请重新读取状态后再试。`,
+    if (!cur) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+    throw new StateError(
+      "STALE_STATE",
+      `任务 ${taskId} 的 stateVersion 已是 ${cur.stateVersion}，而本次更新携带的是 ` +
+        `${expectedVersion}。请重新读取状态后再试。`,
     );
   }
   const updated = getTask(db, taskId);
-  if (!updated) throw new Error(`TASK_NOT_FOUND: ${taskId}`);
+  if (!updated) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
   return updated;
 }

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -11,10 +12,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { getAudit, beginAudit, type AuditHandle } from "../src/audit.ts";
+import { openDb } from "../src/db.ts";
+import type { Layout } from "../src/layout.ts";
 import type { DenyRules } from "../src/policy.ts";
 import { repoEdit, repoRead, type EditOp } from "../src/repoFile.ts";
+import { allowedHandle } from "./_audit.ts";
 
 let root: string;
+let db: ReturnType<typeof openDb>;
 const RULES: DenyRules = { prefixes: [".git/"] };
 
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
@@ -31,8 +37,12 @@ const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "rf-"));
+  db = openDb({ stateDb: ":memory:" } as Layout);
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => {
+  db.close();
+  rmSync(root, { recursive: true, force: true });
+});
 
 describe("repoRead()", () => {
   it("返回内容、字节数、行数与 sha256，且 sha256 与内容真实对应", () => {
@@ -112,14 +122,14 @@ describe("repoRead()", () => {
 
 describe("repoEdit()", () => {
   it("create 新建文件并返回新 sha256", () => {
-    const r = repoEdit(root, [{ op: "create", path: "src/new.ts", content: "hi" }], RULES);
+    const r = repoEdit(root, [{ op: "create", path: "src/new.ts", content: "hi" }], RULES, allowedHandle(db, "grande_repo_edit"));
     expect(read("src/new.ts")).toBe("hi");
     expect(r.applied[0]!.sha256).toBe(sha("hi"));
   });
 
   it("create 不覆盖已存在的文件", () => {
     file("a.ts", "original");
-    expect(() => repoEdit(root, [{ op: "create", path: "a.ts", content: "new" }], RULES)).toThrow(
+    expect(() => repoEdit(root, [{ op: "create", path: "a.ts", content: "new" }], RULES, allowedHandle(db, "grande_repo_edit"))).toThrow(
       expect.objectContaining({ code: "FILE_EXISTS" }),
     );
     expect(read("a.ts")).toBe("original");
@@ -127,14 +137,14 @@ describe("repoEdit()", () => {
 
   it("modify 在 expectedSha256 匹配时写入", () => {
     file("a.ts", "v1");
-    repoEdit(root, [{ op: "modify", path: "a.ts", content: "v2", expectedSha256: sha("v1") }], RULES);
+    repoEdit(root, [{ op: "modify", path: "a.ts", content: "v2", expectedSha256: sha("v1") }], RULES, allowedHandle(db, "grande_repo_edit"));
     expect(read("a.ts")).toBe("v2");
   });
 
   it("modify 在 expectedSha256 不匹配时抛 STALE_FILE 且不写入", () => {
     file("a.ts", "v1");
     expect(() =>
-      repoEdit(root, [{ op: "modify", path: "a.ts", content: "v2", expectedSha256: sha("WRONG") }], RULES),
+      repoEdit(root, [{ op: "modify", path: "a.ts", content: "v2", expectedSha256: sha("WRONG") }], RULES, allowedHandle(db, "grande_repo_edit")),
     ).toThrow(expect.objectContaining({ code: "STALE_FILE" }));
     expect(read("a.ts")).toBe("v1");
   });
@@ -145,7 +155,7 @@ describe("repoEdit()", () => {
     writeFileSync(join(root, "latin1.txt"), raw);
     const expectedSha256 = sha256(raw); // 对原始字节算出的、真正「正确」的哈希
     expect(() =>
-      repoEdit(root, [{ op: "modify", path: "latin1.txt", content: "REPLACED\n", expectedSha256 }], RULES),
+      repoEdit(root, [{ op: "modify", path: "latin1.txt", content: "REPLACED\n", expectedSha256 }], RULES, allowedHandle(db, "grande_repo_edit")),
     ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
     expect(readFileSync(join(root, "latin1.txt"))).toEqual(raw); // 原始字节完好无损
   });
@@ -156,26 +166,26 @@ describe("repoEdit()", () => {
     writeFileSync(join(root, "img.png"), raw);
     const expectedSha256 = sha256(raw);
     expect(() =>
-      repoEdit(root, [{ op: "modify", path: "img.png", content: "REPLACED\n", expectedSha256 }], RULES),
+      repoEdit(root, [{ op: "modify", path: "img.png", content: "REPLACED\n", expectedSha256 }], RULES, allowedHandle(db, "grande_repo_edit")),
     ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
     expect(readFileSync(join(root, "img.png"))).toEqual(raw);
   });
 
   it("move 移动文件，源消失目标出现", () => {
     file("a.ts", "content");
-    repoEdit(root, [{ op: "move", from: "a.ts", to: "src/b.ts" }], RULES);
+    repoEdit(root, [{ op: "move", from: "a.ts", to: "src/b.ts" }], RULES, allowedHandle(db, "grande_repo_edit"));
     expect(existsSync(join(root, "a.ts"))).toBe(false);
     expect(read("src/b.ts")).toBe("content");
   });
 
   it("命中拒绝表的路径被拒，且【两个方向】都查：move 的 from 与 to", () => {
     file("a.ts", "x");
-    expect(() => repoEdit(root, [{ op: "create", path: ".git/hooks/pre-commit", content: "#!/bin/sh" }], RULES))
+    expect(() => repoEdit(root, [{ op: "create", path: ".git/hooks/pre-commit", content: "#!/bin/sh" }], RULES, allowedHandle(db, "grande_repo_edit")))
       .toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
-    expect(() => repoEdit(root, [{ op: "move", from: "a.ts", to: ".git/x" }], RULES))
+    expect(() => repoEdit(root, [{ op: "move", from: "a.ts", to: ".git/x" }], RULES, allowedHandle(db, "grande_repo_edit")))
       .toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
     file(".git/config", "x");
-    expect(() => repoEdit(root, [{ op: "move", from: ".git/config", to: "leaked.txt" }], RULES))
+    expect(() => repoEdit(root, [{ op: "move", from: ".git/config", to: "leaked.txt" }], RULES, allowedHandle(db, "grande_repo_edit")))
       .toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
   });
 
@@ -185,7 +195,7 @@ describe("repoEdit()", () => {
     mkdirSync(join(root, ".git", "hooks"), { recursive: true });
     symlinkSync(join(root, ".git"), join(root, "vendor"));
     expect(() =>
-      repoEdit(root, [{ op: "create", path: "vendor/hooks/pre-commit", content: "#!/bin/sh\n" }], RULES),
+      repoEdit(root, [{ op: "create", path: "vendor/hooks/pre-commit", content: "#!/bin/sh\n" }], RULES, allowedHandle(db, "grande_repo_edit")),
     ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
     expect(existsSync(join(root, ".git", "hooks", "pre-commit"))).toBe(false);
   });
@@ -193,7 +203,7 @@ describe("repoEdit()", () => {
   it("拒绝表大小写不敏感：macOS APFS 上 .GIT/ 就是 .git/", () => {
     mkdirSync(join(root, ".git", "hooks"), { recursive: true });
     expect(() =>
-      repoEdit(root, [{ op: "create", path: ".GIT/hooks/pre-commit", content: "#!/bin/sh\n" }], RULES),
+      repoEdit(root, [{ op: "create", path: ".GIT/hooks/pre-commit", content: "#!/bin/sh\n" }], RULES, allowedHandle(db, "grande_repo_edit")),
     ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
     expect(existsSync(join(root, ".git", "hooks", "pre-commit"))).toBe(false);
   });
@@ -201,7 +211,7 @@ describe("repoEdit()", () => {
   it("内置拒绝项不可由调用方参数放宽（铁律三：硬门禁不接受调用方自觉）", () => {
     mkdirSync(join(root, ".git"), { recursive: true });
     expect(() =>
-      repoEdit(root, [{ op: "create", path: ".git/config", content: "x" }], { prefixes: [] }),
+      repoEdit(root, [{ op: "create", path: ".git/config", content: "x" }], { prefixes: [] }, allowedHandle(db, "grande_repo_edit")),
     ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
   });
 
@@ -213,7 +223,7 @@ describe("repoEdit()", () => {
           { op: "create", path: "x.ts", content: "a" },
           { op: "create", path: "./x.ts", content: "b" },
         ],
-        RULES,
+        RULES, allowedHandle(db, "grande_repo_edit"),
       ),
     ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
     expect(existsSync(join(root, "x.ts"))).toBe(false);
@@ -230,7 +240,7 @@ describe("repoEdit()", () => {
           { op: "modify", path: "a.ts", content: "v2", expectedSha256: sha("v1") }, // 合法
           { op: "create", path: ".git/evil", content: "x" },                        // 非法
         ],
-        RULES,
+        RULES, allowedHandle(db, "grande_repo_edit"),
       ),
     ).toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
     expect(read("a.ts")).toBe("v1"); // 第一个合法 op 也没有被应用
@@ -244,13 +254,13 @@ describe("repoEdit()", () => {
           { op: "create", path: "x.ts", content: "a" },
           { op: "create", path: "x.ts", content: "b" },
         ],
-        RULES,
+        RULES, allowedHandle(db, "grande_repo_edit"),
       ),
     ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 
   it("空 ops 数组被拒，而不是静默成功", () => {
-    expect(() => repoEdit(root, [], RULES)).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    expect(() => repoEdit(root, [], RULES, allowedHandle(db, "grande_repo_edit"))).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 
   it("不提供删除能力：运行时拒绝任何未知 op，包括 delete（规格 §5.3）", () => {
@@ -259,8 +269,50 @@ describe("repoEdit()", () => {
     // 类型层挡不住 S0-D 那边解出来的 JSON —— 所以运行时也要挡。
     file("a.ts", "v1");
     expect(() =>
-      repoEdit(root, [{ op: "delete", path: "a.ts" } as unknown as EditOp], RULES),
+      repoEdit(root, [{ op: "delete", path: "a.ts" } as unknown as EditOp], RULES, allowedHandle(db, "grande_repo_edit")),
     ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
     expect(read("a.ts")).toBe("v1");
+  });
+
+  it("repoEdit 在写盘【之前】把句柄推进到 EXECUTING", () => {
+    const target = join(root, "a.ts");
+    const handle = allowedHandle(db, "grande_repo_edit");
+    let fileExistedAtAdvance: boolean | null = null;
+    const spy: AuditHandle = { ...handle, executing: () => {
+      fileExistedAtAdvance = existsSync(target);
+      return handle.executing();
+    } };
+    repoEdit(root, [{ op: "create", path: "a.ts", content: "x" }], RULES, spy);
+    expect(fileExistedAtAdvance).toBe(false);
+    expect(existsSync(target)).toBe(true);
+    expect(getAudit(db, handle.opId)!.state).toBe("SUCCEEDED");
+  });
+
+  it("句柄推进失败时【不写盘】", () => {
+    const h = beginAudit(db, { taskId: null, tool: "grande_repo_edit", input: {} });
+    // 故意不调用 allowed()，executing() 因此返回 false
+    expect(() => repoEdit(root, [{ op: "create", path: "a.ts", content: "x" }], RULES, h))
+      .toThrow(expect.objectContaining({ code: "POLICY_DENIED" }));
+    expect(existsSync(join(root, "a.ts"))).toBe(false);
+  });
+
+  it("失败时句柄落到 FAILED 且带 reason", () => {
+    mkdirSync(join(root, "locked"), { recursive: true });
+    chmodSync(join(root, "locked"), 0o500); // r-x：目录可进入不可写
+    const h = allowedHandle(db, "grande_repo_edit");
+    try {
+      expect(() =>
+        repoEdit(root, [{ op: "create", path: "locked/a.ts", content: "x" }], RULES, h),
+      ).toThrow();
+    } finally {
+      chmodSync(join(root, "locked"), 0o700); // afterEach 的 rmSync 需要能删掉它
+    }
+    const row = getAudit(db, h.opId)!;
+    expect(row.state).toBe("FAILED");
+    expect(row.reason).toBeTruthy();
+  });
+
+  it("repoEdit 的形参数量仍是 4（tsc 才是真正拦住漏传 audit 的那道关卡）", () => {
+    expect(repoEdit.length).toBe(4);
   });
 });

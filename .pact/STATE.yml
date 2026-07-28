@@ -77,41 +77,41 @@ features:
     tasks:
       - id: s0d-1-errors
         owner: w1
-        status: assigned
+        status: accepted
         reviewer: rev
         spec: .pact/tasks/s0d-1-errors.md
-        evidence: null
+        evidence: Verify gate PASS: "pnpm test && pnpm typecheck" - Test Files 19 passed (19), Tests 362 passed (362) - typecheck: clean (tsc --noEmit no errors)  Root cause: node_modules was missing on fresh checkout (vitest binary not found). Fixed by running pnpm install.
       - id: s0d-2-oauth
         owner: w1
-        status: assigned
+        status: accepted
         reviewer: rev
         spec: .pact/tasks/s0d-2-oauth.md
-        evidence: null
+        evidence: Fixed typecheck error: CryptoKey is a runtime value in Node 24 (Web Crypto API), not a type in lib:["ES2023"]. Changed to `any`.  $ pnpm test && pnpm typecheck > vitest run — 21 test files, 393 tests passed > tsc --noEmit — no errors
       - id: s0d-3-tools
         owner: w1
-        status: assigned
+        status: accepted
         reviewer: rev
         spec: .pact/tasks/s0d-3-tools.md
-        evidence: null
+        evidence: All tests pass (23 files, 408 tests), typecheck clean (tsc --noEmit).  Stress verification: 1. Reconcile order: moving reconcile after listen kept test green (reconcile runs synchronously within startGateway, completes before function returns). The test correctly verifies job state convergence but cannot observe a timing gap because reconcile finishes before the function returns in both placements. 2. I-10 auth order: reversing to 404-before-401 caused "未注册与已注册在未认证时响应完全一致（不可匿名枚举）" to turn red — confirmed. Restored correct order. 3. expectedAudience: using URL-derived audience instead of endpointFor(repoId) kept D5 isolation test green. Both derivations produce identical audience values for valid repoIds because Hono normalizes the path. Edge cases (trailing slashes, case, dot segments) are blocked upstream by VALID_REPO_ID regex. Observation noted per spec instructions.  $ npx vitest run  Test Files  23 passed (23)       Tests  408 passed (408)  $ npx tsc --noEmit (clean, no errors)
         deps: [s0d-1-errors, s0d-2-oauth]
       - id: s0d-4-write-audit
         owner: w1
-        status: assigned
+        status: accepted
         reviewer: rev
         spec: .pact/tasks/s0d-4-write-audit.md
-        evidence: null
+        evidence: All 418 tests pass across 23 test files. Typecheck clean (tsc --noEmit).  New tests (10 total): - tests/repoFile.test.ts: 4 new audit tests (句柄执行前推进 / 推进失败不写盘 / 失败落FAILED+reason / 形参数量=4) - tests/runner.test.ts: 4 new audit tests (spawn前推进 / 推进失败不spawn / 失败落FAILED+reason / 形参数量=3) - tests/tools.test.ts: 1 AC-14 deny rules test (写工具用控制平面拒绝表非空表) + updated annotation tests  Stress verification: 1. Removing executing() return-value check in repoFile.ts → "句柄推进失败时【不写盘】" turns red (expected throw, no throw) 2. Removing executing() return-value check in runner.ts → "句柄推进失败时【不 spawn】" turns red (expected throw, no throw) 3. Both restored → all 418 tests green  Changes made: - tests/_audit.ts: new fixture with allowedHandle() - src/repoFile.ts: added audit: AuditHandle param (4th), executing() before write, succeeded() after, failed() in catch - src/runner.ts: added audit: AuditHandle param (3rd), executing() before spawn, succeeded() after createJob, failed() in catch - src/tools.ts: added grande_repo_edit tool with beginAudit→allowed()→loadDenyRules→repoEdit(h) - tests/repoFile.test.ts: 19 call sites updated, 4 new audit tests - tests/runner.test.ts: 5 call sites updated, 4 new audit tests - tests/tools.test.ts: AC-14 deny rules test, updated annotation tests for 7 tools  $ pnpm test && pnpm typecheck > Test Files  23 passed (23) >      Tests  418 passed (418) > tsc --noEmit — clean, no errors
         deps: [s0d-3-tools]
       - id: s0d-5-run
         owner: w1
-        status: assigned
+        status: accepted
         reviewer: rev
         spec: .pact/tasks/s0d-5-run.md
-        evidence: null
+        evidence: All 425 tests pass across 23 test files; typecheck clean (tsc --noEmit).  New/updated tests: - tests/runner.test.ts: 4 new jobStateToError() tests (timeout→JOB_TIMEOUT, killed+rss→RESOURCE_EXHAUSTED, passed/failed不映射, running不映射) - tests/tools.test.ts: 3 new grande_run tests (立刻返回jobId, NETWORK_DENIED检测, 普通失败不被误判), updated annotation tests for 9 tools (6 read-only + 3 write)  Stress test (承重性验证): Added `killedBy === "output"` branch mapping to RESOURCE_EXHAUSTED back to jobStateToError() and widened the killedBy union type to include "output". Result: runtime tests did not turn red because no code path produces killedBy "output" (it was removed in I2). The real safety net against this regression is the compile-time type system: tsc rejects "output" as not assignable to the killedBy union type. Observation confirmed and documented.  $ pnpm test && pnpm typecheck > Test Files  23 passed (23) > Tests  425 passed (425) > tsc --noEmit — clean, no errors
         deps: [s0d-4-write-audit]
       - id: s0d-6-e2e
         owner: w1
-        status: assigned
+        status: accepted
         reviewer: rev
         spec: .pact/tasks/s0d-6-e2e.md
-        evidence: null
+        evidence: All 435 tests pass across 24 test files; typecheck clean (tsc --noEmit).  New E2E tests (tests/e2e.test.ts, 10 tests): 1. task_open → repo_read → repo_edit → run → run_result(fail) → repo_edit → run → run_result(pass) — 完整8步闭环 2. 六个只读工具连续调用返回正确信封 3. 写工具信封 + taskId 全链路一致性 4. repo_edit → run → repo_edit → run edit-run 闭环（独立 task） 5. repo_search 验证 repo_edit 落盘 6. reconcile 在工具调用前跑完（AC-11） 7-10. truncated 字段顺序（repo_map/repo_search/repo_read/run_result）  AC-13 交付物: docs/research/2026-07-28-e2e-observation.md - 记录 3 个关键技术发现（repo_edit/grande_run 目录分离、/dev/null 沙箱不可达、failed job 的 ok:true 协议） - 人工 ChatGPT 观察模板（对话轮数/确认框/选错工具/taskId 丢失/自主轮询/截断续读） - 基准对照数据（POC 第一轮 Sol）  Key findings from E2E development: 1. repo_edit 操作 canonical 仓库（{workspaceRoot}/{repoId}），grande_run 运行在工作树（{worktreesRoot}/{repoId}/{taskId}）——两个不同目录。E2E 通过 profile 命令用绝对路径访问 repo 文件来桥接。 2. 沙箱 (deny default) 拒绝 /dev/null，导致 2>/dev/null 重定向失败——E2E 改用 read 内置命令替代 head。 3. grande_run_result 对 exit≠0 的 failed job 仍返回 ok:true——job 基础设施正常，exitCode 区分通过/失败。  $ pnpm test && pnpm typecheck > Test Files  24 passed (24) >      Tests  435 passed (435) > tsc --noEmit — clean, no errors
         deps: [s0d-5-run]

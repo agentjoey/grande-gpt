@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { truncateText } from "./envelope.ts";
 import { resolveInRepo } from "./paths.ts";
 import { assertWritable, assertWritableResolved, type DenyRules } from "./policy.ts";
+import type { AuditHandle } from "./audit.ts";
 
 export class EditError extends Error {
   readonly code: string;
@@ -140,85 +141,96 @@ function pathsOf(op: EditOp): string[] {
  * 因为所有校验都在第一次写之前完成。这两者的区别很重要：前者是已知缺口，
  * 后者会是缺陷。
  */
-export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules): EditResult {
+export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules, audit: AuditHandle): EditResult {
   if (ops.length === 0) throw new EditError("INVALID_INPUT", "ops 不能为空");
 
-  // ── 阶段一：全量校验，不碰磁盘内容 ──
-  // `seen` 按**解析后的绝对路径**去重，不按原始字符串：`x.ts` 与 `./x.ts` 是同一个文件，
-  // 按字符串去重会让同一批里的第二个 op 静默覆盖第一个（已实测）。
-  const seen = new Set<string>();
-  const resolved: { op: EditOp; abs: string; absTo?: string }[] = [];
+  try {
+    // ── 阶段一：全量校验，不碰磁盘内容 ──
+    // `seen` 按**解析后的绝对路径**去重，不按原始字符串：`x.ts` 与 `./x.ts` 是同一个文件，
+    // 按字符串去重会让同一批里的第二个 op 静默覆盖第一个（已实测）。
+    const seen = new Set<string>();
+    const resolved: { op: EditOp; abs: string; absTo?: string }[] = [];
 
-  for (const op of ops) {
-    if (op.op !== "create" && op.op !== "modify" && op.op !== "move") {
-      throw new EditError("INVALID_INPUT", `不支持的 op：${JSON.stringify((op as { op: unknown }).op)}`);
+    for (const op of ops) {
+      if (op.op !== "create" && op.op !== "modify" && op.op !== "move") {
+        throw new EditError("INVALID_INPUT", `不支持的 op：${JSON.stringify((op as { op: unknown }).op)}`);
+      }
+
+      const abses: string[] = [];
+      for (const p of pathsOf(op)) {
+        assertWritable(p, rules);                // 廉价前置判定，报错引用模型给的原始路径
+        const a = resolveInRepo(root, p);        // 路径物理安全：穿越 / 绝对 / 符号链接逃逸
+        assertWritableResolved(root, a, rules);  // 规格 §4.6：resolveInRepo **之后**再过一道
+        if (seen.has(a)) {
+          throw new EditError("INVALID_INPUT", `同一批中对 ${p} 有多个操作；请拆成多次调用`);
+        }
+        seen.add(a);
+        abses.push(a);
+      }
+
+      if (op.op === "move") {
+        const from = abses[0]!;
+        const to = abses[1]!;
+        if (!existsSync(from)) throw new EditError("FILE_NOT_FOUND", `源文件不存在：${op.from}`);
+        if (existsSync(to)) throw new EditError("FILE_EXISTS", `目标已存在：${op.to}`);
+        resolved.push({ op, abs: from, absTo: to });
+        continue;
+      }
+
+      const abs = abses[0]!;
+      if (op.op === "create") {
+        if (existsSync(abs)) {
+          throw new EditError("FILE_EXISTS", `文件已存在：${op.path}。修改已有文件请用 modify。`);
+        }
+      } else {
+        if (!existsSync(abs)) throw new EditError("FILE_NOT_FOUND", `文件不存在：${op.path}`);
+        // I1：modify 分支此前完全没有二进制守卫，只靠 sha256 是否对得上——而
+        // sha256 校验的是 staleness，不是「这份内容能不能安全地当文本改写」。
+        // 按原始字节读、按原始字节判定是否二进制，两条都要在与 expectedSha256
+        // 比较**之前**做：即使调用方碰巧算出了一个匹配的哈希（例如拿 repoRead
+        // 返回的哈希——modify 这里也必须独立拒绝，不能信任上游已经拒过一次）。
+        const rawExisting = readFileSync(abs);
+        if (isBinary(rawExisting)) {
+          throw new EditError(
+            "INVALID_INPUT",
+            `${op.path} 是二进制文件（含 NUL 字节，或不是合法 UTF-8）；S0 的读写工具只处理文本，` +
+              `modify 不能用于二进制文件——即使提供的 sha256 恰好与它匹配。`,
+          );
+        }
+        const actual = sha256OfBuffer(rawExisting);
+        if (actual !== op.expectedSha256) {
+          throw new EditError(
+            "STALE_FILE",
+            `${op.path} 自上次读取后已改变。请重新 read 取得最新 sha256 后再改 —— ` +
+              `否则你会用旧内容覆盖掉中间的修改。`,
+          );
+        }
+      }
+      resolved.push({ op, abs });
     }
 
-    const abses: string[] = [];
-    for (const p of pathsOf(op)) {
-      assertWritable(p, rules);                // 廉价前置判定，报错引用模型给的原始路径
-      const a = resolveInRepo(root, p);        // 路径物理安全：穿越 / 绝对 / 符号链接逃逸
-      assertWritableResolved(root, a, rules);  // 规格 §4.6：resolveInRepo **之后**再过一道
-      if (seen.has(a)) {
-        throw new EditError("INVALID_INPUT", `同一批中对 ${p} 有多个操作；请拆成多次调用`);
-      }
-      seen.add(a);
-      abses.push(a);
+    // 推进审计句柄到 EXECUTING —— 必须在写盘之前成功
+    if (!audit.executing()) {
+      throw new EditError("POLICY_DENIED", "审计句柄推进失败——Policy 未放行或已被他人使用。");
     }
 
-    if (op.op === "move") {
-      const from = abses[0]!;
-      const to = abses[1]!;
-      if (!existsSync(from)) throw new EditError("FILE_NOT_FOUND", `源文件不存在：${op.from}`);
-      if (existsSync(to)) throw new EditError("FILE_EXISTS", `目标已存在：${op.to}`);
-      resolved.push({ op, abs: from, absTo: to });
-      continue;
-    }
-
-    const abs = abses[0]!;
-    if (op.op === "create") {
-      if (existsSync(abs)) {
-        throw new EditError("FILE_EXISTS", `文件已存在：${op.path}。修改已有文件请用 modify。`);
-      }
-    } else {
-      if (!existsSync(abs)) throw new EditError("FILE_NOT_FOUND", `文件不存在：${op.path}`);
-      // I1：modify 分支此前完全没有二进制守卫，只靠 sha256 是否对得上——而
-      // sha256 校验的是 staleness，不是「这份内容能不能安全地当文本改写」。
-      // 按原始字节读、按原始字节判定是否二进制，两条都要在与 expectedSha256
-      // 比较**之前**做：即使调用方碰巧算出了一个匹配的哈希（例如拿 repoRead
-      // 返回的哈希——modify 这里也必须独立拒绝，不能信任上游已经拒过一次）。
-      const rawExisting = readFileSync(abs);
-      if (isBinary(rawExisting)) {
-        throw new EditError(
-          "INVALID_INPUT",
-          `${op.path} 是二进制文件（含 NUL 字节，或不是合法 UTF-8）；S0 的读写工具只处理文本，` +
-            `modify 不能用于二进制文件——即使提供的 sha256 恰好与它匹配。`,
-        );
-      }
-      const actual = sha256OfBuffer(rawExisting);
-      if (actual !== op.expectedSha256) {
-        throw new EditError(
-          "STALE_FILE",
-          `${op.path} 自上次读取后已改变。请重新 read 取得最新 sha256 后再改 —— ` +
-            `否则你会用旧内容覆盖掉中间的修改。`,
-        );
+    // ── 阶段二：落盘 ──
+    const applied: EditResult["applied"] = [];
+    for (const r of resolved) {
+      if (r.op.op === "move") {
+        mkdirSync(dirname(r.absTo!), { recursive: true });
+        renameSync(r.abs, r.absTo!);
+        applied.push({ op: "move", path: r.op.to, sha256: null });
+      } else {
+        mkdirSync(dirname(r.abs), { recursive: true });
+        writeFileSync(r.abs, r.op.content, "utf8");
+        applied.push({ op: r.op.op, path: r.op.path, sha256: sha256Of(r.op.content) });
       }
     }
-    resolved.push({ op, abs });
+    audit.succeeded(resolved.map((r) => (r.op.op === "move" ? r.op.to : r.op.path)));
+    return { applied };
+  } catch (e) {
+    audit.failed(String(e instanceof Error ? e.message : e));
+    throw e;
   }
-
-  // ── 阶段二：落盘 ──
-  const applied: EditResult["applied"] = [];
-  for (const r of resolved) {
-    if (r.op.op === "move") {
-      mkdirSync(dirname(r.absTo!), { recursive: true });
-      renameSync(r.abs, r.absTo!);
-      applied.push({ op: "move", path: r.op.to, sha256: null });
-    } else {
-      mkdirSync(dirname(r.abs), { recursive: true });
-      writeFileSync(r.abs, r.op.content, "utf8");
-      applied.push({ op: r.op.op, path: r.op.path, sha256: sha256Of(r.op.content) });
-    }
-  }
-  return { applied };
 }
