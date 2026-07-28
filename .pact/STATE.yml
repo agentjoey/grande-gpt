@@ -83,7 +83,7 @@ features:
         evidence: null
       - id: s0d-2-oauth
         owner: w1
-        status: assigned
+        status: in_progress
         reviewer: rev
         spec: .pact/tasks/s0d-2-oauth.md
         evidence: null
