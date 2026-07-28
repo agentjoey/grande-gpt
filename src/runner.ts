@@ -49,6 +49,33 @@ export function awaitJobSettled(jobId: string): Promise<void> {
 }
 
 /**
+ * 等**所有**在途 job 收尾，最多等 `timeoutMs`。返回真实等到的 job 数。
+ *
+ * 关停路径需要的是这个，而不是逐个 `awaitJobSettled`——关停时调用方手里没有
+ * jobId 列表，`inFlight` 是唯一知道谁还在途的地方。此前 `main.ts` 的关停注释
+ * 写着「让在途的后台 job 收尾写完 artifact 再退出」，实现却是 `db.close()` 之后
+ * 直接 `process.exit(0)`；实测后果是一个真正跑完了 90 秒的 job 被记成
+ * `killed` / `artifactPath=null`，时长记的是下次启动 reconcile 的时刻。
+ *
+ * **必须带超时**：`timeoutSeconds` 最大可到 600，关停不能被一个刚起步的长 job
+ * 卡住十分钟。超时后照样退出——那种情况下退化回原来的行为（下次启动由
+ * `reconcileRunningJobs` 收拾），不比现在更差。
+ */
+export async function awaitAllJobsSettled(timeoutMs: number): Promise<number> {
+  const pending = [...inFlight.values()];
+  if (pending.length === 0) return 0;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+    // 这个定时器不该把 Node 的事件循环撑着不让退出。
+    timer.unref?.();
+  });
+  await Promise.race([Promise.allSettled(pending), deadline]);
+  if (timer) clearTimeout(timer);
+  return pending.length;
+}
+
+/**
  * 收尾路径**自己绝不能抛**（C-7）：它跑在没有调用方的 promise 尾巴上，抛出去就是
  * unhandled rejection——测试环境里这会让整个 vitest 套件非零退出（实测：进程
  * exit 99），生产环境里则是一条永远不会被任何人看到的崩溃。

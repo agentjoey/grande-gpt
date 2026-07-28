@@ -4,6 +4,7 @@ import { openDb } from "./db.ts";
 import { ensureLayout, loadLayout } from "./layout.ts";
 import { startGateway } from "./server.ts";
 import { loadAccessConfig } from "./accessGate.ts";
+import { awaitAllJobsSettled } from "./runner.ts";
 
 /**
  * Gateway 的进程入口。
@@ -34,13 +35,28 @@ async function main(): Promise<void> {
   console.log(`[gateway] workspace=${layout.workspaceRoot}`);
   console.log(`[gateway] control=${layout.controlRoot}`);
 
-  // 优雅关停：先停止接受新连接，让在途的后台 job 收尾写完 artifact 再退出。
-  // 硬杀会让 runner 的 .then 链在 db.close() 之后落地——那正是 S0-C 修过的
+  // 优雅关停：先停止接受新连接，**再等在途的后台 job 收尾写完 artifact**，最后才
+  // 关库退出。硬杀会让 runner 的 .then 链在 db.close() 之后落地——那正是 S0-C 修过的
   // unhandled rejection 形态。
+  //
+  // 这段此前只有注释没有实现：`gw.close()` 之后直接 `db.close(); process.exit(0)`，
+  // 从不调用为此存在的 awaitAllJobsSettled。实测后果（本机 job 表里留下的证据）：
+  // 一个在子进程里真正跑完 90 秒的成功 job 被记成 `killed`、`artifactPath=null`，
+  // 时长记的是下次启动时 reconcile 的时刻（66.1s）而不是真实的 90.0s。
+  // 子进程是 detached 的，父进程退出杀不掉它，所以输出确实产生了——只是没人写下来。
+  //
+  // 超时 30s：足够绝大多数 job 收尾（收尾只是写 artifact + 一次 UPDATE），又不会让
+  // 关停被一个刚起步的长 job 拖住。超时后照常退出，退化回 reconcile 兜底。
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.once(sig, () => {
       console.log(`\n[gateway] 收到 ${sig}，正在关停…`);
-      void gw.close().then(() => { db.close(); process.exit(0); });
+      void (async () => {
+        await gw.close();
+        const n = await awaitAllJobsSettled(30_000);
+        if (n > 0) console.log(`[gateway] 已等待 ${n} 个在途 job 收尾`);
+        db.close();
+        process.exit(0);
+      })();
     });
   }
 }

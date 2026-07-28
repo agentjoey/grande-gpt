@@ -8,7 +8,7 @@ import { ensureLayout, loadLayout } from "../src/layout.ts";
 import type { Layout } from "../src/layout.ts";
 import { getJob, listJobs } from "../src/jobs.ts";
 import { createTask } from "../src/tasks.ts";
-import { awaitJobSettled, jobReport, jobStateToError, startJob } from "../src/runner.ts";
+import { awaitAllJobsSettled, awaitJobSettled, jobReport, jobStateToError, startJob } from "../src/runner.ts";
 import { getAudit, beginAudit, type AuditHandle } from "../src/audit.ts";
 import { allowedHandle } from "./_audit.ts";
 
@@ -95,6 +95,30 @@ describe("startJob()", () => {
     expect(s.jobId).toMatch(/^job_/);
     expect(s.pollAfterSeconds).toBeGreaterThan(0);
     expect(getJob(db, s.jobId)?.state).toBe("running");
+  });
+
+  it("awaitAllJobsSettled 会等在途 job 真正落地——关停路径靠它保住 artifact 与终态", async () => {
+    // 关停时调用方手里没有 jobId 列表，逐个 awaitJobSettled 用不上；main.ts 此前
+    // 因此干脆什么都不等，直接 db.close() + process.exit(0)。实测后果：一个在
+    // 子进程里真正跑完的 job 被记成 killed / artifactPath=null。
+    const s = start("slow");
+    expect(getJob(db, s.jobId)?.state).toBe("running"); // 前置：确实还在途
+
+    const n = await awaitAllJobsSettled(30_000);
+    expect(n).toBeGreaterThan(0);
+
+    // 等回来之后，终态与 artifact 都必须已经落库——这正是关停前需要保住的东西
+    const j = getJob(db, s.jobId)!;
+    expect(j.state).not.toBe("running");
+    expect(j.artifactPath).not.toBeNull();
+  });
+
+  it("没有在途 job 时 awaitAllJobsSettled 立即返回 0，不会把关停拖到超时", async () => {
+    const s = start("ok");
+    await waitFor(() => getJob(db, s.jobId)?.state !== "running");
+    const t0 = Date.now();
+    expect(await awaitAllJobsSettled(30_000)).toBe(0);
+    expect(Date.now() - t0).toBeLessThan(1000);
   });
 
   it("成功的命令最终收敛为 passed，exitCode 为 0", async () => {

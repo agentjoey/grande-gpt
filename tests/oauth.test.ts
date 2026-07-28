@@ -41,7 +41,7 @@ const oauth = (db?: DatabaseSync) =>
 
 const s256 = (v: string) => createHash("sha256").update(v).digest("base64url");
 
-async function fullFlow(o: ReturnType<typeof createOAuth>) {
+async function fullFlow(o: ReturnType<typeof createOAuth>, resource = `${ISSUER}/mcp`) {
   const reg = await o.register({
     client_name: "ChatGPT",
     redirect_uris: ["https://chatgpt.com/connector/oauth/opaque"],
@@ -55,7 +55,7 @@ async function fullFlow(o: ReturnType<typeof createOAuth>) {
     redirect_uri: reg.redirect_uris[0]!,
     code_challenge: s256(verifier),
     code_challenge_method: "S256",
-    resource: `${ISSUER}/mcp`,
+    resource,
     scope: SCOPE,
   });
   const tok = await o.token({
@@ -64,7 +64,7 @@ async function fullFlow(o: ReturnType<typeof createOAuth>) {
     code_verifier: verifier,
     client_id: reg.client_id,
     redirect_uri: reg.redirect_uris[0]!,
-    resource: `${ISSUER}/mcp`,
+    resource,
   });
   return { reg, verifier, tok };
 }
@@ -391,6 +391,38 @@ describe("持久化：重启不丢 client / refresh_token（U1 实测缺口，�
     });
     expect(typeof next.access_token).toBe("string");
     expect(next.access_token).not.toBe(rotatedBeforeRestart.access_token);
+  });
+
+  it("endpointFor 变更后，绑着旧 resource 的 refresh_token 被拒，而不是继续签发 aud 已失效的 access token", async () => {
+    // D18 就干过这件事：endpointFor 从 `${ISSUER}/mcp/${repoId}` 改成 `${ISSUER}/mcp`。
+    // isValidResource 守着 /authorize，但 refresh 是唯一一条不经过 /authorize 就能
+    // 签出 access token 的路径。不补这道检查，旧 refresh_token 会一直签发 aud 没人
+    // 认的 token：refresh 成功 → 拿去用 401 → 再 refresh，死循环，每步单看都「成功」。
+    const { layout, keyPath } = restartable();
+
+    // 不能用 createOAuth 造这枚旧 token——isValidResource 会在 /authorize 就把
+    // `${ISSUER}/mcp/grande-gpt` 挡掉。真实情形本来也不是「旧网关现在还在跑」，
+    // 而是「库里那一行是旧版代码写下的」，所以直接改库里的 resource 才是如实模拟。
+    const { o: o1, db: db1 } = openOauth(layout, keyPath);
+    const { tok } = await fullFlow(o1);
+    expect(typeof tok.refresh_token).toBe("string");
+    const changed = db1
+      .prepare("UPDATE oauth_refresh SET resource = ? WHERE valid = 1")
+      .run(`${ISSUER}/mcp/grande-gpt`).changes;
+    expect(changed).toBe(1); // 确认真的改到了那一行，否则下面的断言是空的
+    db1.close();
+
+    // 网关重启到 D18 之后（openOauth 的 endpointFor 是 `${ISSUER}/mcp`）
+    const { o: oNew } = openOauth(layout, keyPath);
+
+    await expect(
+      oNew.token({ grant_type: "refresh_token", refresh_token: tok.refresh_token }),
+    ).rejects.toMatchObject({ code: "invalid_grant" });
+
+    // 且该凭据已被吊销——客户端反复拿它来撞不会有第二种结果
+    await expect(
+      oNew.token({ grant_type: "refresh_token", refresh_token: tok.refresh_token }),
+    ).rejects.toThrow();
   });
 
   it("reuse-detection 在重启后依然生效：回放重启前的旧 refresh_token 被拒，且它的后代一并被吊销", async () => {

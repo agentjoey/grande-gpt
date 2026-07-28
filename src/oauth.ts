@@ -364,6 +364,25 @@ export function createOAuth(cfg: OAuthConfig) {
         );
       }
 
+      // 库里存的 resource 也必须**今天仍然有效**，不能只信它签发那天有效。
+      // `/authorize` 用 isValidResource 挡非法 resource，但那道检查只在签发的那一刻
+      // 生效；refresh 是唯一一条不经过 /authorize 就能签出 access token 的路径。
+      // `endpointFor()` 一旦变化（D18 就把它从 `${issuer}/mcp/${repoId}` 改成了
+      // `${issuer}/mcp`），旧 refresh_token 会**一直**签发 aud 已经没人认的 access
+      // token：refresh 成功 → 拿去用 401 → 客户端再 refresh，陷在死循环里，而每一步
+      // 单看都「成功」。实测中只能手工把该行置 valid=0 才解开。
+      //
+      // 拒成 invalid_grant（不是 invalid_target）：问题出在这枚凭据本身已经过时，
+      // 客户端该做的是丢掉它重新走一次授权，而不是换个 resource 再试。同时吊销它，
+      // 免得客户端反复拿同一枚失效凭据来撞。
+      if (!isValidResource(cfg, rec.resource)) {
+        invalidateRefreshStmt.run(rt);
+        throw new OAuthError(
+          "invalid_grant",
+          `refresh_token 绑定的端点 ${rec.resource} 已不是本网关的有效端点，请重新走一次授权流程`,
+        );
+      }
+
       invalidateRefreshStmt.run(rt);
 
       const accessToken = await new SignJWT({
