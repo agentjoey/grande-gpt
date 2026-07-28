@@ -103,10 +103,10 @@ features:
         deps: [s0d-3-tools]
       - id: s0d-5-run
         owner: w1
-        status: in_progress
+        status: awaiting_review
         reviewer: rev
         spec: .pact/tasks/s0d-5-run.md
-        evidence: null
+        evidence: All 425 tests pass across 23 test files; typecheck clean (tsc --noEmit).  New/updated tests: - tests/runner.test.ts: 4 new jobStateToError() tests (timeout→JOB_TIMEOUT, killed+rss→RESOURCE_EXHAUSTED, passed/failed不映射, running不映射) - tests/tools.test.ts: 3 new grande_run tests (立刻返回jobId, NETWORK_DENIED检测, 普通失败不被误判), updated annotation tests for 9 tools (6 read-only + 3 write)  Stress test (承重性验证): Added `killedBy === "output"` branch mapping to RESOURCE_EXHAUSTED back to jobStateToError() and widened the killedBy union type to include "output". Result: runtime tests did not turn red because no code path produces killedBy "output" (it was removed in I2). The real safety net against this regression is the compile-time type system: tsc rejects "output" as not assignable to the killedBy union type. Observation confirmed and documented.  $ pnpm test && pnpm typecheck > Test Files  23 passed (23) > Tests  425 passed (425) > tsc --noEmit — clean, no errors
         deps: [s0d-4-write-audit]
       - id: s0d-6-e2e
         owner: w1
