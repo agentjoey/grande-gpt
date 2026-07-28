@@ -228,11 +228,27 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           wrap(deps, args.taskId as string, () => {
             const taskId = args.taskId as string;
             const slug = args.slug as string;
-            const wt = openWorktree(layout, repoId, slug, taskId);
+            // task_open 建分支、建 worktree、写 task 行——它是变更操作，必须先留下 INTENT
+            // （规格 §7.0①）。此前漏了：真实使用中它成功建出 worktree 而审计账本为空。
+            // openWorktree 的签名没有 AuditHandle 参数（不像 repoEdit/startJob 那样是
+            // 硬约束），所以这里必须由调用方显式记——这也正是它被漏掉的原因。
+            const h = beginAudit(db, { taskId, tool: "grande_task_open", input: { slug } });
+            h.allowed();
+            if (!h.executing()) {
+              throw new StateError("STALE_STATE", `任务 ${taskId} 的审计句柄无法推进到 EXECUTING。`);
+            }
+            let wt: ReturnType<typeof openWorktree>;
+            try {
+              wt = openWorktree(layout, repoId, slug, taskId);
+            } catch (e) {
+              h.failed((e as Error).message);
+              throw e;
+            }
             const t = createTask(db, {
               taskId, repoId, branch: wt.branch, baseCommit: wt.baseCommit,
               worktreePath: wt.worktreePath, state: "READY",
             });
+            h.succeeded([wt.worktreePath]);
             return ok({
               taskId,
               data: { taskId: t.taskId, branch: t.branch, baseCommit: t.baseCommit, worktreePath: t.worktreePath },

@@ -228,8 +228,20 @@ export function createApp(cfg: AppConfig): Hono {
         inputSchema: toZodSchema(tool.inputSchema),
         annotations: tool.annotations as any,
       }, async (args) => {
+        // 工具级日志。没有它，服务端只看得到 `POST /mcp → 200`，分不清模型调了哪个
+        // 工具、参数是什么、成没成功——而规格 §9.2 的 AC-13 要记的正是「模型选错
+        // 工具的次数」。用户在 ChatGPT 界面里也看不到，所以这是唯一的观察点。
+        // 只读工具不走审计账本，日志是它们唯一的痕迹。
+        const t0 = Date.now();
         const result = await tool.handler(args as Record<string, unknown>);
         const sc = result.structuredContent as Record<string, unknown>;
+        const ok = sc.ok === true;
+        const detail = ok
+          ? (sc.truncated === true ? " truncated" : "")
+          : ` ${(sc.error as { code?: string } | undefined)?.code ?? "?"}`;
+        console.log(
+          `[tool] ${tool.name} ${JSON.stringify(args)} → ${ok ? "ok" : "ERR"}${detail} (${Date.now() - t0}ms)`,
+        );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(sc) }],
           structuredContent: sc,
