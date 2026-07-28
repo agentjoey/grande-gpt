@@ -87,3 +87,10 @@ features:
         reviewer: rev
         spec: .pact/tasks/s0d-2-oauth.md
         evidence: null
+      - id: s0d-3-tools
+        owner: w1
+        status: assigned
+        reviewer: rev
+        spec: .pact/tasks/s0d-3-tools.md
+        evidence: null
+        deps: [s0d-1-errors, s0d-2-oauth]
