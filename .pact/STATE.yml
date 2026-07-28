@@ -117,7 +117,7 @@ features:
         deps: [s0d-5-run]
   - id: s05
     branch: feat/s05-usability
-    status: in_progress
+    status: shipped
     tasks:
       - id: s05-1-taskclose
         owner: w1
