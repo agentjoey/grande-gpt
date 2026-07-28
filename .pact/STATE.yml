@@ -121,7 +121,7 @@ features:
     tasks:
       - id: s05-1-taskclose
         owner: w1
-        status: assigned
+        status: in_progress
         reviewer: claude
         spec: .pact/tasks/s05-1-taskclose.md
         evidence: null
