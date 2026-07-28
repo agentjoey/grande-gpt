@@ -41,13 +41,23 @@ function toZodSchema(schema: ToolDef["inputSchema"]): z.ZodObject<z.ZodRawShape>
   return z.object(shape as z.ZodRawShape);
 }
 
-function unauthorized(repoId: string) {
+/**
+ * 401 + `WWW-Authenticate`。**`resource_metadata` 必须是绝对 URL。**
+ *
+ * U1 实测过 ChatGPT 的发现顺序：先 `POST /mcp/<repoId>` 撞 401，再**顺着这个
+ * 响应头**去取每-repo 的元数据。给相对路径的话，能不能解析取决于客户端实现——
+ * 而这一步失败的表现是「连接器加不上」这类毫无信息量的报错，排查成本极高。
+ * spike 那版给的就是绝对 URL，这里与之保持一致。
+ *
+ * `repoId` 必须 encode 后再拼：未编码的引号或 CRLF 能直接注入响应头
+ * （计划审查 I-5 实测过 `a%22%20error%3D%22x` 与 CRLF 两种形态）。
+ */
+function unauthorized(issuer: string, repoId: string) {
   const encoded = encodeURIComponent(repoId);
+  const metadataUrl = `${issuer}/.well-known/oauth-protected-resource/mcp/${encoded}`;
   return new Response("Unauthorized", {
     status: 401,
-    headers: {
-      "WWW-Authenticate": `Bearer resource_metadata="/.well-known/oauth-protected-resource/mcp/${encoded}"`,
-    },
+    headers: { "WWW-Authenticate": `Bearer resource_metadata="${metadataUrl}"` },
   });
 }
 
@@ -178,12 +188,12 @@ export function createApp(cfg: AppConfig): Hono {
     if (!VALID_REPO_ID.test(repoId)) return c.json({ error: "not_found" }, 404);
 
     const bearer = /^Bearer (.+)$/.exec(c.req.header("authorization") ?? "")?.[1];
-    if (!bearer) return unauthorized(repoId);
+    if (!bearer) return unauthorized(cfg.issuer, repoId);
 
     try {
       await oauth.verifyBearer(bearer, oauthCfg.endpointFor(repoId));
     } catch {
-      return unauthorized(repoId);
+      return unauthorized(cfg.issuer, repoId);
     }
 
     if (!registeredIds(layout).has(repoId)) return c.json({ error: "not_found" }, 404);
