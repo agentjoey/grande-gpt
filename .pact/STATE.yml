@@ -103,7 +103,7 @@ features:
         deps: [s0d-3-tools]
       - id: s0d-5-run
         owner: w1
-        status: assigned
+        status: in_progress
         reviewer: rev
         spec: .pact/tasks/s0d-5-run.md
         evidence: null
