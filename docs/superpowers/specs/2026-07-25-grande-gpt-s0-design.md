@@ -73,7 +73,8 @@ Seatbelt、worktree 与数据库，接上真实 ChatGPT 对话测五件事（验
 | D2 | 单用户，不做多租户 / RBAC / 配额 | 省掉 12–18 人日 | 将来开放给他人需重做身份层；数据模型不预留 `userId` |
 | D3 | 代码工作区在 `GPT_Workspace/`，控制平面状态在 `~/.grande-control/` | **被审计者不能拥有审计记录的写权限** | 偏离用户「全部放 GPT_Workspace 下」的字面约束，已说明并获认可 |
 | D4 | 原地模型：`GPT_Workspace/<project>/` 即 canonical，不做 bare mirror | 用户要能正常用编辑器干活；避免两份副本 | canonical 可能处于 rebase 中或有 index.lock，需作为明确错误处理 |
-| D5 | 每 repo 一个 MCP 端点 `/mcp/<repoId>` | MCP 不传递 Project 身份，隔离必须由协议层强制 | 每个 repo 需在 ChatGPT 端加一次连接器 |
+| ~~D5~~ | ~~每 repo 一个 MCP 端点 `/mcp/<repoId>`~~ | **已被 D18 取代**。实测代价不可接受：N 个仓库 = N 个 ChatGPT 连接器，且模型要在连接器之间选对 | 见 D18 |
+| **D18** | **单一端点 `/mcp` + 任务绑定隔离** | 写与跑的目标从 `taskId` 推导（`task` 行里有 `repoId`），**模型无法自由指定写到哪个仓库**。只有 `grande_task_open` 与「无任务的浏览」需要显式 `repoId`，且必须已注册。取代 D5 的理由：D5 防的是铁律一（仓库内容不可信——A 仓库的 README 诱导模型去读 B 仓库），而任务绑定把这条防线从「端点」下移到「任务」，写路径一样封死，代价却从 N 个连接器降到 1 个 | **残留风险**：提示注入可诱导模型在另一个已注册仓库 `task_open`。该动作走审计、可见，但不被阻止。缓解手段留待 S1 观察真实使用后再定 |
 | D6 | 实现语言 TypeScript；隧道用 Cloudflare Tunnel | MCP 官方 TS SDK 是参考实现；Node 24 已就位；Cloudflare 提供固定 hostname | — |
 | D7 | 不涉及 Codex | 用户约束 | — |
 | D8 | S0 的 profile 只从可信配置读取，不读仓库内任何文件 | 否则仓库内容可控制执行什么，违反「仓库内容不可信」 | 仓库侧 policy 推迟到 S1.5 |

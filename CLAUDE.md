@@ -17,14 +17,15 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 | D2 | **单用户**，不做多租户 / RBAC / 配额 | 省掉 12–18 人日。将来开放需重做身份层，已接受返工 |
 | D3 | **代码工作区在 `GPT_Workspace/`，控制平面状态在 `~/.grande-control/`** | 被审计者不能拥有审计记录的写权限 |
 | D4 | **原地模型**：`GPT_Workspace/<project>/` 就是 canonical，不做 bare mirror | 用户要能正常用编辑器干活 |
-| D5 | **每 repo 一个 MCP 端点 `/mcp/<repoId>`** | 隔离由协议层强制，而非依赖模型自觉；`repoId` 不作为工具参数 |
+| ~~D5~~ | ~~每 repo 一个 MCP 端点 `/mcp/<repoId>`~~ | **已被 D18 取代（2026-07-29）**——实测代价不可接受：N 个仓库 = N 个 ChatGPT 连接器 |
+| D18 | **单一端点 `/mcp` + 任务绑定隔离**，`/mcp/<repoId>` 保留为兼容旧连接器的别名 | 写/跑路径从 `taskId`→`task.repoId` 推导，模型无法自由指定写到哪个仓库；只有 `grande_task_open` 与无任务浏览需要显式 `repoId`。残留风险：提示注入可诱导模型在另一个已注册仓库 `task_open`（该动作走审计、可见，但不阻止），缓解手段留待 S1 |
 | D6 | **实现语言 TypeScript**，隧道用 Cloudflare Tunnel | MCP 官方 TS SDK 是参考实现 |
 | D7 | **不涉及 Codex**，不读写 `~/.codex`，不上架插件目录 | 用户明确约束 |
 | D8 | **S0 不做**：删除文件 / commit / push / GitHub / Checkpoint / Lease / 网络 | 保证 S0 快速拿到 ChatGPT 交互反馈 |
 | D11 | **POC 先行，未通过不启动 S0** | 55–85 人日押在一个 1–2 天可验证的假设上（模型能否自主轮询）。见规格 §13 |
 | D12 | **必须确认 ChatGPT 账号的训练数据设置** | Plus/Free 消费者账号**默认**用你的内容改进模型；私有代码会流经对话 |
 | D16 | **S0 接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | D13/D15 已作废：OpenAI Secure MCP Tunnel 需要 Platform API key（另一套计费），与「用 chat 额度」的初衷冲突 |
-| D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp/<repoId>` | 已实测跑通 |
+| D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp`（D18 之后；`/mcp/<repoId>` 保留为兼容别名） | 已实测跑通 |
 
 ## 当前状态：S0-A 实现中
 

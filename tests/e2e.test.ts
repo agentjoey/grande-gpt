@@ -82,7 +82,7 @@ fi`,
     "utf8",
   );
 
-  deps = { db, layout, repoId: "demo" };
+  deps = { db, layout, defaultRepoId: "demo" };
 });
 
 const started: string[] = [];
@@ -125,7 +125,7 @@ async function settle(jobId: string): Promise<void> {
 describe("E2E：完整工具闭环", () => {
   it("task_open → repo_read → repo_edit → run → run_result（失败）→ repo_edit → run → run_result（通过）", async () => {
     // Step 1: task_open
-    const r1 = await callTool("grande_task_open", { taskId: "task_e2e_new", slug: "e2e-loop" });
+    const r1 = await callTool("grande_task_open", { taskId: "task_e2e_new", slug: "e2e-loop", repoId: "demo" });
     expect(r1.ok).toBe(true);
     const taskId = (r1.taskId as string)!;
     expect(taskId).toBe("task_e2e_new");
@@ -224,7 +224,7 @@ describe("E2E：完整工具闭环", () => {
 
   it("写工具信封正确且 taskId 在全链路中保持一致", async () => {
     // task_open
-    const r1 = await callTool("grande_task_open", { taskId: "task_e2e_w1", slug: "write-chain" });
+    const r1 = await callTool("grande_task_open", { taskId: "task_e2e_w1", slug: "write-chain", repoId: "demo" });
     expect(r1.ok).toBe(true);
     expect(r1.taskId).toBe("task_e2e_w1");
 
@@ -257,7 +257,7 @@ describe("E2E：完整工具闭环", () => {
     const taskId = "task_e2e_loop";
 
     expect(
-      (await callTool("grande_task_open", { taskId, slug: "edit-run" })).ok,
+      (await callTool("grande_task_open", { taskId, slug: "edit-run", repoId: "demo" })).ok,
     ).toBe(true);
 
     // First edit + run cycle — deliberately fail

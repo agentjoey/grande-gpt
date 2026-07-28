@@ -5,11 +5,12 @@ import { SignJWT, jwtVerify } from "jose";
 
 export interface OAuthConfig {
   issuer: string;
-  endpointFor(repoId: string): string;
-  isRegistered(repoId: string): boolean;
-  /** 已注册的全部 repoId。仅用于 AS 元数据的 scopes_supported——
-   *  客户端据此判断能请求哪些 scope，空数组会让它认为无 scope 可用。 */
-  registeredRepoIds?: () => string[];
+  /**
+   * 单一端点的绝对 URL（D18：`${issuer}/mcp`，不再按 repo 区分）。
+   * 保留成函数而非直接存字符串，是为了让调用方（`server.ts`）与本模块共享
+   * 同一处拼接逻辑，不在两个文件里各写一遍容易走样的字符串模板。
+   */
+  endpointFor(): string;
   keyPath: string;
   /**
    * client 与 refresh_token 落在这个库里（`oauth_client` / `oauth_refresh`
@@ -37,14 +38,12 @@ interface ClientRecord {
 interface CodeRecord {
   challenge: string;
   clientId: string;
-  repoId: string;
   redirectUri: string;
   expiresAt: number;
 }
 
 interface RefreshTokenRecord {
   resource: string;
-  repoId: string;
   parent?: string;
   valid: boolean;
 }
@@ -57,12 +56,20 @@ interface ClientRow {
 /** `oauth_refresh` 一行的落库形态（SQLite 没有 boolean，`valid` 是 0/1）。 */
 interface RefreshRow {
   resource: string;
-  repoId: string;
   parent: string | null;
   valid: number;
 }
 
 const SUPPORTED_GRANT_TYPES = ["authorization_code", "refresh_token"] as const;
+
+/**
+ * D18：单一端点、单一 scope。此前是每 repo 一个 `grande:repo:<repoId>`——
+ * 隔离由端点/scope 表达；现在隔离下移到 `taskId`（见 tools.ts 的
+ * `grande_task_open`/`grande_repo_edit`），OAuth 层不再有「repo」这个概念，
+ * 一个诚实的名字就够了：这枚令牌能打开的是整个工作区的 Gateway，具体动到
+ * 哪个仓库由后续的工具调用（尤其是 `taskId`）决定，不由这枚令牌决定。
+ */
+const SCOPE = "grande:workspace";
 
 function getOrCreateKey(keyPath: string): Uint8Array {
   try {
@@ -84,21 +91,33 @@ function getOrCreateKey(keyPath: string): Uint8Array {
   }
 }
 
-function resourceToRepoId(cfg: OAuthConfig, resource: string): string | null {
+/**
+ * `resource` 参数的校验。**D18 之前**这里叫 `resourceToRepoId`：从 `resource`
+ * 的 URL 路径里解析出 `repoId`，再要求它已注册、且往返拼接（`endpointFor(repoId)`）
+ * 与原始输入完全相等。D18 把「按 repo 区分」去掉了，但**校验的形状必须原样
+ * 保留**——origin 相等 + 往返相等这两道检查各自堵的是不同的洞，具体如下：
+ *
+ * - **origin 相等**：`resource` 是调用方（ChatGPT）可控字符串，不检查 origin
+ *   的话，`https://evil.test/mcp` 这种跨源资源标识符也能进入后续比较。
+ * - **往返相等**（`resource === cfg.endpointFor()`）：这道检查在每-repo 版本
+ *   里挡的是 Hono 路由参数解码与 `c.req.url` 原始字符串之间的差异（`%2f`
+ *   这类）——因为端点路径里嵌了一段可变的 `repoId`。D18 的端点路径是固定
+ *   字面量 `/mcp`，不再嵌可变段，这个具体的解码歧义场景确实随 `repoId` 一起
+ *   消失了；但「往返相等」这道检查本身没有变得多余——它仍然是唯一一处同时
+ *   钉住 protocol/host/port/path/query/fragment **全部**相等的比较（单独的
+ *   `pathname === "/mcp"` 检查不管 query/fragment），继续保留，不因为它现在
+ *   „顺带" 也防住了已经不存在的那个具体场景就把它退化成一个更松的判定。
+ */
+function isValidResource(cfg: OAuthConfig, resource: string): boolean {
   let url: URL;
   try {
     url = new URL(resource);
   } catch {
-    return null;
+    return false;
   }
-  if (url.origin !== new URL(cfg.issuer).origin) return null;
-  const repoId = /^\/mcp\/([^/]+)$/.exec(url.pathname)?.[1];
-  if (repoId === undefined || !cfg.isRegistered(repoId)) return null;
-  return resource === cfg.endpointFor(repoId) ? repoId : null;
-}
-
-function scopeFor(repoId: string): string {
-  return `grande:repo:${repoId}`;
+  if (url.origin !== new URL(cfg.issuer).origin) return false;
+  if (url.pathname !== "/mcp") return false;
+  return resource === cfg.endpointFor();
 }
 
 export function createOAuth(cfg: OAuthConfig) {
@@ -125,10 +144,10 @@ export function createOAuth(cfg: OAuthConfig) {
   );
 
   const insertRefreshStmt = db.prepare(
-    "INSERT INTO oauth_refresh (handle, resource, repoId, parent, valid, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+    "INSERT INTO oauth_refresh (handle, resource, parent, valid, createdAt) VALUES (?, ?, ?, ?, ?)",
   );
   const getRefreshStmt = db.prepare(
-    "SELECT resource, repoId, parent, valid FROM oauth_refresh WHERE handle = ?",
+    "SELECT resource, parent, valid FROM oauth_refresh WHERE handle = ?",
   );
   const invalidateRefreshStmt = db.prepare(
     "UPDATE oauth_refresh SET valid = 0 WHERE handle = ?",
@@ -148,7 +167,6 @@ export function createOAuth(cfg: OAuthConfig) {
     if (row === undefined) return undefined;
     return {
       resource: row.resource,
-      repoId: row.repoId,
       parent: row.parent ?? undefined,
       valid: row.valid === 1,
     };
@@ -226,11 +244,10 @@ export function createOAuth(cfg: OAuthConfig) {
     if (!params.resource) {
       throw new OAuthError("invalid_request", "resource 是必填的");
     }
-    const repoId = resourceToRepoId(cfg, params.resource);
-    if (repoId === null) {
+    if (!isValidResource(cfg, params.resource)) {
       throw new OAuthError(
         "invalid_target",
-        `resource 不是已注册的端点 URL: ${params.resource}`,
+        `resource 不是本网关的端点 URL: ${params.resource}`,
       );
     }
 
@@ -245,7 +262,6 @@ export function createOAuth(cfg: OAuthConfig) {
     codes.set(code, {
       challenge: params.code_challenge,
       clientId: params.client_id,
-      repoId,
       redirectUri: params.redirect_uri,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
@@ -294,7 +310,7 @@ export function createOAuth(cfg: OAuthConfig) {
 
       if (
         form.resource !== undefined &&
-        form.resource !== cfg.endpointFor(rec.repoId)
+        form.resource !== cfg.endpointFor()
       ) {
         throw new OAuthError(
           "invalid_target",
@@ -302,10 +318,9 @@ export function createOAuth(cfg: OAuthConfig) {
         );
       }
 
-      const resource = cfg.endpointFor(rec.repoId);
-      const scope = scopeFor(rec.repoId);
+      const resource = cfg.endpointFor();
 
-      const accessToken = await new SignJWT({ scope, jti: randomUUID() })
+      const accessToken = await new SignJWT({ scope: SCOPE, jti: randomUUID() })
         .setProtectedHeader({ alg: "HS256" })
         .setIssuer(cfg.issuer)
         .setAudience(resource)
@@ -315,14 +330,14 @@ export function createOAuth(cfg: OAuthConfig) {
         .sign(KEY);
 
       const rt = randomUUID();
-      insertRefreshStmt.run(rt, resource, rec.repoId, null, 1, Date.now());
+      insertRefreshStmt.run(rt, resource, null, 1, Date.now());
 
       return {
         access_token: accessToken,
         token_type: "Bearer",
         expires_in: 8 * 3600,
         refresh_token: rt,
-        scope,
+        scope: SCOPE,
       };
     }
 
@@ -352,7 +367,7 @@ export function createOAuth(cfg: OAuthConfig) {
       invalidateRefreshStmt.run(rt);
 
       const accessToken = await new SignJWT({
-        scope: scopeFor(rec.repoId),
+        scope: SCOPE,
         jti: randomUUID(),
       })
         .setProtectedHeader({ alg: "HS256" })
@@ -364,14 +379,14 @@ export function createOAuth(cfg: OAuthConfig) {
         .sign(KEY);
 
       const newRt = randomUUID();
-      insertRefreshStmt.run(newRt, rec.resource, rec.repoId, rt, 1, Date.now());
+      insertRefreshStmt.run(newRt, rec.resource, rt, 1, Date.now());
 
       return {
         access_token: accessToken,
         token_type: "Bearer",
         expires_in: 8 * 3600,
         refresh_token: newRt,
-        scope: scopeFor(rec.repoId),
+        scope: SCOPE,
       };
     }
 
@@ -381,16 +396,16 @@ export function createOAuth(cfg: OAuthConfig) {
     );
   }
 
-  /** 本 AS 使用的 scope 形态：每 repo 一个，与 `aud` 一起构成 D5 的隔离 */
-  const scopeFor = (repoId: string): string => `grande:repo:${repoId}`;
-
-  function protectedResourceMetadata(repoId: string) {
+  /**
+   * D18：单一端点，因此只有一份受保护资源元数据——不再按 repoId 参数化。
+   * `server.ts` 的合法别名路由（`/mcp/:repoId`）为了兼容旧连接器仍然存在，
+   * 但它们的发现文档都指向这**同一份**元数据，不再各自生成一份。
+   */
+  function protectedResourceMetadata() {
     return {
-      resource: cfg.endpointFor(repoId),
+      resource: cfg.endpointFor(),
       authorization_servers: [cfg.issuer],
-      // spike 版带了这个字段而本实现漏了。客户端据此决定要请求什么 scope——
-      // 缺失时它只能猜，或者干脆判定这个资源不可用。
-      scopes_supported: [scopeFor(repoId)],
+      scopes_supported: [SCOPE],
     };
   }
 
@@ -401,9 +416,7 @@ export function createOAuth(cfg: OAuthConfig) {
       token_endpoint: `${cfg.issuer}/token`,
       registration_endpoint: `${cfg.issuer}/register`,
       jwks_uri: `${cfg.issuer}/jwks`,
-      // 硬编码空数组是错的：客户端据此判断能请求哪些 scope。
-      // 由 isRegistered 之外再要一份「有哪些 repo」的能力不划算，所以让调用方注入。
-      scopes_supported: (cfg.registeredRepoIds?.() ?? []).map(scopeFor),
+      scopes_supported: [SCOPE],
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],

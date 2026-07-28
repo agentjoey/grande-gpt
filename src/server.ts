@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -44,17 +44,18 @@ function toZodSchema(schema: ToolDef["inputSchema"]): z.ZodObject<z.ZodRawShape>
 /**
  * 401 + `WWW-Authenticate`。**`resource_metadata` 必须是绝对 URL。**
  *
- * U1 实测过 ChatGPT 的发现顺序：先 `POST /mcp/<repoId>` 撞 401，再**顺着这个
- * 响应头**去取每-repo 的元数据。给相对路径的话，能不能解析取决于客户端实现——
- * 而这一步失败的表现是「连接器加不上」这类毫无信息量的报错，排查成本极高。
- * spike 那版给的就是绝对 URL，这里与之保持一致。
+ * U1 实测过 ChatGPT 的发现顺序：先撞 401，再**顺着这个响应头**去取元数据。
+ * 给相对路径的话，能不能解析取决于客户端实现——而这一步失败的表现是
+ * 「连接器加不上」这类毫无信息量的报错，排查成本极高。spike 那版给的就是
+ * 绝对 URL，这里与之保持一致。
  *
- * `repoId` 必须 encode 后再拼：未编码的引号或 CRLF 能直接注入响应头
- * （计划审查 I-5 实测过 `a%22%20error%3D%22x` 与 CRLF 两种形态）。
+ * D18：单一端点之后元数据 URL 不再嵌 `repoId`——`/mcp/:repoId` 别名路由收到
+ * 的 401 同样指向这**一份**元数据，旧连接器据此重新发现到单一 `resource`，
+ * 换到的令牌 `aud` 精确等于 `${issuer}/mcp`，在 `/mcp` 与 `/mcp/:repoId` 两条
+ * 路由上都能验证通过（见 `verifyBearer` 调用处）。
  */
-function unauthorized(issuer: string, repoId: string) {
-  const encoded = encodeURIComponent(repoId);
-  const metadataUrl = `${issuer}/.well-known/oauth-protected-resource/mcp/${encoded}`;
+function unauthorized(issuer: string) {
+  const metadataUrl = `${issuer}/.well-known/oauth-protected-resource/mcp`;
   return new Response("Unauthorized", {
     status: 401,
     headers: { "WWW-Authenticate": `Bearer resource_metadata="${metadataUrl}"` },
@@ -82,9 +83,8 @@ export function createApp(cfg: AppConfig): Hono {
 
   const oauthCfg: OAuthConfig = {
     issuer,
-    endpointFor: (repoId) => `${issuer}/mcp/${repoId}`,
-    isRegistered: (repoId) => registeredIds(layout).has(repoId),
-    registeredRepoIds: () => [...registeredIds(layout)].sort(),
+    // D18：单一端点，不再按 repoId 参数化。
+    endpointFor: () => `${issuer}/mcp`,
     keyPath: join(layout.controlRoot, "secrets", "oauth-key"),
     // client 与 refresh_token 落在这同一个状态库（oauth_client / oauth_refresh，
     // 见 db.ts）——db 已经在 main.ts 里用 openDb(layout) 打开过，两张表已就位，
@@ -194,34 +194,48 @@ export function createApp(cfg: AppConfig): Hono {
     return c.json({ keys: [] });
   });
 
-  app.get("/.well-known/oauth-protected-resource/mcp/:repoId", (c) => {
-    const repoId = c.req.param("repoId");
-    const meta = oauth.protectedResourceMetadata(repoId);
-    return c.json(meta);
+  // D18：单一发现文档。
+  app.get("/.well-known/oauth-protected-resource/mcp", (c) => {
+    return c.json(oauth.protectedResourceMetadata());
   });
 
-  app.all("/mcp/:repoId", async (c) => {
-    const repoId = c.req.param("repoId");
-    if (!VALID_REPO_ID.test(repoId)) return c.json({ error: "not_found" }, 404);
+  // 旧连接器兼容别名——`/mcp/<repoId>` 时代留下的发现 URL 若被缓存，仍指向
+  // 同一份（单一）元数据，不是一份「per-repo 但内容凑巧相同」的文档。
+  app.get("/.well-known/oauth-protected-resource/mcp/:repoId", (c) => {
+    return c.json(oauth.protectedResourceMetadata());
+  });
 
+  /**
+   * D18 核心路由：单一 `/mcp` 端点，`repoId` 不再是端点的一部分。
+   *
+   * `defaultRepoId` 只有一个来源——`/mcp/:repoId` 这条**别名**路由（下面单独
+   * 注册，调用同一个 handler）。它只影响「没有 taskId 时该浏览哪个仓库」这一
+   * 类只读工具的默认值，**绝不**参与鉴权、也绝不能覆盖由 `taskId` 推导出的
+   * 仓库——那条推导路径完全在 tools.ts 里，本函数不掺和。
+   */
+  async function handleMcp(c: Context, defaultRepoId: string | undefined) {
     const bearer = /^Bearer (.+)$/.exec(c.req.header("authorization") ?? "")?.[1];
-    if (!bearer) return unauthorized(cfg.issuer, repoId);
+    if (!bearer) return unauthorized(cfg.issuer);
 
     try {
-      await oauth.verifyBearer(bearer, oauthCfg.endpointFor(repoId));
+      await oauth.verifyBearer(bearer, oauthCfg.endpointFor());
     } catch {
-      return unauthorized(cfg.issuer, repoId);
+      return unauthorized(cfg.issuer);
     }
 
-    if (!registeredIds(layout).has(repoId)) return c.json({ error: "not_found" }, 404);
+    // 别名路由带着的 repoId 若已被撤销注册，行为与 D5 时代一致：404，且不
+    // 泄漏工作区里还有哪些目录。`/mcp`（无路径参数）没有这一步。
+    if (defaultRepoId !== undefined && !registeredIds(layout).has(defaultRepoId)) {
+      return c.json({ error: "not_found" }, 404);
+    }
 
     const transport = new WebStandardStreamableHTTPServerTransport();
     const mcpServer = new McpServer(
-      { name: `grande-gpt/${repoId}`, version: "0.0.0" },
+      { name: "grande-gpt", version: "0.0.0" },
       { capabilities: { tools: {} } },
     );
 
-    const tools = buildTools({ db, layout, repoId });
+    const tools = buildTools({ db, layout, defaultRepoId });
     for (const tool of tools) {
       mcpServer.registerTool(tool.name, {
         description: tool.description,
@@ -252,6 +266,17 @@ export function createApp(cfg: AppConfig): Hono {
     await mcpServer.connect(transport);
     const response = await transport.handleRequest(c.req.raw);
     return response;
+  }
+
+  app.all("/mcp", (c) => handleMcp(c, undefined));
+
+  // 别名：existing ChatGPT 连接器指着 `/mcp/grande-gpt` 之类的 URL，必须继续
+  // 工作（D18 要求「不破坏现有连接器」）。`repoId` 段形状异常（可能是响应头
+  // 注入探测）直接 404，不进入 handleMcp——与旧行为一致。
+  app.all("/mcp/:repoId", (c) => {
+    const repoId = c.req.param("repoId");
+    if (!VALID_REPO_ID.test(repoId)) return c.json({ error: "not_found" }, 404);
+    return handleMcp(c, repoId);
   });
 
   return app;

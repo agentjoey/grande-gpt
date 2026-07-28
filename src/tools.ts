@@ -1,8 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
-import { join } from "node:path";
 import { ok, err, type TaskContext } from "./envelope.ts";
 import { toToolError, redact, StateError } from "./errors.ts";
-import { resolveRepoPath } from "./paths.ts";
+import { PathSecurityError, resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
 import { getTask, listActiveTasks, createTask } from "./tasks.ts";
 import { loadProfiles } from "./profiles.ts";
@@ -28,7 +27,16 @@ export interface ToolDef {
 export interface ToolDeps {
   db: DatabaseSync;
   layout: Layout;
-  repoId: string;
+  /**
+   * D18：单一端点之后，工具不再固定绑在一个 repo 上——写/跑路径从 `taskId`
+   * 逐次推导（见 `resolveWriteRepo` 的调用点），只读工具在没有 `taskId` 时
+   * 逐次从显式 `repoId` 参数或这里的 `defaultRepoId` 解析根目录。
+   *
+   * `defaultRepoId` 只在通过旧 `/mcp/:repoId` 别名路由进入时才有值（`server.ts`
+   * 的 `handleMcp` 透传路径段），单一 `/mcp` 端点下始终是 `undefined`。它只是
+   * 「没给 repoId 时的缺省」——**绝不覆盖**由 `taskId` 推导出的仓库。
+   */
+  defaultRepoId?: string;
 }
 
 function makeTaskContext(db: DatabaseSync, layout: Layout, taskId: string): TaskContext | null {
@@ -43,17 +51,57 @@ function makeTaskContext(db: DatabaseSync, layout: Layout, taskId: string): Task
 }
 
 /**
- * 只读工具（repo_map/repo_search/repo_read）在有 taskId 时该读 worktree 还是
- * canonical，取决于「模型是否已经在这个任务里改过东西」——没有 taskId 时读
- * canonical 是合理的（开任务前先逛逛仓库），但**带着 taskId 却仍悄悄读 canonical
- * 不行**：模型自己刚用 grande_repo_edit 写进 worktree 的内容，下一次读会看不到
- * （BUG 1）。taskId 未知时抛 TASK_NOT_FOUND，与 grande_run/grande_diff 一致。
+ * 只读工具（repo_map/repo_search/repo_read）的根目录解析。D18 之前这只需要
+ * 在「带 taskId」与「不带 taskId（读固定的那一个 repoId）」之间二选一；
+ * 单一端点之后没有「固定的那一个」了，多了两件事要做：
+ *
+ * 1. 没有 taskId 时，根目录来自显式 `repoId` 参数，或（旧别名路由下）
+ *    `defaultRepoId`；两者都没有就是一个「模型不知道该看哪个仓库」的真实
+ *    状态，必须给出**可操作**的错误——列出已注册仓库，而不是一句「缺参数」。
+ * 2. **taskId 与 repoId 同时给出且不一致时拒绝**，不静默择一——模型的意图
+ *    含糊时，猜一个方向永远不如让它把话说清楚（尤其是这里猜错的后果是读到
+ *    了错误仓库的内容却毫无察觉）。
+ *
+ * 带 taskId 时该读 worktree 还是 canonical，取决于「模型是否已经在这个任务里
+ * 改过东西」——没有 taskId 时读 canonical 是合理的（开任务前先逛逛仓库），但
+ * **带着 taskId 却仍悄悄读 canonical 不行**：模型自己刚用 grande_repo_edit
+ * 写进 worktree 的内容，下一次读会看不到（BUG 1）。taskId 未知时抛
+ * TASK_NOT_FOUND，与 grande_run/grande_diff 一致。
  */
-function resolveReadRoot(db: DatabaseSync, repoRoot: string, taskId: string | undefined): string {
-  if (!taskId) return repoRoot;
-  const t = getTask(db, taskId);
-  if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
-  return t.worktreePath;
+function resolveReadRoot(
+  db: DatabaseSync,
+  layout: Layout,
+  args: { taskId?: string; repoId?: string },
+  defaultRepoId: string | undefined,
+): string {
+  const { taskId, repoId } = args;
+  if (taskId) {
+    const t = getTask(db, taskId);
+    if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+    if (repoId !== undefined && repoId !== t.repoId) {
+      throw new StateError(
+        "INVALID_INPUT",
+        `repoId（${repoId}）与 taskId ${taskId} 所属仓库（${t.repoId}）不一致——两者同时给出时必须` +
+          `一致，不会静默择一。要浏览另一个仓库，去掉 taskId 或改传该仓库自己的 taskId。`,
+      );
+    }
+    return t.worktreePath;
+  }
+
+  const effectiveRepoId = repoId ?? defaultRepoId;
+  if (effectiveRepoId === undefined) {
+    const registered = [...registeredIds(layout)].sort();
+    throw new StateError(
+      "INVALID_INPUT",
+      registered.length > 0
+        ? `既没有 taskId 也没有 repoId，当前端点也没有默认仓库——已注册仓库：` +
+          `${registered.join("、")}。请传 taskId（浏览某个任务的 worktree）或 repoId（浏览` +
+          `某个仓库的 canonical checkout）。`
+        : `既没有 taskId 也没有 repoId，当前端点也没有默认仓库，工作区里也没有任何已注册仓库` +
+          `——请先在 ~/.grande-control/config/repos.yaml 里注册至少一个仓库。`,
+    );
+  }
+  return resolveRepoPath(layout, effectiveRepoId, registeredIds(layout));
 }
 
 function wrap(deps: ToolDeps, taskId: string | null, fn: () => unknown): { structuredContent: unknown } {
@@ -89,38 +137,74 @@ function wrap(deps: ToolDeps, taskId: string | null, fn: () => unknown): { struc
  * 才看得到——模型第一次选名字时手里没有这份列表，只能猜（实测：猜了 "test"，
  * 真实注册的是 "unit"，多花一轮工具调用才自纠正）。把同一份名字提前铺进
  * `grande_run` 的 schema 描述里，模型在选之前就看得到，不必先犯错再学。
- * 用 try/catch 兜底：profiles.yaml 缺失/损坏不该让整个工具列表都构建失败——
- * 那是 `grande_run` 真正执行时才必须报的错，不是 schema 描述阶段的硬依赖。
+ *
+ * D18：`grande_run` 不再固定绑一个 repo（profile 归属哪个仓库要等到调用时带的
+ * `taskId` 才知道），schema 描述却是在 `buildTools` 时一次性生成的——没法再说
+ * 「这个端点注册了哪些 profile」，只能按仓库分组列出**全部**已注册仓库的
+ * profile，模型据此自行对照它准备用哪个 taskId。用 try/catch 兜底：单个仓库
+ * 的 profiles.yaml 缺失/损坏不该让整个工具列表都构建失败，也不该让别的仓库的
+ * 列表跟着消失。
  */
-function describeAvailableProfiles(layout: Layout, repoId: string): string {
+function describeAvailableProfiles(layout: Layout): string {
+  const parts: string[] = [];
+  let ids: string[];
   try {
-    const names = [...loadProfiles(layout, repoId).keys()].sort();
-    return names.length > 0 ? `已注册：${names.join("、")}` : "该仓库尚未注册任何 profile";
+    ids = [...registeredIds(layout)].sort();
   } catch {
     return "";
   }
+  for (const repoId of ids) {
+    try {
+      const names = [...loadProfiles(layout, repoId).keys()].sort();
+      if (names.length > 0) parts.push(`${repoId}：${names.join("、")}`);
+    } catch {
+      // 单个仓库的 profiles.yaml 配置有问题不该拖垮其余仓库的描述。
+    }
+  }
+  return parts.length > 0 ? `已注册：${parts.join("；")}` : "尚未有任何仓库注册 profile";
 }
 
 export function buildTools(deps: ToolDeps): ToolDef[] {
-  const { db, layout, repoId } = deps;
-  const repoRoot = resolveRepoPath(layout, repoId, registeredIds(layout));
-  const availableProfiles = describeAvailableProfiles(layout, repoId);
+  const { db, layout, defaultRepoId } = deps;
+  const availableProfiles = describeAvailableProfiles(layout);
 
   return [
     {
       name: "grande_task_status",
-      description: "查询指定 task 的状态：分支、state、变更文件数、最近 job 状态",
+      description: "查询指定 task 的状态：分支、state、变更文件数、最近 job 状态。" +
+        "不带 taskId 调用时返回总览：已注册仓库列表 + 当前活跃任务列表——这是模型" +
+        "了解「现在能在哪些仓库上开工、已经有哪些任务在跑」的入口（D18：单一端点下" +
+        "不再有「这个连接器只服务一个 repo」这件事，需要一个显式的发现点）。",
       inputSchema: {
         type: "object",
         properties: {
-          taskId: { type: "string", description: "任务ID" },
+          taskId: { type: "string", description: "任务ID。不传则返回已注册仓库 + 活跃任务总览" },
         },
-        required: ["taskId"],
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       handler: async (args) =>
-        wrap(deps, args.taskId as string, () => {
-          const taskId = args.taskId as string;
+        wrap(deps, (args.taskId as string) ?? null, () => {
+          const taskId = args.taskId as string | undefined;
+          if (taskId === undefined) {
+            const registered = [...registeredIds(layout)].sort();
+            const active = listActiveTasks(db).map((t) => ({
+              taskId: t.taskId,
+              repoId: t.repoId,
+              branch: t.branch,
+              state: t.state,
+              filesChanged: listChangedFiles(t.worktreePath, t.baseCommit).length,
+            }));
+            return ok({
+              taskId: null,
+              data: { registeredRepos: registered, activeTasks: active },
+              hint: registered.length > 0
+                ? `已注册仓库：${registered.join("、")}；活跃任务 ${active.length} 个。` +
+                  `用 grande_task_open 在某个已注册仓库里开新任务，或传 taskId 查看某个` +
+                  `任务的详情。`
+                : `工作区里还没有任何已注册仓库——请先在 ~/.grande-control/config/repos.yaml ` +
+                  `中注册。`,
+            });
+          }
           const t = getTask(db, taskId);
           if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
           const jobs = listJobs(db, taskId);
@@ -151,19 +235,28 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     {
       name: "grande_repo_map",
       description: "列出仓库目录结构，识别关键文件（package.json/tsconfig.json/测试目录等）。" +
-        "带 taskId 时读取该任务的 worktree（能看到你自己刚写入的改动）；不带则读取 canonical。",
+        "带 taskId 时读取该任务的 worktree（能看到你自己刚写入的改动）；不带 taskId 时按" +
+        "repoId（或端点默认仓库）读取 canonical，两者都没有则报错并列出已注册仓库。",
       inputSchema: {
         type: "object",
         properties: {
           maxEntries: { type: "number", description: "单次返回的最大条目数（默认500）" },
           cursor: { type: "string", description: "分页游标，来自上一页的 nextCursor" },
           taskId: { type: "string", description: "可选：任务ID。带上时读取该任务 worktree 而非 canonical" },
+          repoId: {
+            type: "string",
+            description: "可选：仓库ID，仅用于无 taskId 的浏览。若同时给出 taskId，必须与该任务所属仓库一致",
+          },
         },
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       handler: async (args) =>
         wrap(deps, (args.taskId as string) ?? null, () => {
-          const root = resolveReadRoot(db, repoRoot, args.taskId as string | undefined);
+          const root = resolveReadRoot(
+            db, layout,
+            { taskId: args.taskId as string | undefined, repoId: args.repoId as string | undefined },
+            defaultRepoId,
+          );
           const r = repoMap(root, {
             maxEntries: args.maxEntries as number | undefined,
             cursor: args.cursor as string | null | undefined,
@@ -181,7 +274,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     {
       name: "grande_repo_search",
       description: "在仓库中搜索字面量（非正则），返回匹配行与上下文，支持分页与时间预算。" +
-        "带 taskId 时搜索该任务的 worktree（能搜到你自己刚写入的改动）；不带则搜索 canonical。",
+        "带 taskId 时搜索该任务的 worktree（能搜到你自己刚写入的改动）；不带 taskId 时按" +
+        "repoId（或端点默认仓库）搜索 canonical，两者都没有则报错并列出已注册仓库。",
       inputSchema: {
         type: "object",
         properties: {
@@ -190,13 +284,21 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           budgetMs: { type: "number", description: "时间预算，毫秒（默认4000）" },
           cursor: { type: "string", description: "分页游标" },
           taskId: { type: "string", description: "可选：任务ID。带上时搜索该任务 worktree 而非 canonical" },
+          repoId: {
+            type: "string",
+            description: "可选：仓库ID，仅用于无 taskId 的浏览。若同时给出 taskId，必须与该任务所属仓库一致",
+          },
         },
         required: ["pattern"],
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       handler: async (args) =>
         wrap(deps, (args.taskId as string) ?? null, () => {
-          const root = resolveReadRoot(db, repoRoot, args.taskId as string | undefined);
+          const root = resolveReadRoot(
+            db, layout,
+            { taskId: args.taskId as string | undefined, repoId: args.repoId as string | undefined },
+            defaultRepoId,
+          );
           const r = repoSearch(root, args.pattern as string, {
             maxMatches: args.maxMatches as number | undefined,
             budgetMs: args.budgetMs as number | undefined,
@@ -217,7 +319,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     {
       name: "grande_repo_read",
       description: "读取仓库内文件内容，支持行区间与字节上限。" +
-        "带 taskId 时读取该任务的 worktree（能看到你自己刚写入的改动）；不带则读取 canonical。",
+        "带 taskId 时读取该任务的 worktree（能看到你自己刚写入的改动）；不带 taskId 时按" +
+        "repoId（或端点默认仓库）读取 canonical，两者都没有则报错并列出已注册仓库。",
       inputSchema: {
         type: "object",
         properties: {
@@ -231,6 +334,10 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             description: "行区间 [from, to]，1-based",
           },
           taskId: { type: "string", description: "可选：任务ID。带上时读取该任务 worktree 而非 canonical" },
+          repoId: {
+            type: "string",
+            description: "可选：仓库ID，仅用于无 taskId 的浏览。若同时给出 taskId，必须与该任务所属仓库一致",
+          },
         },
         required: ["path"],
       },
@@ -240,7 +347,11 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           let lineRange: [number, number] | undefined;
           const lr = args.lineRange as [number, number] | undefined;
           if (lr) lineRange = [lr[0], lr[1]];
-          const root = resolveReadRoot(db, repoRoot, args.taskId as string | undefined);
+          const root = resolveReadRoot(
+            db, layout,
+            { taskId: args.taskId as string | undefined, repoId: args.repoId as string | undefined },
+            defaultRepoId,
+          );
           const r = repoRead(root, args.path as string, {
             maxBytes: args.maxBytes as number | undefined,
             lineRange,
@@ -256,25 +367,41 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       },
       {
         name: "grande_task_open",
-        description: "为新任务创建 worktree 和分支，准备沙箱执行环境",
+        description: "为新任务创建 worktree 和分支，准备沙箱执行环境。" +
+          "repoId 必须是已注册仓库（D18：这是唯一一处由模型显式指定写入目标仓库的地方——" +
+          "此后 grande_repo_edit/grande_run 都只认 taskId，不再接受 repoId）。",
         inputSchema: {
           type: "object",
           properties: {
             taskId: { type: "string", description: "任务ID" },
             slug: { type: "string", description: "任务简称（1–40 个小写字母、数字或连字符）" },
+            repoId: { type: "string", description: "要在哪个已注册仓库里开任务" },
           },
-          required: ["taskId", "slug"],
+          required: ["taskId", "slug", "repoId"],
         },
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         handler: async (args) =>
           wrap(deps, args.taskId as string, () => {
             const taskId = args.taskId as string;
             const slug = args.slug as string;
+            const repoId = args.repoId as string;
+            // 与 grande_repo_edit 校验 taskId 存在性的做法一致：先验证前置条件，
+            // 验不过的请求连 INTENT 都不留（这不是「执行失败留痕」，是请求本身
+            // 就没通过最基本的合法性检查）。openWorktree 内部也会经
+            // resolveRepoPath 校验，但把它提前到这里能给出更早、更明确的拒绝，
+            // 且不依赖「openWorktree 恰好在建任何文件之前调用 resolveRepoPath」
+            // 这个实现细节——校验在调用方这一层独立成立。
+            if (!registeredIds(layout).has(repoId)) {
+              throw new PathSecurityError(
+                "REPO_NOT_REGISTERED",
+                `仓库 ${repoId} 未注册。工作区下的仓库会被自动发现为候选，但必须显式注册后才可访问。`,
+              );
+            }
             // task_open 建分支、建 worktree、写 task 行——它是变更操作，必须先留下 INTENT
             // （规格 §7.0①）。此前漏了：真实使用中它成功建出 worktree 而审计账本为空。
             // openWorktree 的签名没有 AuditHandle 参数（不像 repoEdit/startJob 那样是
             // 硬约束），所以这里必须由调用方显式记——这也正是它被漏掉的原因。
-            const h = beginAudit(db, { taskId, tool: "grande_task_open", input: { slug } });
+            const h = beginAudit(db, { taskId, tool: "grande_task_open", input: { slug, repoId } });
             h.allowed();
             if (!h.executing()) {
               throw new StateError("STALE_STATE", `任务 ${taskId} 的审计句柄无法推进到 EXECUTING。`);
@@ -301,7 +428,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       },
       {
         name: "grande_run",
-        description: "在沙箱中异步执行一个 profile 命令，立即返回 jobId 供后续查询" +
+        description: "在沙箱中异步执行一个 profile 命令，立即返回 jobId 供后续查询。" +
+          "profile 归属由 taskId 所在的仓库决定" +
           (availableProfiles ? `（${availableProfiles}）` : ""),
         inputSchema: {
           type: "object",
@@ -321,12 +449,11 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             const profileName = args.profile as string;
             const t = getTask(db, taskId);
             if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
-            const rules = loadDenyRules(layout);
             const h = beginAudit(db, { taskId, tool: "grande_run", input: { profile: profileName } });
             h.allowed();
             const s = startJob(
               { db, layout },
-              { taskId, repoId, worktreePath: t.worktreePath, profileName },
+              { taskId, repoId: t.repoId, worktreePath: t.worktreePath, profileName },
               h,
             );
             return ok({
@@ -341,7 +468,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       {
         name: "grande_repo_edit",
         description: "批量修改指定任务 worktree 里的文件：create（新建）、modify（修改，需要 " +
-          "expectedSha256 防冲突）、move（移动）。不支持删除。taskId 决定写入哪个 worktree —— " +
+          "expectedSha256 防冲突）、move（移动）。不支持删除。taskId 决定写入哪个仓库的哪个" +
+          "worktree（D18：仓库由 taskId 单向推导，不接受也不认 repoId 参数）—— " +
           "写入的是该任务的隔离工作区，不是 canonical checkout，其他工具（grande_repo_read/" +
           "grande_repo_map/grande_repo_search/grande_diff）带上同一个 taskId 才能看到这里的改动。",
         inputSchema: {
@@ -352,7 +480,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
               items: { type: "object" },
               description: "修改操作数组，每项含 op/create/modify/move 等字段",
             },
-            taskId: { type: "string", description: "任务ID，决定写入哪个 worktree（必填）" },
+            taskId: { type: "string", description: "任务ID，决定写入哪个仓库的哪个 worktree（必填）" },
           },
           required: ["ops", "taskId"],
         },

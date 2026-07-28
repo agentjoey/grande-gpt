@@ -16,8 +16,13 @@ import type { Layout } from "./layout.ts";
  * 复——client 与 refresh_token 原先只活在 oauth.ts 的内存 Map 里，网关一重启
  * 就全丢，ChatGPT 存的 `client_id` 立刻变成「未注册」）。旧库（`user_version=1`）
  * 没有这两张表，靠下面同一套版本检测响亮拒绝，不新开一条检测路径。
+ *
+ * `2 → 3`：D18（单一端点 + 任务绑定隔离）取代 D5（每-repo 端点）——`aud` 不再
+ * 按 repo 区分，`oauth_refresh.repoId` 列因此失去意义，删掉而不是留一列永远
+ * 写不出有意义值的字段。旧库（`user_version=2`）那一列还在，同样靠版本检测
+ * 响亮拒绝。
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /**
  * 打开状态库并保证 schema 就位。
@@ -130,10 +135,11 @@ export function openDb(layout: Layout): DatabaseSync {
       createdAt    INTEGER NOT NULL
     );
 
+    -- D18：resource 现在对每一枚 token 都是同一个值（单一端点），不再需要
+    -- repoId 列——见上面 SCHEMA_VERSION 的 "2 → 3" 注释。
     CREATE TABLE IF NOT EXISTS oauth_refresh (
       handle    TEXT PRIMARY KEY,
       resource  TEXT NOT NULL,
-      repoId    TEXT NOT NULL,
       parent    TEXT,
       valid     INTEGER NOT NULL,
       createdAt INTEGER NOT NULL

@@ -16,6 +16,16 @@ let savedWs: string | undefined, savedCtrl: string | undefined;
 const g = (cwd: string, ...args: string[]) =>
   execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
+function initRepo(dir: string, file: string, content: string): void {
+  mkdirSync(dir, { recursive: true });
+  g(dir, "init", "-q", "-b", "main");
+  g(dir, "config", "user.email", "t@example.com");
+  g(dir, "config", "user.name", "T");
+  writeFileSync(join(dir, file), content, "utf8");
+  g(dir, "add", ".");
+  g(dir, "commit", "-q", "-m", "init");
+}
+
 beforeEach(() => {
   savedWs = process.env.GRANDE_WORKSPACE;
   savedCtrl = process.env.GRANDE_CONTROL;
@@ -28,14 +38,20 @@ beforeEach(() => {
   const db = openDb(layout);
 
   const repo = join(layout.workspaceRoot, "demo");
-  mkdirSync(repo, { recursive: true });
-  g(repo, "init", "-q", "-b", "main");
-  g(repo, "config", "user.email", "t@example.com");
-  g(repo, "config", "user.name", "T");
-  writeFileSync(join(repo, "a.ts"), "v1\nexport const x = 1;\n", "utf8");
-  g(repo, "add", ".");
-  g(repo, "commit", "-q", "-m", "init");
-  writeFileSync(layout.reposConfig, `repos:\n  - repoId: demo\n    registered: true\n`, "utf8");
+  initRepo(repo, "a.ts", "v1\nexport const x = 1;\n");
+
+  // D18：第二个已注册仓库——真实 git 仓库，不是伪造的注册表条目（见任务简报
+  // 「Create a real git repo in the fixture workspace rather than faking the
+  // registry」）。用来证明 grande_repo_edit 从 taskId 推导仓库这条路径是
+  // behavioural 的：两个任务分别落在两个不同仓库的 worktree 里，互不可见。
+  const other = join(layout.workspaceRoot, "other");
+  initRepo(other, "b.ts", "w1\nexport const y = 1;\n");
+
+  writeFileSync(
+    layout.reposConfig,
+    "repos:\n  - repoId: demo\n    registered: true\n  - repoId: other\n    registered: true\n",
+    "utf8",
+  );
 
   const wt = join(layout.worktreesRoot, "demo", "task_abcd");
   mkdirSync(wt, { recursive: true });
@@ -55,7 +71,7 @@ beforeEach(() => {
     "utf8",
   );
 
-  deps = { db, layout, repoId: "demo" };
+  deps = { db, layout, defaultRepoId: "demo" };
 });
 
 const started: string[] = [];
@@ -140,14 +156,100 @@ describe("工具注解", () => {
     // fixture 在 beforeEach 里注册了 ok/slow/curl-probe/fail 四个 profile
     expect(haystack).toMatch(/\bok\b|\bslow\b|curl-probe|\bfail\b/);
   });
+});
 
-  it("repoId 不出现在任何工具的入参 schema 里（D5：由端点决定）", () => {
-    const tools = buildTools(deps);
-    expect(tools.length).toBeGreaterThan(0);
-    for (const t of tools) {
-      expect(t.inputSchema.properties, t.name).toBeDefined();
-      expect(Object.keys(t.inputSchema.properties ?? {}), t.name).not.toContain("repoId");
+describe("D18：repoId 参数只出现在该出现的地方（单一端点 + 任务绑定隔离）", () => {
+  it("grande_task_open 要求 repoId——D18 下唯一一处由模型显式指定写入目标仓库", () => {
+    const tool = buildTools(deps).find((t) => t.name === "grande_task_open")!;
+    expect(tool.inputSchema.properties.repoId).toBeDefined();
+    expect(tool.inputSchema.required).toContain("repoId");
+  });
+
+  it("grande_repo_map/grande_repo_search/grande_repo_read 接受可选 repoId（无 taskId 时的浏览）", () => {
+    for (const name of ["grande_repo_map", "grande_repo_search", "grande_repo_read"]) {
+      const tool = buildTools(deps).find((t) => t.name === name)!;
+      expect(tool.inputSchema.properties.repoId, name).toBeDefined();
+      expect(tool.inputSchema.required ?? [], name).not.toContain("repoId");
     }
+  });
+
+  it("grande_repo_edit / grande_run 不接受 repoId——仓库完全由 taskId 推导，模型无法自由指定写到哪个仓库", () => {
+    for (const name of ["grande_repo_edit", "grande_run"]) {
+      const tool = buildTools(deps).find((t) => t.name === name)!;
+      expect(Object.keys(tool.inputSchema.properties ?? {}), name).not.toContain("repoId");
+    }
+  });
+
+  it("grande_diff / grande_task_status（带 taskId 时）/ grande_run_result 不接受 repoId——" +
+     "它们要么恒需要 taskId（diff），要么已经从 taskId/jobId 反向查到 repo", () => {
+    for (const name of ["grande_diff", "grande_run_result"]) {
+      const tool = buildTools(deps).find((t) => t.name === name)!;
+      expect(Object.keys(tool.inputSchema.properties ?? {}), name).not.toContain("repoId");
+    }
+  });
+});
+
+describe("D18：grande_task_open 的 repoId 校验（测试要求 2）", () => {
+  it("未注册的 repoId 返回 REPO_NOT_REGISTERED，且【不在文件系统上创建任何 worktree】", async () => {
+    const r = JSON.parse(await callTool("grande_task_open", {
+      taskId: "task_ghost_repo", slug: "ghost", repoId: "does-not-exist",
+    }));
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe("REPO_NOT_REGISTERED");
+    expect(existsSync(join(layout.worktreesRoot, "does-not-exist"))).toBe(false);
+    expect(existsSync(join(layout.worktreesRoot, "does-not-exist", "task_ghost_repo"))).toBe(false);
+  });
+
+  it("已注册的 repoId 正常开出任务", async () => {
+    const r = JSON.parse(await callTool("grande_task_open", {
+      taskId: "task_other_open", slug: "open-other", repoId: "other",
+    }));
+    expect(r.ok).toBe(true);
+    expect(r.data.branch).toContain("open-other");
+    expect(existsSync(join(layout.worktreesRoot, "other", "task_other_open"))).toBe(true);
+  });
+});
+
+describe("D18：两个任务落在两个不同仓库时互不可见（测试要求 3，核心 D18 属性）", () => {
+  it("repo_edit 用 A 仓库任务的 taskId 只写进 A 仓库的 worktree，B 仓库的 worktree/canonical 完全不受影响" +
+     "（断言文件系统，不只是返回值——这是行为性证明，不是形状断言）", async () => {
+    const openDemo = JSON.parse(await callTool("grande_task_open", {
+      taskId: "task_demo_x", slug: "demo-x", repoId: "demo",
+    }));
+    expect(openDemo.ok).toBe(true);
+    const openOther = JSON.parse(await callTool("grande_task_open", {
+      taskId: "task_other_x", slug: "other-x", repoId: "other",
+    }));
+    expect(openOther.ok).toBe(true);
+
+    const demoWt = join(layout.worktreesRoot, "demo", "task_demo_x");
+    const otherWt = join(layout.worktreesRoot, "other", "task_other_x");
+    const demoCanonical = join(layout.workspaceRoot, "demo");
+    const otherCanonical = join(layout.workspaceRoot, "other");
+
+    const editDemo = JSON.parse(await callTool("grande_repo_edit", {
+      taskId: "task_demo_x",
+      ops: [{ op: "create", path: "only-in-demo.ts", content: "export const onlyDemo = 1;\n" }],
+    }));
+    expect(editDemo.ok).toBe(true);
+
+    const editOther = JSON.parse(await callTool("grande_repo_edit", {
+      taskId: "task_other_x",
+      ops: [{ op: "create", path: "only-in-other.ts", content: "export const onlyOther = 1;\n" }],
+    }));
+    expect(editOther.ok).toBe(true);
+
+    // demo 任务写的文件只出现在 demo 的 worktree
+    expect(existsSync(join(demoWt, "only-in-demo.ts"))).toBe(true);
+    expect(existsSync(join(otherWt, "only-in-demo.ts"))).toBe(false);
+    expect(existsSync(join(demoCanonical, "only-in-demo.ts"))).toBe(false);
+    expect(existsSync(join(otherCanonical, "only-in-demo.ts"))).toBe(false);
+
+    // other 任务写的文件只出现在 other 的 worktree
+    expect(existsSync(join(otherWt, "only-in-other.ts"))).toBe(true);
+    expect(existsSync(join(demoWt, "only-in-other.ts"))).toBe(false);
+    expect(existsSync(join(demoCanonical, "only-in-other.ts"))).toBe(false);
+    expect(existsSync(join(otherCanonical, "only-in-other.ts"))).toBe(false);
   });
 });
 
@@ -229,7 +331,7 @@ describe("grande_repo_edit 写入隔离（BUG 1：此前无条件写 canonical�
   });
 });
 
-describe("只读工具的 taskId 参数（BUG 1 关联决定：带 taskId 时读 worktree，不带时读 canonical）", () => {
+describe("只读工具的 taskId/repoId 参数（BUG 1 关联决定 + D18 扩展）", () => {
   it("grande_repo_read 带 taskId 时能读到只写进 worktree 的文件；不带 taskId 时读不到（canonical 没有它）", async () => {
     const worktree = join(layout.worktreesRoot, "demo", "task_abcd");
     writeFileSync(join(worktree, "wt-only.ts"), "export const onlyInWorktree = 1;\n", "utf8");
@@ -251,6 +353,52 @@ describe("只读工具的 taskId 参数（BUG 1 关联决定：带 taskId 时读
     const searchR = JSON.parse(await callTool("grande_repo_search", { pattern: "x", taskId: "task_ghost" }));
     expect(searchR.ok).toBe(false);
     expect(searchR.error.code).toBe("TASK_NOT_FOUND");
+  });
+
+  it("显式 repoId（不带 taskId）能浏览到另一个已注册仓库的 canonical——demo 端点的默认仓库不会泄漏进来", async () => {
+    const r = JSON.parse(await callTool("grande_repo_read", { path: "b.ts", repoId: "other" }));
+    expect(r.ok).toBe(true);
+    expect(r.data.content).toContain("w1");
+  });
+
+  it("测试要求 4：taskId 与 repoId 同时给出且【冲突】时被拒绝，不静默择一", async () => {
+    const r = JSON.parse(await callTool("grande_repo_map", { taskId: "task_abcd", repoId: "other" }));
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe("INVALID_INPUT");
+    expect(r.error.message).toMatch(/repoId|taskId/);
+  });
+
+  it("taskId 与 repoId 同时给出但【一致】时正常放行（不误伤）", async () => {
+    const r = JSON.parse(await callTool("grande_repo_map", { taskId: "task_abcd", repoId: "demo" }));
+    expect(r.ok).toBe(true);
+  });
+
+  it("既没有 taskId 也没有 repoId，且没有端点默认仓库时，报错里列出已注册仓库", async () => {
+    const bareDeps: ToolDeps = { db: deps.db, layout };
+    const tool = buildTools(bareDeps).find((t) => t.name === "grande_repo_map")!;
+    const r = (await tool.handler({})).structuredContent as { ok: boolean; error: { code: string; message: string } };
+    expect(r.ok).toBe(false);
+    expect(r.error.code).toBe("INVALID_INPUT");
+    expect(r.error.message).toContain("demo");
+    expect(r.error.message).toContain("other");
+  });
+});
+
+describe("D18：grande_task_status 的无参数发现形式（注册表可见性）", () => {
+  it("不带 taskId 调用时返回已注册仓库列表与活跃任务列表", async () => {
+    const r = JSON.parse(await callTool("grande_task_status", {}));
+    expect(r.ok).toBe(true);
+    expect(r.data.registeredRepos).toEqual(["demo", "other"]);
+    expect(Array.isArray(r.data.activeTasks)).toBe(true);
+    expect(r.data.activeTasks.some((t: { taskId: string }) => t.taskId === "task_abcd")).toBe(true);
+    expect(r.hint).toContain("demo");
+  });
+
+  it("带 taskId 时行为与此前一致（详情，不是总览）", async () => {
+    const r = JSON.parse(await callTool("grande_task_status", { taskId: "task_abcd" }));
+    expect(r.ok).toBe(true);
+    expect(r.data.taskId).toBe("task_abcd");
+    expect(r.data.repoId).toBe("demo");
   });
 });
 

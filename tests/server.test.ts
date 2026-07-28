@@ -50,7 +50,12 @@ function unregister(l: Layout, id: string) {
   }
 }
 
-async function mintToken(a: Hono, repoId: string): Promise<string> {
+/**
+ * D18：resource 是单一端点 `${ISSUER}/mcp`，不再按 repoId 参数化。
+ * `repoId` 参数保留在签名里只是为了少数测试想验证「不同调用方式换来的令牌
+ * 行为一致」，实际不影响换出来的 `resource`/`aud`。
+ */
+async function mintToken(a: Hono): Promise<string> {
   const reg = await (await a.request("/register", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -65,7 +70,7 @@ async function mintToken(a: Hono, repoId: string): Promise<string> {
   const q = new URLSearchParams({
     client_id: reg.client_id, redirect_uri: redirectUri,
     code_challenge: challenge, code_challenge_method: "S256", response_type: "code",
-    resource: `${ISSUER}/mcp/${repoId}`, scope: `grande:repo:${repoId}`,
+    resource: `${ISSUER}/mcp`, scope: "grande:workspace",
   });
   const authRes = await a.request(`/authorize?${q}`, {
     redirect: "manual",
@@ -76,7 +81,7 @@ async function mintToken(a: Hono, repoId: string): Promise<string> {
     method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "authorization_code", code, code_verifier: verifier,
-      client_id: reg.client_id, redirect_uri: redirectUri, resource: `${ISSUER}/mcp/${repoId}`,
+      client_id: reg.client_id, redirect_uri: redirectUri, resource: `${ISSUER}/mcp`,
     }),
   })).json() as { access_token: string };
   return tok.access_token;
@@ -152,16 +157,76 @@ afterEach(() => {
   process.env.GRANDE_CONTROL = savedCtrl;
 });
 
-describe("每-repo 端点与认证", () => {
-  it("已注册 repoId 无 Bearer 的 POST 返回 401，且 WWW-Authenticate 指向【每-repo】元数据", async () => {
-    const res = await app.request("/mcp/demo", { method: "POST" });
+describe("D18：单一端点 /mcp + 认证", () => {
+  it("无 Bearer 的 POST /mcp 返回 401，WWW-Authenticate 指向单一元数据（不含 repoId）", async () => {
+    const res = await app.request("/mcp", { method: "POST" });
     expect(res.status).toBe(401);
     const h = res.headers.get("WWW-Authenticate") ?? "";
     expect(h).toContain("resource_metadata=");
-    expect(h).toContain("/.well-known/oauth-protected-resource/mcp/demo");
+    expect(h).toContain("/.well-known/oauth-protected-resource/mcp");
+    expect(h).not.toMatch(/\/mcp\/[^"]+"/); // 不应该带着某个具体 repoId 段
   });
 
-  it("未注册与已注册的 repoId 在【未认证】时响应完全一致（不可匿名枚举）", async () => {
+  it("测试要求 1：单一端点签发的令牌能打开 /mcp", async () => {
+    const token = await mintToken(app);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("测试要求 1：伪造/不匹配 aud 的令牌被拒", async () => {
+    // 直接签一枚 aud 指向别处的令牌，模拟「forged for a different audience」——
+    // 不经过 /token 端点，绕开合法签发路径，专门探测 verifyBearer 是否真的按
+    // aud 过滤，而不是只看签名有效就放行。
+    const key = new TextEncoder().encode("0".repeat(64)); // 与网关真实密钥不同，双重保险
+    const forged = await new SignJWT({ scope: "grande:workspace" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuer(ISSUER)
+      .setAudience("https://grande.example.test/mcp-not-the-real-endpoint")
+      .setSubject("user")
+      .setIssuedAt()
+      .setExpirationTime("8h")
+      .sign(key);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${forged}`, "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("单一发现文档可取，resource 是单一端点", async () => {
+    const res = await app.request("/.well-known/oauth-protected-resource/mcp");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { resource: string; authorization_servers: string[]; scopes_supported: string[] };
+    expect(body.resource).toBe(`${ISSUER}/mcp`);
+    expect(body.authorization_servers).toContain(ISSUER);
+    expect(body.scopes_supported).toEqual(["grande:workspace"]);
+  });
+});
+
+describe("测试要求 5：旧连接器兼容别名 /mcp/:repoId 仍然工作", () => {
+  it("单一端点签发的令牌同样能打开 /mcp/demo（旧连接器的 URL 不必更新）", async () => {
+    const token = await mintToken(app);
+    const res = await app.request(`/mcp/${REPO}`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("无 Bearer 时 /mcp/demo 也返回 401，且指向同一份（单一）元数据", async () => {
+    const res = await app.request(`/mcp/${REPO}`, { method: "POST" });
+    expect(res.status).toBe(401);
+    const h = res.headers.get("WWW-Authenticate") ?? "";
+    expect(h).toContain(`${ISSUER}/.well-known/oauth-protected-resource/mcp`);
+  });
+
+  it("未注册与已注册的 repoId 段在【未认证】时响应完全一致（不可匿名枚举）", async () => {
     const a = await app.request("/mcp/demo", { method: "POST" });
     const b = await app.request("/mcp/not-registered", { method: "POST" });
     expect(b.status).toBe(a.status);
@@ -169,8 +234,8 @@ describe("每-repo 端点与认证", () => {
     expect(b.headers.get("WWW-Authenticate")).toBeTruthy();
   });
 
-  it("已认证但 repoId 已被撤销注册时返回 404，且【不】泄漏工作区里还有哪些目录", async () => {
-    const token = await mintToken(app, "demo");
+  it("已认证但别名带的 repoId 已被撤销注册时返回 404，且【不】泄漏工作区里还有哪些目录", async () => {
+    const token = await mintToken(app);
     unregister(layout, "demo");
     const res = await app.request("/mcp/demo", {
       method: "POST", headers: { authorization: `Bearer ${token}` },
@@ -179,30 +244,35 @@ describe("每-repo 端点与认证", () => {
     expect(await res.text()).not.toContain("grande-gpt");
   });
 
-  it("用 demo 的令牌打 other 端点被拒（D5）", async () => {
-    const token = await mintToken(app, "demo");
-    const res = await app.request("/mcp/other", {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-    });
-    expect(res.status).toBe(401);
-  });
-
-  it("每-repo 的发现文档可取，且 resource 是该 repo 自己的端点", async () => {
-    const res = await app.request("/.well-known/oauth-protected-resource/mcp/demo");
-    expect(res.status).toBe(200);
-    const body = await res.json() as { resource: string; authorization_servers: string[] };
-    expect(body.resource).toBe(`${ISSUER}/mcp/demo`);
-    expect(body.authorization_servers).toContain(ISSUER);
-  });
-
   it("形状异常的 repoId 段（可能是响应头注入）返回 404 而不是让响应构造抛出", async () => {
     const res = await app.request(
       `/mcp/${encodeURIComponent('a" error="x')}`,
       { method: "POST" },
     );
     expect(res.status).toBe(404);
+  });
+
+  it("旧连接器指向的 per-repo 元数据别名仍可取，内容与单一元数据完全一致", async () => {
+    const legacy = await app.request("/.well-known/oauth-protected-resource/mcp/demo");
+    const single = await app.request("/.well-known/oauth-protected-resource/mcp");
+    expect(legacy.status).toBe(200);
+    expect(await legacy.json()).toEqual(await single.json());
+  });
+
+  it("同一枚令牌在 /mcp 与 /mcp/demo 两条路由上表现一致（同一个 aud，同一个工具集）", async () => {
+    const token = await mintToken(app);
+    const bareRes = await app.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    const aliasRes = await app.request("/mcp/demo", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(bareRes.status).toBe(200);
+    expect(aliasRes.status).toBe(200);
   });
 });
 
@@ -222,7 +292,7 @@ describe("/authorize 门禁（Cloudflare Access，规格 §7.0⓪ / 铁律三）
     const query = new URLSearchParams({
       client_id: reg.client_id, redirect_uri: redirectUri,
       code_challenge: challenge, code_challenge_method: "S256", response_type: "code",
-      resource: `${ISSUER}/mcp/${REPO}`, scope: `grande:repo:${REPO}`,
+      resource: `${ISSUER}/mcp`, scope: "grande:workspace",
     });
     return { query, redirectUri };
   }
@@ -262,7 +332,7 @@ describe("非 /authorize 路由不受 Access 门禁影响（OpenAI 后端到后�
   it("/token 无 Access 头也能正常走完授权码换取访问令牌", async () => {
     // mintToken() 内部只在 /authorize 那一步带 Access 头，/register 与 /token 都不带——
     // 如果 /token 被误挂了门禁，这里会在换取访问令牌时炸掉。
-    const token = await mintToken(app, REPO);
+    const token = await mintToken(app);
     expect(token).toBeTruthy();
   });
 });
@@ -278,8 +348,8 @@ describe("启动流程", () => {
     delete process.env.PORT;
     try {
       expect(getJob(db, dead.jobId)!.state).not.toBe("running");
-      const token = await mintToken(gw.app, REPO);
-      const res = await gw.app.request(`/mcp/${REPO}`, {
+      const token = await mintToken(gw.app);
+      const res = await gw.app.request("/mcp", {
         method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
         body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
       });
