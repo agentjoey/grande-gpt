@@ -125,3 +125,9 @@ features:
         reviewer: claude
         spec: .pact/tasks/s05-1-taskclose.md
         evidence: null
+      - id: s05-2-sandbox-git
+        owner: w2
+        status: assigned
+        reviewer: claude
+        spec: .pact/tasks/s05-2-sandbox-git.md
+        evidence: null
