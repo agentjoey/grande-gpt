@@ -96,10 +96,10 @@ features:
         deps: [s0d-1-errors, s0d-2-oauth]
       - id: s0d-4-write-audit
         owner: w1
-        status: in_progress
+        status: awaiting_review
         reviewer: rev
         spec: .pact/tasks/s0d-4-write-audit.md
-        evidence: null
+        evidence: All 418 tests pass across 23 test files. Typecheck clean (tsc --noEmit).  New tests (10 total): - tests/repoFile.test.ts: 4 new audit tests (句柄执行前推进 / 推进失败不写盘 / 失败落FAILED+reason / 形参数量=4) - tests/runner.test.ts: 4 new audit tests (spawn前推进 / 推进失败不spawn / 失败落FAILED+reason / 形参数量=3) - tests/tools.test.ts: 1 AC-14 deny rules test (写工具用控制平面拒绝表非空表) + updated annotation tests  Stress verification: 1. Removing executing() return-value check in repoFile.ts → "句柄推进失败时【不写盘】" turns red (expected throw, no throw) 2. Removing executing() return-value check in runner.ts → "句柄推进失败时【不 spawn】" turns red (expected throw, no throw) 3. Both restored → all 418 tests green  Changes made: - tests/_audit.ts: new fixture with allowedHandle() - src/repoFile.ts: added audit: AuditHandle param (4th), executing() before write, succeeded() after, failed() in catch - src/runner.ts: added audit: AuditHandle param (3rd), executing() before spawn, succeeded() after createJob, failed() in catch - src/tools.ts: added grande_repo_edit tool with beginAudit→allowed()→loadDenyRules→repoEdit(h) - tests/repoFile.test.ts: 19 call sites updated, 4 new audit tests - tests/runner.test.ts: 5 call sites updated, 4 new audit tests - tests/tools.test.ts: AC-14 deny rules test, updated annotation tests for 7 tools  $ pnpm test && pnpm typecheck > Test Files  23 passed (23) >      Tests  418 passed (418) > tsc --noEmit — clean, no errors
         deps: [s0d-3-tools]
       - id: s0d-5-run
         owner: w1
