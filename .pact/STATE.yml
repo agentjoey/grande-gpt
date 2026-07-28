@@ -73,7 +73,7 @@ features:
         deps: [s0c-1-profiles, s0c-3-sandbox]
   - id: s0d
     branch: feat/s0d-mcp-oauth
-    status: in_progress
+    status: shipped
     tasks:
       - id: s0d-1-errors
         owner: w1
