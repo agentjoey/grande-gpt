@@ -86,7 +86,7 @@ features:
         status: awaiting_review
         reviewer: rev
         spec: .pact/tasks/s0d-2-oauth.md
-        evidence: All 393 tests pass (21 test files), including 31 new tests (6 accessGate + 25 oauth).   Load-bearing verification (all 6 checks confirmed): 1. code_challenge required → TEST RED when removed, GREEN when restored 2. refresh resource equality → TEST RED when removed, GREEN when restored 3. CRITICAL-3: codes.delete() before await → TEST RED when moved after JWT signing (3 fulfilled instead of 1), GREEN when restored 4. CRITICAL-4: redirect_uri exact match → TEST RED when changed to startsWith (resolved instead of rejecting), GREEN when restored 5. I-11: refresh replay chain invalidation → TEST RED when only rejecting (new RT still usable), GREEN when restored 6. I-9: algorithms:["HS256"] lock → Manual probe: without algorithms constraint, HS512 token ACCEPTED (vulnerable). With constraint, REJECTED. Confirmed load-bearing.
+        evidence: Fixed typecheck error: CryptoKey is a runtime value in Node 24 (Web Crypto API), not a type in lib:["ES2023"]. Changed to `any`.  $ pnpm test && pnpm typecheck > vitest run — 21 test files, 393 tests passed > tsc --noEmit — no errors
       - id: s0d-3-tools
         owner: w1
         status: assigned
