@@ -10,11 +10,15 @@ import { createOAuth, OAuthError, type OAuthConfig } from "./oauth.ts";
 import { registeredIds } from "./registry.ts";
 import { reconcileRunningJobs } from "./jobs.ts";
 import { buildTools, type ToolDef } from "./tools.ts";
+import { createAccessGate, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
 
 export interface AppConfig {
   issuer: string;
   layout: Layout;
   db: DatabaseSync;
+  /** Cloudflare Access 门禁配置（规格 §7.0⓪）。由调用方在启动时用 loadAccessConfig() 读取——
+   *  配置本身缺失/格式错误必须在那一步就拒绝启动，这里只接收已校验好的值，不在每次请求时重读。 */
+  accessConfig: AccessConfig;
 }
 
 const VALID_REPO_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -60,7 +64,11 @@ function oauthErrorStatus(e: OAuthError): number {
 }
 
 export function createApp(cfg: AppConfig): Hono {
-  const { issuer, layout, db } = cfg;
+  const { issuer, layout, db, accessConfig } = cfg;
+
+  // 只建一次（进程启动时），不在每次请求里重建——JWKS 拉取器有自己的缓存，
+  // 重建等于每次请求都可能重新走一遍网络。
+  const assertApproved = createAccessGate(accessConfig);
 
   const oauthCfg: OAuthConfig = {
     issuer,
@@ -86,6 +94,19 @@ export function createApp(cfg: AppConfig): Hono {
   });
 
   app.get("/authorize", async (c) => {
+    // 门禁必须是这个 handler 的第一件事——早于 PKCE、早于 client 查找、早于任何 code
+    // 生成。Cloudflare Access 挡在前面只是仪表盘设置，能被删除、误配置范围，或者被
+    // 直连端口绕过；这里的检查才是把它变成硬约束的那一步（铁律三）。
+    try {
+      await assertApproved(c.req.raw.headers);
+    } catch (e) {
+      if (e instanceof AccessDeniedError) {
+        // 响应体不带 e.message——那是给运维看的诊断文本，不该回给未经门禁的调用方。
+        return c.json({ error: "access_denied" }, 403);
+      }
+      throw e;
+    }
+
     const q = c.req.query();
     try {
       const code = await oauth.authorize({

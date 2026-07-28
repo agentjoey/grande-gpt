@@ -1,0 +1,60 @@
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+import { openDb } from "./db.ts";
+import { ensureLayout, loadLayout } from "./layout.ts";
+import { startGateway } from "./server.ts";
+import { loadAccessConfig } from "./accessGate.ts";
+
+/**
+ * Gateway 的进程入口。
+ *
+ * `GRANDE_ISSUER` 必须显式给出，且必须与 ChatGPT 侧配置的 Server URL 同源 ——
+ * 它决定令牌 `aud` 的取值与发现文档里的每一个 URL。猜错的后果不是启动失败，
+ * 而是**签出来的令牌打不开自己的端点**，症状极隐蔽。与 `GRANDE_WORKSPACE`
+ * 一样，不给默认值：失败得响远比失败得静默好。
+ */
+async function main(): Promise<void> {
+  const issuer = process.env.GRANDE_ISSUER;
+  if (!issuer) {
+    throw new Error(
+      "GRANDE_ISSUER 未设置。请指向 ChatGPT 侧配置的 Server URL 的源，" +
+        "例如 GRANDE_ISSUER=https://grande.agentjoey.ai",
+    );
+  }
+  const layout = loadLayout();
+  ensureLayout(layout);
+  // 在启动时读一次、校验一次——缺失或格式错误必须在这里响亮地拒绝启动，
+  // 而不是留到第一个用户登录时才在请求路径里发现。
+  const accessConfig = loadAccessConfig(layout);
+  const db = openDb(layout);
+
+  const gw = await startGateway({ issuer, layout, db, accessConfig });
+  const port = Number(process.env.PORT || "8787");
+  console.log(`[gateway] listening on 127.0.0.1:${port}  issuer=${issuer}`);
+  console.log(`[gateway] workspace=${layout.workspaceRoot}`);
+  console.log(`[gateway] control=${layout.controlRoot}`);
+
+  // 优雅关停：先停止接受新连接，让在途的后台 job 收尾写完 artifact 再退出。
+  // 硬杀会让 runner 的 .then 链在 db.close() 之后落地——那正是 S0-C 修过的
+  // unhandled rejection 形态。
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.once(sig, () => {
+      console.log(`\n[gateway] 收到 ${sig}，正在关停…`);
+      void gw.close().then(() => { db.close(); process.exit(0); });
+    });
+  }
+}
+
+/**
+ * 入口守卫。用 `pathToFileURL(realpathSync(argv[1]))` 而不是拼
+ * `file://${argv[1]}` —— 后者在经符号链接调用（`pnpm link` / `node_modules/.bin`
+ * 的 shim 就是符号链接）、或路径含空格与非 ASCII 时会静默失配，结果是
+ * **exit 0 且零输出**。S0-A 的 CLI 正是栽在这里，包装脚本会把它读成成功。
+ */
+const argv1 = process.argv[1];
+if (argv1 !== undefined && pathToFileURL(realpathSync(argv1)).href === import.meta.url) {
+  main().catch((e: unknown) => {
+    console.error(`[gateway] 启动失败：${(e as Error).message}`);
+    process.exit(1);
+  });
+}
