@@ -31,7 +31,7 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 
 **S0-A / S0-B / S0-C / S0-D 均已合并到 `main`。** 479 测试通过，typecheck 干净。
 
-**已在真实 ChatGPT 普通对话里验证通过的两件事**：
+**已在真实 ChatGPT 普通对话里验证通过的三件事**：
 
 1. **AC-13（完整开发闭环）** —— `task_open → 探索 → repo_edit → run → run_result（预期失败）
    → repo_edit → run → 通过`，canonical 全程零污染。记录见
@@ -39,15 +39,21 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 2. **D18（单一端点 + 任务绑定隔离）** —— 同一个 `https://grande.agentjoey.ai/mcp` 连接器
    操作了 grande-gpt 之外的仓库（urbanbricks），worktree 落在 `urbanbricks/` 名下、
    依赖目录克隆完整（654 个 .pnpm 包）、canonical 零污染。
+3. **P-1（模型自主轮询）** —— 90 秒的 job，模型自主发起 **5 次** `grande_run_result`，
+   4 次拿到 `running` 非终态后**每次都自己再取**，全程零用户消息。记录见
+   [`docs/research/2026-07-29-p1-polling-observation.md`](docs/research/2026-07-29-p1-polling-observation.md)。
+
+   ⚠️ **测 P-1 的纪律**：发出提示词后全程不再说话——任何一条用户消息都会让
+   「自主轮询」与「被用户推着走」无法区分。另外网关日志必须带时间戳，
+   否则只能数次数、量不出间隔。
 
 **已知遗留**（按优先级）：
 
 | # | 问题 | 状态 |
 |---|---|---|
-| 1 | **P-1（模型自主轮询）在真实长任务下仍未验证** —— 两次实测的 job 分别只跑了 3.2s / 265ms，构不成需要轮询的场景 | 待验证，需要一个跑得够久的 job |
+| 1 | S0-D 与其后一连串实测修复**没有跑过整分支审查** | 待办 |
 | 2 | 沙箱内 `git` 需要 Xcode developer dir，环境清洗后不可用 | 仅影响调 git 的项目（本仓库自身），普通项目无感 |
-| 3 | S0-D 与其后一连串实测修复**没有跑过整分支审查** | 待办 |
-| 4 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项 |
+| 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项 |
 
 
 **POC 已通过**（观察记录 [`docs/research/2026-07-26-poc-observation.md`](docs/research/2026-07-26-poc-observation.md)）——

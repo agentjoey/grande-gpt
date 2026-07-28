@@ -95,12 +95,26 @@ export function createApp(cfg: AppConfig): Hono {
 
   const app = new Hono();
 
+  /** 日志时间戳：本地时区的 `HH:MM:SS.mmm`，只够用来量两次调用之间的间隔。 */
+  const ts = (): string => {
+    const d = new Date();
+    const p = (n: number, w = 2): string => String(n).padStart(w, "0");
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+  };
+
   // 请求日志。spike 版有、本实现漏了——结果是「ChatGPT 报连接失败」时我们只能猜，
   // 因为分不清请求根本没到、还是到了但被某一步拒了。诊断信息只进服务端日志，不回给调用方。
+  //
+  // **每行带墙钟时间戳**：单看「耗时 Nms」只覆盖服务端处理那一段，测不出**两次调用
+  // 之间**模型自己等了多久。而 P-1（模型是否自主轮询 `grande_run_result` 直到终态）
+  // 恰恰只能从调用间隔看出来——第一次测 P-1 时日志没有时间戳，只能数出「调了 1 次」，
+  // 却说不出它等了 20 秒还是 2 秒。
   app.use("*", async (c, next) => {
     const t0 = Date.now();
     await next();
-    console.log(`[gw] ${c.req.method} ${new URL(c.req.url).pathname} → ${c.res.status} (${Date.now() - t0}ms)`);
+    console.log(
+      `[gw] ${ts()} ${c.req.method} ${new URL(c.req.url).pathname} → ${c.res.status} (${Date.now() - t0}ms)`,
+    );
   });
 
   app.post("/register", async (c) => {
@@ -254,7 +268,7 @@ export function createApp(cfg: AppConfig): Hono {
           ? (sc.truncated === true ? " truncated" : "")
           : ` ${(sc.error as { code?: string } | undefined)?.code ?? "?"}`;
         console.log(
-          `[tool] ${tool.name} ${JSON.stringify(args)} → ${ok ? "ok" : "ERR"}${detail} (${Date.now() - t0}ms)`,
+          `[tool] ${ts()} ${tool.name} ${JSON.stringify(args)} → ${ok ? "ok" : "ERR"}${detail} (${Date.now() - t0}ms)`,
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(sc) }],
