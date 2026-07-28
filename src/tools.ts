@@ -5,6 +5,7 @@ import { toToolError, redact, StateError } from "./errors.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
 import { getTask, listActiveTasks, createTask } from "./tasks.ts";
+import { loadProfiles } from "./profiles.ts";
 import { getJob, listJobs } from "./jobs.ts";
 import { jobReport, jobStateToError, startJob } from "./runner.ts";
 import { repoRead } from "./repoFile.ts";
@@ -41,6 +42,20 @@ function makeTaskContext(db: DatabaseSync, layout: Layout, taskId: string): Task
   };
 }
 
+/**
+ * 只读工具（repo_map/repo_search/repo_read）在有 taskId 时该读 worktree 还是
+ * canonical，取决于「模型是否已经在这个任务里改过东西」——没有 taskId 时读
+ * canonical 是合理的（开任务前先逛逛仓库），但**带着 taskId 却仍悄悄读 canonical
+ * 不行**：模型自己刚用 grande_repo_edit 写进 worktree 的内容，下一次读会看不到
+ * （BUG 1）。taskId 未知时抛 TASK_NOT_FOUND，与 grande_run/grande_diff 一致。
+ */
+function resolveReadRoot(db: DatabaseSync, repoRoot: string, taskId: string | undefined): string {
+  if (!taskId) return repoRoot;
+  const t = getTask(db, taskId);
+  if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+  return t.worktreePath;
+}
+
 function wrap(deps: ToolDeps, taskId: string | null, fn: () => unknown): { structuredContent: unknown } {
   try {
     const data = fn();
@@ -69,9 +84,27 @@ function wrap(deps: ToolDeps, taskId: string | null, fn: () => unknown): { struc
   }
 }
 
+/**
+ * BUG 4：`getProfile` 未注册时的报错早就列出可选 profile 了，但那只在**调用之后**
+ * 才看得到——模型第一次选名字时手里没有这份列表，只能猜（实测：猜了 "test"，
+ * 真实注册的是 "unit"，多花一轮工具调用才自纠正）。把同一份名字提前铺进
+ * `grande_run` 的 schema 描述里，模型在选之前就看得到，不必先犯错再学。
+ * 用 try/catch 兜底：profiles.yaml 缺失/损坏不该让整个工具列表都构建失败——
+ * 那是 `grande_run` 真正执行时才必须报的错，不是 schema 描述阶段的硬依赖。
+ */
+function describeAvailableProfiles(layout: Layout, repoId: string): string {
+  try {
+    const names = [...loadProfiles(layout, repoId).keys()].sort();
+    return names.length > 0 ? `已注册：${names.join("、")}` : "该仓库尚未注册任何 profile";
+  } catch {
+    return "";
+  }
+}
+
 export function buildTools(deps: ToolDeps): ToolDef[] {
   const { db, layout, repoId } = deps;
   const repoRoot = resolveRepoPath(layout, repoId, registeredIds(layout));
+  const availableProfiles = describeAvailableProfiles(layout, repoId);
 
   return [
     {
@@ -117,18 +150,21 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
     {
       name: "grande_repo_map",
-      description: "列出仓库目录结构，识别关键文件（package.json/tsconfig.json/测试目录等）",
+      description: "列出仓库目录结构，识别关键文件（package.json/tsconfig.json/测试目录等）。" +
+        "带 taskId 时读取该任务的 worktree（能看到你自己刚写入的改动）；不带则读取 canonical。",
       inputSchema: {
         type: "object",
         properties: {
           maxEntries: { type: "number", description: "单次返回的最大条目数（默认500）" },
           cursor: { type: "string", description: "分页游标，来自上一页的 nextCursor" },
+          taskId: { type: "string", description: "可选：任务ID。带上时读取该任务 worktree 而非 canonical" },
         },
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       handler: async (args) =>
-        wrap(deps, null, () => {
-          const r = repoMap(repoRoot, {
+        wrap(deps, (args.taskId as string) ?? null, () => {
+          const root = resolveReadRoot(db, repoRoot, args.taskId as string | undefined);
+          const r = repoMap(root, {
             maxEntries: args.maxEntries as number | undefined,
             cursor: args.cursor as string | null | undefined,
           });
@@ -144,7 +180,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
     {
       name: "grande_repo_search",
-      description: "在仓库中搜索字面量（非正则），返回匹配行与上下文，支持分页与时间预算",
+      description: "在仓库中搜索字面量（非正则），返回匹配行与上下文，支持分页与时间预算。" +
+        "带 taskId 时搜索该任务的 worktree（能搜到你自己刚写入的改动）；不带则搜索 canonical。",
       inputSchema: {
         type: "object",
         properties: {
@@ -152,13 +189,15 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           maxMatches: { type: "number", description: "单次返回的最大匹配数（默认50）" },
           budgetMs: { type: "number", description: "时间预算，毫秒（默认4000）" },
           cursor: { type: "string", description: "分页游标" },
+          taskId: { type: "string", description: "可选：任务ID。带上时搜索该任务 worktree 而非 canonical" },
         },
         required: ["pattern"],
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       handler: async (args) =>
-        wrap(deps, null, () => {
-          const r = repoSearch(repoRoot, args.pattern as string, {
+        wrap(deps, (args.taskId as string) ?? null, () => {
+          const root = resolveReadRoot(db, repoRoot, args.taskId as string | undefined);
+          const r = repoSearch(root, args.pattern as string, {
             maxMatches: args.maxMatches as number | undefined,
             budgetMs: args.budgetMs as number | undefined,
             cursor: args.cursor as string | null | undefined,
@@ -177,7 +216,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
     {
       name: "grande_repo_read",
-      description: "读取仓库内文件内容，支持行区间与字节上限",
+      description: "读取仓库内文件内容，支持行区间与字节上限。" +
+        "带 taskId 时读取该任务的 worktree（能看到你自己刚写入的改动）；不带则读取 canonical。",
       inputSchema: {
         type: "object",
         properties: {
@@ -190,16 +230,18 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             maxItems: 2,
             description: "行区间 [from, to]，1-based",
           },
+          taskId: { type: "string", description: "可选：任务ID。带上时读取该任务 worktree 而非 canonical" },
         },
         required: ["path"],
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       handler: async (args) =>
-        wrap(deps, null, () => {
+        wrap(deps, (args.taskId as string) ?? null, () => {
           let lineRange: [number, number] | undefined;
           const lr = args.lineRange as [number, number] | undefined;
           if (lr) lineRange = [lr[0], lr[1]];
-          const r = repoRead(repoRoot, args.path as string, {
+          const root = resolveReadRoot(db, repoRoot, args.taskId as string | undefined);
+          const r = repoRead(root, args.path as string, {
             maxBytes: args.maxBytes as number | undefined,
             lineRange,
           });
@@ -259,12 +301,16 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       },
       {
         name: "grande_run",
-        description: "在沙箱中异步执行一个 profile 命令，立即返回 jobId 供后续查询",
+        description: "在沙箱中异步执行一个 profile 命令，立即返回 jobId 供后续查询" +
+          (availableProfiles ? `（${availableProfiles}）` : ""),
         inputSchema: {
           type: "object",
           properties: {
             taskId: { type: "string", description: "关联的任务ID" },
-            profile: { type: "string", description: "要执行的 profile 名称" },
+            profile: {
+              type: "string",
+              description: `要执行的 profile 名称${availableProfiles ? `（${availableProfiles}）` : ""}`,
+            },
           },
           required: ["taskId", "profile"],
         },
@@ -294,7 +340,10 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       },
       {
         name: "grande_repo_edit",
-        description: "批量修改仓库文件：create（新建）、modify（修改，需要 expectedSha256 防冲突）、move（移动）。不支持删除",
+        description: "批量修改指定任务 worktree 里的文件：create（新建）、modify（修改，需要 " +
+          "expectedSha256 防冲突）、move（移动）。不支持删除。taskId 决定写入哪个 worktree —— " +
+          "写入的是该任务的隔离工作区，不是 canonical checkout，其他工具（grande_repo_read/" +
+          "grande_repo_map/grande_repo_search/grande_diff）带上同一个 taskId 才能看到这里的改动。",
         inputSchema: {
           type: "object",
           properties: {
@@ -303,24 +352,27 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
               items: { type: "object" },
               description: "修改操作数组，每项含 op/create/modify/move 等字段",
             },
-            taskId: { type: "string", description: "可选的任务ID，关联审计记录" },
+            taskId: { type: "string", description: "任务ID，决定写入哪个 worktree（必填）" },
           },
-          required: ["ops"],
+          required: ["ops", "taskId"],
         },
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         handler: async (args) =>
-          wrap(deps, (args.taskId as string) ?? null, () => {
+          wrap(deps, args.taskId as string, () => {
+            const taskId = args.taskId as string;
+            const t = getTask(db, taskId);
+            if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
             const ops = args.ops as EditOp[];
             const rules = loadDenyRules(layout);
-            const h = beginAudit(db, { taskId: (args.taskId as string) ?? null, tool: "grande_repo_edit", input: { ops } });
+            const h = beginAudit(db, { taskId, tool: "grande_repo_edit", input: { ops } });
             h.allowed();
-            const r = repoEdit(repoRoot, ops, rules, h);
+            const r = repoEdit(t.worktreePath, ops, rules, h);
             const paths = r.applied.map((a) => a.path);
             return ok({
-              taskId: (args.taskId as string | undefined),
+              taskId,
               data: r,
               hint: `已应用 ${r.applied.length} 个操作：${paths.join(", ")}`,
-              taskContext: (args.taskId as string) ? makeTaskContext(db, layout, args.taskId as string) : null,
+              taskContext: makeTaskContext(db, layout, taskId),
             });
           }),
       },

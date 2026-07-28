@@ -39,11 +39,15 @@ beforeEach(() => {
   g(repo, "config", "user.name", "T");
   writeFileSync(join(repo, "a.ts"), "v1\nexport const x = 1;\n", "utf8");
   writeFileSync(join(repo, "status.txt"), "FAIL\n", "utf8");
+  // BUG 1 修复后 grande_run 的 cwd 是任务的 worktree，grande_repo_edit 也写进
+  // worktree——脚本必须用**相对路径**读 status.txt，才能看到当前跑它的那个
+  // worktree 里的内容。此前这里硬编码了 canonical 的绝对路径，能在旧（错误）
+  // 行为下侥幸跑通，只是因为 repo_edit 那时候也是无条件写 canonical。
   writeFileSync(
     join(repo, "check-status.sh"),
     `#!/bin/sh
-if [ -f '${repo}/status.txt' ]; then
-  read line < '${repo}/status.txt'
+if [ -f 'status.txt' ]; then
+  read line < 'status.txt'
   if [ "$line" = "PASS" ]; then
     echo "E2E CHECK PASSED" && exit 0
   else
@@ -100,9 +104,16 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<Re
   return r.structuredContent as Record<string, unknown>;
 }
 
-/** 读取文件内容与 sha256，用于后续 modify 拿 expectedSha256 */
-async function readFile(path: string): Promise<{ content: string; sha256: string }> {
-  const r = await callTool("grande_repo_read", { path });
+/**
+ * 读取文件内容与 sha256，用于后续 modify 拿 expectedSha256。
+ *
+ * **必须能传 taskId**（BUG 1 关联修复）：grande_repo_edit 现在写进 worktree，
+ * 不再是 canonical。任务开了之后的读回都要带上同一个 taskId，否则读到的是
+ * canonical 里还没被本任务改过的旧内容——modify 用这份旧内容算出的
+ * expectedSha256 在 worktree 里对不上，或者断言直接读到编辑前的内容。
+ */
+async function readFile(path: string, taskId?: string): Promise<{ content: string; sha256: string }> {
+  const r = await callTool("grande_repo_read", { path, ...(taskId ? { taskId } : {}) });
   const data = r.data as Record<string, unknown>;
   return { content: data.content as string, sha256: data.sha256 as string };
 }
@@ -120,11 +131,11 @@ describe("E2E：完整工具闭环", () => {
     expect(taskId).toBe("task_e2e_new");
 
     // Step 2: repo_read — read the initial status file
-    const s2 = await readFile("status.txt");
+    const s2 = await readFile("status.txt", taskId);
     expect(s2.content).toContain("FAIL");
 
     // Step 3: repo_edit — modify a.ts using its sha256 for staleness check
-    const aTs = await readFile("a.ts");
+    const aTs = await readFile("a.ts", taskId);
     const r3 = await callTool("grande_repo_edit", {
       ops: [
         { op: "modify", path: "a.ts", expectedSha256: aTs.sha256, content: "v2\nexport const x = 2;\n" },
@@ -134,8 +145,8 @@ describe("E2E：完整工具闭环", () => {
     expect(r3.ok).toBe(true);
     expect((r3.data as Record<string, unknown>).applied).toBeDefined();
 
-    // Read back a.ts to confirm edit
-    const r3b = await readFile("a.ts");
+    // Read back a.ts to confirm edit — must read the same worktree it was written into
+    const r3b = await readFile("a.ts", taskId);
     expect(r3b.content).toContain("v2");
 
     // Step 4: run — check-e2e profile reads status.txt (still FAIL) and exits 1
@@ -159,14 +170,14 @@ describe("E2E：完整工具闭环", () => {
     expect(jobState5!.exitCode).toBe(1);
 
     // Step 6: repo_edit — fix status.txt from FAIL → PASS
-    const st = await readFile("status.txt");
+    const st = await readFile("status.txt", taskId);
     const r6 = await callTool("grande_repo_edit", {
       ops: [{ op: "modify", path: "status.txt", expectedSha256: st.sha256, content: "PASS\n" }],
       taskId,
     });
     expect(r6.ok).toBe(true);
 
-    const r6b = await readFile("status.txt");
+    const r6b = await readFile("status.txt", taskId);
     expect(r6b.content).toContain("PASS");
 
     // Step 7: run — check-e2e profile now reads PASS and exits 0
@@ -250,7 +261,7 @@ describe("E2E：完整工具闭环", () => {
     ).toBe(true);
 
     // First edit + run cycle — deliberately fail
-    const st1 = await readFile("status.txt");
+    const st1 = await readFile("status.txt", taskId);
     const edit1 = await callTool("grande_repo_edit", {
       ops: [{ op: "modify", path: "status.txt", expectedSha256: st1.sha256, content: "FAIL\n" }],
       taskId,
@@ -271,7 +282,7 @@ describe("E2E：完整工具闭环", () => {
     expect(job1!.state).toBe("failed");
 
     // Second edit + run cycle — fix and pass
-    const st2 = await readFile("status.txt");
+    const st2 = await readFile("status.txt", taskId);
     const edit2 = await callTool("grande_repo_edit", {
       ops: [{ op: "modify", path: "status.txt", expectedSha256: st2.sha256, content: "PASS\n" }],
       taskId,
@@ -292,11 +303,16 @@ describe("E2E：完整工具闭环", () => {
   }, 30_000);
 
   it("repo_search 能搜到 repo_edit 创建的新文件内容（证明文件落盘了）", async () => {
-    await callTool("grande_repo_edit", {
+    // BUG 1 修复后 repo_edit 要求 taskId、写进 worktree；用 beforeEach 里现成的
+    // task_e2e，repo_search 必须带上同一个 taskId 才能搜到这个 worktree 里的内容
+    // ——不带 taskId 搜的是 canonical，那里从来没有这个文件。
+    const edit = await callTool("grande_repo_edit", {
       ops: [{ op: "create", path: "e2e-search.ts", content: "const MAGIC_E2E = 'find-me';\n" }],
+      taskId: "task_e2e",
     });
+    expect(edit.ok).toBe(true);
 
-    const r = await callTool("grande_repo_search", { pattern: "find-me" });
+    const r = await callTool("grande_repo_search", { pattern: "find-me", taskId: "task_e2e" });
     expect(r.ok).toBe(true);
     const matches = (r.data as Record<string, unknown>).matches as Array<unknown>;
     expect(matches.length).toBeGreaterThanOrEqual(1);

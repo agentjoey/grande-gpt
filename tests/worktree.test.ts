@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -142,6 +142,27 @@ describe("openWorktree()", () => {
     );
     const info = openWorktree(layout, "demo", "s", "task_abcd");
     expect(existsSync(join(info.worktreePath, "node_modules", "some-pkg", "index.js"))).toBe(true);
+  });
+
+  it("clonefile 语义（BUG 3）：改写 worktree 里克隆出的文件，canonical 的原文件不受影响", () => {
+    const nm = join(repo, "node_modules", "some-pkg");
+    mkdirSync(nm, { recursive: true });
+    writeFileSync(join(nm, "index.js"), "module.exports = 1;\n", "utf8");
+    writeFileSync(
+      join(layout.configDir, "profiles.yaml"),
+      'depDirs:\n  demo: ["node_modules"]\nrepos:\n  demo:\n    unit: { argv: ["a"], timeoutSeconds: 10 }\n',
+      "utf8",
+    );
+    const info = openWorktree(layout, "demo", "s", "task_abcd");
+    const clonedFile = join(info.worktreePath, "node_modules", "some-pkg", "index.js");
+    expect(existsSync(clonedFile)).toBe(true);
+
+    // `cp -Rc` 是写时复制：两份 inode 不同但内容相同，改写克隆出来的那一份必须
+    // 不影响 canonical 的原始文件——如果这里失败（两者内容一起变），说明落地的
+    // 不是 clonefile 而是硬链接/引用同一份数据。
+    writeFileSync(clonedFile, "module.exports = 999; // 被任务修改\n", "utf8");
+    expect(readFileSync(join(nm, "index.js"), "utf8")).toBe("module.exports = 1;\n");
+    expect(readFileSync(clonedFile, "utf8")).toContain("999");
   });
 
   it("canonical 里没有的 depDirs 目录被跳过，不报错（比如全新仓库还没 install）", () => {

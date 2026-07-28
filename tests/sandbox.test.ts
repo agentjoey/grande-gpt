@@ -229,6 +229,65 @@ describe("runSandboxed()", () => {
   });
 });
 
+describe("pnpm 可执行（BUG 2：pnpm 是符号链接时 execvp 按字面文件名查找会落空）", () => {
+  /**
+   * 实测复现（本机 2026-07-28）：`which pnpm` → `~/.local/bin/pnpm`，是个符号
+   * 链接，真正指向 `~/.local/lib/node_modules/pnpm/bin/pnpm.cjs`；该目标目录
+   * 里只有 `pnpm.cjs`，没有字面量叫 `pnpm` 的文件。旧的 `resolveBinaryDir` 只把
+   * `realpathSync` 解析后的目标目录塞进 PATH/execRoots，`sandbox-exec` 内部
+   * `execvp("pnpm", …)` 按 PATH 逐目录找字面量文件名 `pnpm`——那个目录里找不到，
+   * 报 `execvp() of 'pnpm' failed: No such file or directory`（exit 71），这正是
+   * 首次真实运行观测到的失败。这条测试跑的是与生产 `~/.grande-control/config/
+   * profiles.yaml` 里 `unit` profile 完全相同形状的命令（`argv: ["pnpm", "test"]`），
+   * 只是指向一个跑得很快的 fixture package.json，而不是本仓库自己的 446 条测试。
+   */
+  let root: string;
+  let paths: SandboxPaths;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "bug2-"));
+    paths = {
+      worktree: join(root, "worktree"),
+      canonicalGit: join(root, "canonical", ".git"),
+      jobTmp: join(root, "jobtmp"),
+      controlRoot: join(root, "control"),
+      worktreesRoot: join(root, "worktrees"),
+      execRoots: defaultExecRoots(),
+    };
+    for (const d of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
+      mkdirSync(d, { recursive: true });
+    }
+    writeFileSync(
+      join(paths.worktree, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        version: "1.0.0",
+        scripts: { test: "node -e \"console.log('pnpm-test-ok')\"" },
+      }),
+      "utf8",
+    );
+  });
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("argv[0] = 'pnpm'（与真实 unit profile 同形）在沙箱内能被 execvp 解析并跑通", async () => {
+    const r = await runSandboxed({
+      argv: ["pnpm", "test"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 30_000,
+      maxOutputBytes: 65_536,
+    });
+    // 修复前的失败形状：exit 71 + "No such file or directory"（sandbox-exec 的
+    // execvp 报错文案）。不断言具体 exitCode !== 71 之外还断言 stderr 不含这句
+    // 文案，双重锁定这一种失败模式，不是随便什么非零退出码都算过。
+    expect(r.exitCode).not.toBe(71);
+    expect(r.stdout + r.stderr).not.toContain("No such file or directory");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("pnpm-test-ok");
+  }, 35_000);
+});
+
 describe("PATH 与 execRoots 同源（回归：修复前二者是两处独立硬编码）", () => {
   /**
    * 用 `env node` 而不是 shebang 脚本来测——两者走的是同一条 PATH 查找，

@@ -63,24 +63,41 @@ const STANDARD_EXEC_ROOTS = ["/usr/bin", "/bin", "/usr/sbin"];
  *  没装（比如没有独立的 npx）就跳过，不是错误。 */
 const PACKAGE_MANAGER_BINARIES = ["pnpm", "npm", "npx"];
 
-function resolveBinaryDir(name: string): string | null {
+/**
+ * BUG 2 实测复现（本机 2026-07-28）：`which pnpm` → `~/.local/bin/pnpm`，
+ * 是个符号链接，真正指向 `~/.local/lib/node_modules/pnpm/bin/pnpm.cjs`
+ * （`~/.local` 是版本管理器风格的安装布局，等价的坑在 nvm/volta/asdf 下
+ * 同样存在）。该目标目录里**只有** `pnpm.cjs`/`pnpx.cjs`，没有字面量叫
+ * `pnpm` 的文件。旧实现只把 `dirname(realpathSync(found))`（解析后的目标
+ * 目录）塞进 execRoots/PATH，于是 `sandbox-exec` 内部的 `execvp("pnpm", …)`
+ * 按 PATH 逐目录找字面量文件名 `pnpm`——那个目录里找不到，未进入 Seatbelt
+ * 权限判定就已经失败：`execvp() of 'pnpm' failed: No such file or
+ * directory`（exit 71，与观测到的现象完全一致，已用 `env -i PATH=<仅解析
+ * 后目录> sandbox-exec -f <allow-all> pnpm --version` 复现同一报错）。
+ *
+ * 两个目录都要保留，用途不同：
+ * - **符号链接自身所在目录**（`~/.local/bin`）：PATH 名字查找靠它——`execvp`
+ *   按字面量文件名逐目录扫，只有这里存在名为 `pnpm` 的条目（哪怕是符号链接）。
+ * - **`realpathSync` 解析后的目标目录**：Seatbelt 的 `process-exec` 在真正
+ *   execve() 时按内核解析后的真实路径比对 subpath（sbpl.ts 同一个道理），
+ *   execvp 顺着符号链接最终 exec 的是这个目录下的 `pnpm.cjs`，这个目录必须
+ *   在 allow 列表里，否则换成「Operation not permitted」失败。
+ *   本机实测：`env -i PATH=<原始符号链接目录>:<node目录>:<解析后目录>
+ *   sandbox-exec -f <allow-all> pnpm --version` → exit 0，两个目录缺一不可。
+ */
+function resolveBinaryDirs(name: string): string[] {
   try {
     const found = execFileSync("/usr/bin/which", [name], { encoding: "utf8" }).trim();
-    if (!found) return null;
-    // `which` 给的路径常常是符号链接（pnpm 的 shim 尤其如此：~/.local/bin/pnpm
-    // 实际指向 ~/.local/lib/node_modules/pnpm/bin/pnpm.cjs）。Seatbelt 在真正
-    // execve 时按内核解析后的真实路径比对 subpath，这里必须做同样的解析，
-    // 否则 allow 规则悄悄失配——跟 runSandboxed 里对 SandboxPaths 五个字段做
-    // realpathSync 是同一个道理。
-    return dirname(realpathSync(found));
+    if (!found) return [];
+    return [...new Set([dirname(found), dirname(realpathSync(found))])];
   } catch {
-    return null; // 本机没装这个二进制，跳过而不是报错
+    return []; // 本机没装这个二进制，跳过而不是报错
   }
 }
 
 /**
  * 返回本机实际需要放行的 process-exec 根目录：标准系统路径 + 当前 node 解释器
- * 所在目录 + 解析后的包管理器二进制目录。
+ * 所在目录 + 包管理器二进制的符号链接目录与解析后目录（见 resolveBinaryDirs）。
  *
  * 不做成硬编码常量的原因：node/pnpm 的安装位置因安装方式而异——官方安装器、
  * nvm、volta、asdf、Intel/Apple Silicon Homebrew 各不相同。硬编码在换一台机器
@@ -95,8 +112,7 @@ export function defaultExecRoots(): string[] {
   const roots = new Set<string>(STANDARD_EXEC_ROOTS.map((r) => realpathSync(r)));
   roots.add(dirname(realpathSync(process.execPath)));
   for (const bin of PACKAGE_MANAGER_BINARIES) {
-    const dir = resolveBinaryDir(bin);
-    if (dir) roots.add(dir);
+    for (const dir of resolveBinaryDirs(bin)) roots.add(dir);
   }
   return [...roots];
 }

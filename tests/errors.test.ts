@@ -1,12 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { toToolError, redact, StateError } from "../src/errors.ts";
 import { PathSecurityError } from "../src/paths.ts";
 import { PolicyError } from "../src/policy.ts";
-import { ProfileError } from "../src/profiles.ts";
+import { ProfileError, getProfile } from "../src/profiles.ts";
 import { EditError } from "../src/repoFile.ts";
 import { GitError } from "../src/worktree.ts";
 import { SbplError } from "../src/sbpl.ts";
 import { SandboxError } from "../src/sandbox.ts";
+import { ensureLayout, loadLayout } from "../src/layout.ts";
 
 describe("toToolError()", () => {
   it.each([
@@ -89,5 +93,48 @@ describe("toToolError()", () => {
     expect(msg).not.toContain("/Users/x/ws");
     expect(msg).toContain("<workspace>/secret-project");
     expect(msg).toContain("名字合法不等于位置安全"); // 其余内容原样保留
+  });
+
+  describe("BUG 4：PROFILE_NOT_FOUND 里的可选 profile 列表必须完整穿过 toToolError", () => {
+    let ws: string, ctrl: string, savedWs: string | undefined, savedCtrl: string | undefined;
+
+    beforeEach(() => {
+      savedWs = process.env.GRANDE_WORKSPACE;
+      savedCtrl = process.env.GRANDE_CONTROL;
+      ws = mkdtempSync(join(tmpdir(), "err-ws-"));
+      ctrl = mkdtempSync(join(tmpdir(), "err-ctl-"));
+      process.env.GRANDE_WORKSPACE = ws;
+      process.env.GRANDE_CONTROL = ctrl;
+    });
+    afterEach(() => {
+      if (savedWs === undefined) delete process.env.GRANDE_WORKSPACE; else process.env.GRANDE_WORKSPACE = savedWs;
+      if (savedCtrl === undefined) delete process.env.GRANDE_CONTROL; else process.env.GRANDE_CONTROL = savedCtrl;
+      rmSync(ws, { recursive: true, force: true });
+      rmSync(ctrl, { recursive: true, force: true });
+    });
+
+    it("真实 getProfile() 抛出的 PROFILE_NOT_FOUND，其可用列表在 toToolError() 之后原样保留", () => {
+      const l = loadLayout();
+      ensureLayout(l);
+      writeFileSync(
+        join(l.configDir, "profiles.yaml"),
+        'repos:\n  demo:\n    unit: { argv: ["a"], timeoutSeconds: 10 }\n    lint: { argv: ["b"], timeoutSeconds: 10 }\n',
+        "utf8",
+      );
+      let caught: unknown;
+      try {
+        getProfile(l, "demo", "test"); // 模拟 BUG 4 的真实场景：模型猜错了名字
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toBeDefined();
+      const t = toToolError(caught);
+      expect(t.code).toBe("PROFILE_NOT_FOUND");
+      // toToolError 只做 .code 映射、原样传递 message（不解析、不脱敏字符串内容）——
+      // 脱敏是 tools.ts 的 wrap() 在拿到这个结果之后才做的下一步，且只替换
+      // workspaceRoot/controlRoot 两个绝对路径前缀，不会动到 profile 名字。
+      expect(t.message).toContain("unit");
+      expect(t.message).toContain("lint");
+    });
   });
 });
