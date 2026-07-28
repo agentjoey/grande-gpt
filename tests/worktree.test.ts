@@ -64,6 +64,14 @@ describe("openWorktree()", () => {
     expect(existsSync(join(info.worktreePath, "a.ts"))).toBe(true);
   });
 
+  it("taskId 末尾是分隔符时分支名不出现双连字符（生产实测 grande/<slug>--001 的回归）", () => {
+    // `task-ub-probe-20260729-001` 的裸 slice(-4) 是 `-001`，拼在 `${slug}-` 后面
+    // 就产出了 `grande/ub-probe--001`。后缀改取末 4 位【字母数字】后应为 `9001`。
+    const info = openWorktree(layout, "demo", "ub-probe", "task-ub-probe-20260729-001");
+    expect(info.branch).toBe("grande/ub-probe-9001");
+    expect(info.branch).not.toContain("--");
+  });
+
   it("canonical 的工作区【不受影响】：分支没被切走，文件没变", () => {
     // 这是原地模型（D4）的核心承诺——用户还在用编辑器干活，不能被我们切分支。
     const before = git(repo, "rev-parse", "--abbrev-ref", "HEAD").trim();

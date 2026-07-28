@@ -131,7 +131,13 @@ export function openWorktree(
   }
 
   const baseCommit = git(repoRoot, ["rev-parse", "HEAD"]).trim();
-  const branch = `grande/${slug}-${taskId.slice(-4)}`;
+  // 后缀取 taskId 的**末 4 位字母数字**，而不是裸 `slice(-4)`：`TASK_ID_RE` 允许 taskId
+  // 里带 `-`/`_`，生产实测 `task-ub-probe-20260729-001` 的末 4 位是 `-001`，拼在
+  // `${slug}-` 后面就成了 `grande/ub-probe--001` 的双连字符。滤掉分隔符后既不会与前面
+  // 那个连接符撞车，也不会因末 4 位全是分隔符而变成空串（`TASK_ID_RE` 保证首字符是
+  // 字母数字，所以匹配结果至少有一个元素）。
+  const suffix = (taskId.match(/[A-Za-z0-9]/g) ?? []).slice(-4).join("");
+  const branch = `grande/${slug}-${suffix}`;
   git(repoRoot, ["worktree", "add", "-b", branch, dir, baseCommit]);
 
   cloneDepDirs(layout, repoId, repoRoot, dir);
@@ -180,7 +186,7 @@ function cloneDepDirs(layout: Layout, repoId: string, repoRoot: string, worktree
  *
  * **随手删掉分支**（MINOR 修复）：`git worktree remove` 只删工作目录，分支本身
  * 留在 canonical 里。不删的后果不是美观问题——`openWorktree` 的分支名是
- * `grande/<slug>-<taskId 后 4 位>`，重新用同一个 (slug, taskId 后四位) 组合开
+ * `grande/<slug>-<taskId 末 4 位字母数字>`，重新用同一个 (slug, taskId 末 4 位字母数字) 组合开
  * 新任务时，`git worktree add -b <同名分支>` 会因为分支已存在而失败，报出一个
  * 跟真实原因（上一次没清理干净）毫无关系的 `GIT_FAILED`。
  *
@@ -200,7 +206,7 @@ export function removeWorktree(
     throw new GitError(
       "WORKTREE_EXISTS",
       `worktree 已移除，但清理分支 ${info.branch} 失败：${(e as Error).message}。` +
-        `再次使用同一个 slug/taskId 后四位开新任务前，可能需要手动清理该分支。`,
+        `再次使用同一个 slug/taskId 末 4 位字母数字开新任务前，可能需要手动清理该分支。`,
     );
   }
 }

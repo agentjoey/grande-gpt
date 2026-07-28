@@ -27,7 +27,28 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 | D16 | **S0 接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | D13/D15 已作废：OpenAI Secure MCP Tunnel 需要 Platform API key（另一套计费），与「用 chat 额度」的初衷冲突 |
 | D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp`（D18 之后；`/mcp/<repoId>` 保留为兼容别名） | 已实测跑通 |
 
-## 当前状态：S0-A 实现中
+## 当前状态：S0 全部实现完毕，已在真实 ChatGPT 上跑通
+
+**S0-A / S0-B / S0-C / S0-D 均已合并到 `main`。** 479 测试通过，typecheck 干净。
+
+**已在真实 ChatGPT 普通对话里验证通过的两件事**：
+
+1. **AC-13（完整开发闭环）** —— `task_open → 探索 → repo_edit → run → run_result（预期失败）
+   → repo_edit → run → 通过`，canonical 全程零污染。记录见
+   [`docs/research/2026-07-29-ac13-observation.md`](docs/research/2026-07-29-ac13-observation.md)。
+2. **D18（单一端点 + 任务绑定隔离）** —— 同一个 `https://grande.agentjoey.ai/mcp` 连接器
+   操作了 grande-gpt 之外的仓库（urbanbricks），worktree 落在 `urbanbricks/` 名下、
+   依赖目录克隆完整（654 个 .pnpm 包）、canonical 零污染。
+
+**已知遗留**（按优先级）：
+
+| # | 问题 | 状态 |
+|---|---|---|
+| 1 | **P-1（模型自主轮询）在真实长任务下仍未验证** —— 两次实测的 job 分别只跑了 3.2s / 265ms，构不成需要轮询的场景 | 待验证，需要一个跑得够久的 job |
+| 2 | 沙箱内 `git` 需要 Xcode developer dir，环境清洗后不可用 | 仅影响调 git 的项目（本仓库自身），普通项目无感 |
+| 3 | S0-D 与其后一连串实测修复**没有跑过整分支审查** | 待办 |
+| 4 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项 |
+
 
 **POC 已通过**（观察记录 [`docs/research/2026-07-26-poc-observation.md`](docs/research/2026-07-26-poc-observation.md)）——
 hard gate P-1「模型自主轮询」4/4 通过，最长自主链 17 次调用；40 次工具调用只消耗 5 条用户消息，无额度提示。
