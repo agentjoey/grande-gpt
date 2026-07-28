@@ -77,7 +77,7 @@ features:
     tasks:
       - id: s0d-1-errors
         owner: w1
-        status: assigned
+        status: in_progress
         reviewer: rev
         spec: .pact/tasks/s0d-1-errors.md
         evidence: null
