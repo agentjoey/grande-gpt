@@ -66,7 +66,9 @@ describe("task 读写", () => {
   it("版本不匹配时拒绝更新——防止旧客户端覆盖新状态", () => {
     createTask(db, { taskId: "task_1", ...base });
     updateTaskState(db, "task_1", "RUNNING", 1);
-    expect(() => updateTaskState(db, "task_1", "CLOSED", 1)).toThrow(/STALE_STATE/);
+    expect(() => updateTaskState(db, "task_1", "CLOSED", 1)).toThrow(
+      expect.objectContaining({ code: "STALE_STATE" }),
+    );
     expect(getTask(db, "task_1")?.state).toBe("RUNNING");
   });
 

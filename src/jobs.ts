@@ -1,4 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
+import { StateError } from "./errors.ts";
 
 export type JobState = "running" | "passed" | "failed" | "timeout" | "killed" | "cancelled";
 
@@ -108,11 +109,11 @@ export function finishJob(
     r.summary ? JSON.stringify(r.summary) : null, jobId,
   );
   if (res.changes === 0) {
-    if (!getJob(db, jobId)) throw new Error(`JOB_NOT_FOUND: ${jobId}`);
+    if (!getJob(db, jobId)) throw new StateError("JOB_NOT_FOUND", `job ${jobId} 不存在。`);
     return undefined;
   }
   const updated = getJob(db, jobId);
-  if (!updated) throw new Error(`JOB_NOT_FOUND: ${jobId}`);
+  if (!updated) throw new StateError("JOB_NOT_FOUND", `job ${jobId} 不存在。`);
   return updated;
 }
 
