@@ -8,6 +8,7 @@ import { ensureLayout, loadLayout, type Layout } from "./layout.ts";
 import { assertValidId } from "./paths.ts";
 import { getTask, listActiveTasks } from "./tasks.ts";
 import { discoverRepos, loadRegistry } from "./registry.ts";
+import { applyGc, planGc } from "./worktreeGc.ts";
 
 const USAGE = `grande —— GrandeGPT 控制平面的只读查看器
 
@@ -15,6 +16,7 @@ const USAGE = `grande —— GrandeGPT 控制平面的只读查看器
   grande jobs [--task <id>]     job 列表：profile、状态、耗时、退出码
   grande audit [--task <id>]    审计流水：opId、工具、决策、触及路径
   grande doctor                 环境自检
+  grande gc                     worktree 与 task 对账（默认 dry-run）
 
 本工具只读，不提供任何变更能力（规格 §8.2）。`;
 
@@ -226,6 +228,48 @@ function cmdDoctor(out: (l: string) => void): number {
   return bad === 0 ? 0 : 1;
 }
 
+function cmdGc(out: (l: string) => void, apply: boolean): number {
+  return withDbExitCode(out, (db, layout) => {
+    const plan = planGc(db, layout);
+
+    // 孤儿 worktree
+    out(`孤儿 worktree（磁盘有、库里没有）：${plan.orphanWorktrees.length} 条`);
+    for (const o of plan.orphanWorktrees) {
+      out(`  ${o.repoId}/${o.taskId}`);
+      out(`    路径    ${o.path}`);
+      out(`    分支    ${o.branch ?? "（无）"}`);
+    }
+
+    // 幽灵 task
+    out("");
+    out(`幽灵 task（库里有、磁盘上没有）：${plan.ghostTasks.length} 条`);
+    for (const g of plan.ghostTasks) {
+      out(`  ${g.taskId}  repo=${g.repoId}`);
+      out(`    期望路径 ${g.worktreePath}`);
+    }
+
+    if (plan.orphanWorktrees.length === 0 && plan.ghostTasks.length === 0) {
+      out("");
+      out("一切干净，没有需要清理的东西。");
+      return 0;
+    }
+
+    if (!apply) {
+      out("");
+      out("以上为 dry-run 结果。加上 --apply 执行清理。");
+      return 0;
+    }
+
+    out("");
+    out("正在执行清理…");
+    const result = applyGc(db, layout, plan);
+    out(`  回收孤儿 worktree：${result.removed} 条`);
+    out(`  关闭幽灵 task：${result.closed} 条`);
+    out("完成。");
+    return 0;
+  });
+}
+
 /** @returns 进程退出码 */
 export function runCli(argv: string[], out: (line: string) => void): number {
   const [cmd, ...rest] = argv;
@@ -271,6 +315,8 @@ export function runCli(argv: string[], out: (line: string) => void): number {
       return cmdAudit(out, taskId);
     case "doctor":
       return cmdDoctor(out);
+    case "gc":
+      return cmdGc(out, rest.includes("--apply"));
     default:
       if (cmd !== undefined) out(`未知命令：${cmd}`);
       out(USAGE);
