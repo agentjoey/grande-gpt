@@ -4,7 +4,7 @@ import { createAccessGate } from "../src/accessGate.ts";
 
 const TEAM = "https://team.example.test";
 const AUD = "a".repeat(64);
-let priv: CryptoKey, jwksBody: string, restore: () => void;
+let priv: any, jwksBody: string, restore: () => void;
 
 beforeEach(async () => {
   const kp = await generateKeyPair("RS256");
