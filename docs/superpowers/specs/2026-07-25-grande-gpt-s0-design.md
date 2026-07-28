@@ -556,7 +556,40 @@ S0 的失败解析**只做 exit code + 尾部日志 + 可配置的失败行正�
 `TASK_NOT_FOUND` 的错误信息必须列出活跃任务及其分支与变更数 —— 这是 `taskId` 丢失时的兜底路径，
 比干巴巴报错有用得多。
 
-### 7.0 三条 S0-D 硬要求（S0-B/C 收尾审查催生）
+### 7.0 四条 S0-D 硬要求（S0-B/C 与 S0-D 计划审查催生）
+
+**⓪ `/authorize` 必须有用户认证 —— Cloudflare Access + 代码侧验签。**
+
+S0-D 的计划审查发现：计划把 spike 的 `/authorize` 原样继承了过来，而 spike 那里
+写着 `// ④ 授权端点：spike 直接同意，不做登录页`。**后果是任何能访问该端点的人
+自带一个 PKCE verifier 就能换到合法令牌**，而该令牌可以驱动 `grande_repo_edit`
+与 `grande_run` 在本机写文件、执行命令。**PKCE 挡不住这条 —— 攻击者自己就是发起
+流程的那一方，verifier 是他自己挑的。**
+
+方案（已实施并实测）：
+
+| | |
+|---|---|
+| Cloudflare Access 应用 | 类型 **Public DNS**，范围 **仅** `grande.agentjoey.ai/authorize*` |
+| 团队域名 | `https://agentjoey.cloudflareaccess.com` |
+| JWKS | `<团队域名>/cdn-cgi/access/certs`（RS256） |
+| AUD tag | `749f9a93b958d99d6415a50a21099e0df16f0d0bb669c93bf473ec5aea022df4` |
+
+**范围必须只覆盖 `/authorize*`。** 已实测确认 `/token`、`/register`、
+`/.well-known/*`、`/mcp/*` 四条仍原样放行 —— 它们是 OpenAI 后端的服务器对服务器
+调用，做不了交互式登录；覆盖整个 hostname 会让握手死在发现阶段。
+
+**但只配 Cloudflare 是软约束。** Access 是仪表盘里的配置，可以被关掉，也可以被
+绕过（有人直接暴露 8787 而不走隧道）。所以 `/authorize` **必须自己校验 Access
+注入的 `Cf-Access-Jwt-Assertion`**：验不过就拒。三个参数一个都不能省 ——
+`issuer` 为团队域名、`audience` 为**本应用的** AUD、`algorithms` 钉死 `["RS256"]`。
+其中 `audience` 尤其关键：团队域名是共享的，不钉 AUD 的话**同一团队下任何一个
+Access 应用签发的 JWT 都能通过**，那是一条跨应用提权路径。
+
+**未配置 Access 时必须拒绝服务，不得放行。** 配置缺失是「门禁没装上」，不是
+「门禁不适用」。
+
+### 7.0 的其余三条（S0-B/C 收尾审查催生）
 
 **① 审计必须是结构性的，不能靠调用方自觉。**
 

@@ -475,30 +475,30 @@ git commit -m "feat(s0-d): 内部异常 → 工具错误码映射层"
 
 ---
 
-> ## ⛔⛔⛔ BLOCKING —— 本任务在 `/authorize` 的认证方案定稿之前不得开始实现 ⛔⛔⛔
+> ## ⚠️ `/authorize` 的认证方案已定稿并配置完成 —— 但 iOS 那条路径仍未实测
 >
-> spike 的 `/authorize` 注释写着「spike 直接同意，不做登录页」，本计划原样继承了那个
-> 刻意的捷径：任何能访问该端点的人自带一个 PKCE verifier 就能换到合法令牌，
-> 而该令牌可以驱动 `grande_repo_edit` 与 `grande_run` 在本机写文件、执行命令。
-> **PKCE 挡不住这条 —— 攻击者自己就是发起流程的那一方。**
+> **背景（这个洞是怎么来的）**：spike 的 `/authorize` 注释写着「spike 直接同意，
+> 不做登录页」，本计划最初原样继承了那个刻意的捷径。后果是**任何能访问该端点的人
+> 自带一个 PKCE verifier 就能换到合法令牌**，而该令牌可以驱动 `grande_repo_edit`
+> 与 `grande_run` 在本机写文件、执行命令。**PKCE 挡不住这条 —— 攻击者自己就是
+> 发起流程的那一方，verifier 是他自己挑的。**
 >
-> 方案定为 Cloudflare Access 挂在 `/authorize*`（其余路径不挂，否则 OpenAI 后端
-> 过不去），并由 `/authorize` 校验 `Cf-Access-Jwt-Assertion`。待实测确认后补写。
+> **方案（规格 §7.0⓪，已配置并实测）**：Cloudflare Access 应用，类型 Public DNS，
+> 范围**仅** `grande.agentjoey.ai/authorize*`。已实测确认 `/token`、`/register`、
+> `/.well-known/*`、`/mcp/*` 四条仍原样放行（它们是 OpenAI 后端的服务器对服务器
+> 调用，做不了交互式登录）。
 >
-> **这套 Access 方案本身尚未定稿**——待验证 ChatGPT 的 authorize 重定向能否穿过
-> Access 的拦截页，尤其是 iOS 内嵌 webview 那条路径。在这条验证完成、结论写回
-> 本计划之前，下面 Task 2 的 Step 1–6 **不得开始执行**。
+> **仍然阻断的部分**：ChatGPT 把用户送到 `/authorize` 时，那个浏览器上下文能否
+> 完成 Access 登录、带住 cookie、再跳回来完成 OAuth？桌面浏览器已通过
+> `cloudflared access login` 间接验证；**iOS 的应用内 webview 未验证** —— 它可能
+> 不共享 Safari 的 cookie，或拦住 Access 到 IdP 的跳转。而 P-6 已证明用户会在
+> iOS 上用这个系统。
 >
-> 下面的测试与实现步骤修的是本任务范围内另一类、正交的问题——CRITICAL-2/3/4 与
-> I-9/I-11 处理的是「令牌一旦被签发，是否精确绑定 repo、防重放、防跨端点提权、
-> 密钥管理是否安全」，**不处理「谁能触发签发」**。即使这些修复全部落地、测试全绿，
-> `/authorize` 本身依然对公网任何人开放——本阻断说明所指的洞不会被下面任何一条
-> 测试变绿而消失，必须等 Cloudflare Access 方案定稿、单独补一个任务（或在
-> `/authorize` 内部加 JWT 校验，具体形态视实测结论而定）后才能解除。
+> **在 iOS 实测完成之前**，Task 2 可以实现，但 **`authorization_endpoint` 的最终
+> 形态不得视为已定** —— 若 iOS 不通，改的正是这个字段，它是本任务的地基。
+> 实测方式：在 ChatGPT 里重新授权一次连接器，桌面与 iOS 各一次。这一步不能自动化
+> 验证 —— U1 的 refresh_token 缺口正是 curl 全绿、静态检查也发现不了的那类问题。
 
----
-
-**Files:** Create `src/oauth.ts`；Test `tests/oauth.test.ts`
 
 **Interfaces:**
 - Produces: `interface OAuthConfig { issuer: string; endpointFor(repoId: string): string; isRegistered(repoId: string): boolean; keyPath: string }`
@@ -524,6 +524,162 @@ I-9/I-11 修的五个洞——这些洞不是从 spike 继承来的退化（spik
 4. **DCR**（CIMD 不可用，因为我们不声明支持）。`/register` 必须按 RFC 7591
    **回传实际支持的 `grant_types`**，而不是照单全收 —— 原型正是因为照单全收，
    让 ChatGPT 以为可以续期。
+
+- [ ] **Step 0: Access 门禁（先于一切 OAuth 逻辑）**
+
+`/authorize` 的第一道检查，**在 PKCE、在 client 查找、在产生任何 code 之前**。
+
+`src/accessGate.ts`：
+
+```typescript
+import { createRemoteJWKSet, jwtVerify } from "jose";
+
+export interface AccessConfig {
+  /** 团队域名，例如 https://agentjoey.cloudflareaccess.com */
+  teamDomain: string;
+  /** 本 Access 应用的 AUD tag（64 位十六进制） */
+  aud: string;
+}
+
+export class AccessDeniedError extends Error {
+  readonly code = "ACCESS_DENIED";
+  constructor(message: string) {
+    super(message);
+    this.name = "AccessDeniedError [ACCESS_DENIED]";
+  }
+}
+
+/**
+ * 校验 Cloudflare Access 注入的身份断言。
+ *
+ * **为什么这道检查必须在代码里，而不能只靠 Cloudflare 的配置**：Access 应用是
+ * 仪表盘里的一条配置，可以被误删、被改错范围，也可以被整个绕过（有人直接把 8787
+ * 暴露出去而不走隧道）。那些情况下 `Cf-Access-Jwt-Assertion` 头就不存在了 ——
+ * 本函数因此拒绝，`/authorize` 随之不可用。门禁于是成了硬约束（铁律三），
+ * 而不是一条部署约定。
+ *
+ * 三个参数一个都不能省：
+ * - `issuer`：团队域名；
+ * - `audience`：**本应用的** AUD。团队域名是共享的 —— 不钉 AUD 的话，同一团队下
+ *   任何一个 Access 应用签发的 JWT 都能通过，那是一条跨应用提权路径；
+ * - `algorithms`：钉死 `["RS256"]`（实测 Cloudflare 的 JWKS 就是 RS256）。
+ *   不钉的话算法混淆是活的。
+ *
+ * `createRemoteJWKSet` 自带缓存，遇到未知 kid 会重新拉取 —— Cloudflare 会轮换
+ * 签名密钥（实测同时存在两把），不能把公钥固化下来。
+ */
+export function createAccessGate(cfg: AccessConfig) {
+  const jwks = createRemoteJWKSet(new URL(`${cfg.teamDomain}/cdn-cgi/access/certs`));
+  return async function assertApproved(headers: Headers): Promise<{ email: string; sub: string }> {
+    const assertion = headers.get("Cf-Access-Jwt-Assertion");
+    if (!assertion) {
+      throw new AccessDeniedError(
+        "缺少 Cf-Access-Jwt-Assertion。/authorize 必须经由 Cloudflare Access 到达；" +
+          "直连或 Access 未配置时一律拒绝。",
+      );
+    }
+    const { payload } = await jwtVerify(assertion, jwks, {
+      issuer: cfg.teamDomain,
+      audience: cfg.aud,
+      algorithms: ["RS256"],
+    });
+    return { email: String(payload.email ?? ""), sub: String(payload.sub ?? "") };
+  };
+}
+```
+
+**配置来源**：`~/.grande-control/config/access.yaml`（铁律一：策略只从控制平面读）。
+**缺失即拒绝启动** —— 配置没有不等于门禁不适用，那是「门禁没装上」。
+
+实测值：`teamDomain: https://agentjoey.cloudflareaccess.com`、
+`aud: 749f9a93b958d99d6415a50a21099e0df16f0d0bb669c93bf473ec5aea022df4`。
+AUD 不是密钥（它是每枚令牌里的 audience claim），可以进仓库；签名密钥是 Cloudflare
+的公开 JWKS，我们不持有任何私钥。
+
+测试 `tests/accessGate.test.ts`：
+
+```typescript
+import { SignJWT, exportJWK, generateKeyPair } from "jose";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createAccessGate } from "../src/accessGate.ts";
+
+const TEAM = "https://team.example.test";
+const AUD = "a".repeat(64);
+let priv: CryptoKey, jwksBody: string, restore: () => void;
+
+beforeEach(async () => {
+  const kp = await generateKeyPair("RS256");
+  priv = kp.privateKey;
+  jwksBody = JSON.stringify({ keys: [{ ...(await exportJWK(kp.publicKey)), alg: "RS256", kid: "k1" }] });
+  // 拦住 JWKS 拉取，避免测试打真实网络（S0 全禁网，且测试必须可离线跑）
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (u: string | URL) =>
+    String(u).includes("/cdn-cgi/access/certs")
+      ? new Response(jwksBody, { headers: { "content-type": "application/json" } })
+      : realFetch(u as never)) as typeof fetch;
+  restore = () => { globalThis.fetch = realFetch; };
+});
+afterEach(() => restore());
+
+const sign = (over: Record<string, unknown> = {}) =>
+  new SignJWT({ email: "u@example.test", ...over })
+    .setProtectedHeader({ alg: "RS256", kid: "k1" })
+    .setIssuer(String(over.iss ?? TEAM))
+    .setAudience(String(over.aud ?? AUD))
+    .setSubject("sub-1")
+    .setExpirationTime("5m")
+    .sign(priv);
+
+describe("createAccessGate()", () => {
+  it("合法断言通过并返回身份", async () => {
+    const gate = createAccessGate({ teamDomain: TEAM, aud: AUD });
+    const id = await gate(new Headers({ "Cf-Access-Jwt-Assertion": await sign() }));
+    expect(id.email).toBe("u@example.test");
+  });
+
+  it("【没有头】就拒绝——这是 Access 被绕过或被删掉时的形态", async () => {
+    // 直连 8787、或 Access 应用被误删，头就不存在。门禁必须在代码里失效关闭，
+    // 而不是因为「Cloudflare 那边配过了」就放行。
+    const gate = createAccessGate({ teamDomain: TEAM, aud: AUD });
+    await expect(gate(new Headers())).rejects.toThrow(
+      expect.objectContaining({ code: "ACCESS_DENIED" }),
+    );
+  });
+
+  it("同团队【别的应用】签发的 JWT 被拒（不钉 audience 就是跨应用提权）", async () => {
+    const gate = createAccessGate({ teamDomain: TEAM, aud: AUD });
+    const other = await sign({ aud: "b".repeat(64) });
+    await expect(gate(new Headers({ "Cf-Access-Jwt-Assertion": other }))).rejects.toThrow();
+  });
+
+  it("别的团队签发的 JWT 被拒", async () => {
+    const gate = createAccessGate({ teamDomain: TEAM, aud: AUD });
+    const other = await sign({ iss: "https://evil.cloudflareaccess.com" });
+    await expect(gate(new Headers({ "Cf-Access-Jwt-Assertion": other }))).rejects.toThrow();
+  });
+
+  it("过期的断言被拒", async () => {
+    const gate = createAccessGate({ teamDomain: TEAM, aud: AUD });
+    const expired = await new SignJWT({ email: "u@example.test" })
+      .setProtectedHeader({ alg: "RS256", kid: "k1" })
+      .setIssuer(TEAM).setAudience(AUD).setSubject("s")
+      .setExpirationTime(Math.floor(Date.now() / 1000) - 60)
+      .sign(priv);
+    await expect(gate(new Headers({ "Cf-Access-Jwt-Assertion": expired }))).rejects.toThrow();
+  });
+
+  it("篡改过的断言被拒", async () => {
+    const gate = createAccessGate({ teamDomain: TEAM, aud: AUD });
+    const t = await sign();
+    const [h, p, s] = t.split(".");
+    const tampered = `${h}.${Buffer.from(JSON.stringify({ email: "evil@x.test", iss: TEAM, aud: AUD, exp: 9e9 })).toString("base64url")}.${s}`;
+    await expect(gate(new Headers({ "Cf-Access-Jwt-Assertion": tampered }))).rejects.toThrow();
+  });
+});
+```
+
+**承重性验证**：把 `audience: cfg.aud` 从 `jwtVerify` 的参数里删掉，确认「同团队别的
+应用」那条变红；还原后确认变绿。**把观察写进报告** —— 这一条是跨应用提权的唯一防线。
 
 - [ ] **Step 1: 写失败测试**
 
