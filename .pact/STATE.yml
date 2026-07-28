@@ -83,7 +83,7 @@ features:
         evidence: Verify gate PASS: "pnpm test && pnpm typecheck" - Test Files 19 passed (19), Tests 362 passed (362) - typecheck: clean (tsc --noEmit no errors)  Root cause: node_modules was missing on fresh checkout (vitest binary not found). Fixed by running pnpm install.
       - id: s0d-2-oauth
         owner: w1
-        status: awaiting_review
+        status: accepted
         reviewer: rev
         spec: .pact/tasks/s0d-2-oauth.md
         evidence: Fixed typecheck error: CryptoKey is a runtime value in Node 24 (Web Crypto API), not a type in lib:["ES2023"]. Changed to `any`.  $ pnpm test && pnpm typecheck > vitest run — 21 test files, 393 tests passed > tsc --noEmit — no errors
