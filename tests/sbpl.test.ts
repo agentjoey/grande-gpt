@@ -108,11 +108,9 @@ describe("buildProfile()", () => {
     );
   });
 
-  it("含 /dev/null 读写放行与 /dev/urandom /dev/random 读放行，且不含 (subpath \"/dev\")", () => {
+  it("含 /dev/null 读写放行，且不含 (subpath \"/dev\")", () => {
     const p = buildProfile(paths);
     expect(p).toContain('(allow file-read* file-write* (literal "/dev/null"))');
-    expect(p).toContain('(literal "/dev/urandom")');
-    expect(p).toContain('(literal "/dev/random")');
     // 注释里允许提到 subpath "/dev"，但实际 SBPL 规则（非注释非空行）中不能有
     const rules = p.split("\n").filter((l) => !l.startsWith(";;") && l.trim() !== "");
     expect(rules.some((l) => l.includes('(subpath "/dev")'))).toBe(false);

@@ -90,10 +90,14 @@ function resolveBinaryDirs(name: string): string[] {
     let found = execFileSync("/usr/bin/which", [name], { encoding: "utf8" }).trim();
     if (!found) return [];
     if (name === "git") {
-      try {
-        const real = execFileSync("/usr/bin/xcrun", ["--find", "git"], { encoding: "utf8" }).trim();
-        if (real) found = real;
-      } catch { /* xcrun 不可用（Linux / 未安装 Xcode），沿用 which 结果 */ }
+      // 只有 which 返回 /usr/bin/git（macOS 的 xcrun shim，不是真二进制）时才退回到 xcrun 查找。
+      // Homebrew / CLT 安装下 which git 本来就指向真二进制，直接沿用——不静默切换安装来源。
+      if (found === "/usr/bin/git") {
+        try {
+          const real = execFileSync("/usr/bin/xcrun", ["--find", "git"], { encoding: "utf8" }).trim();
+          if (real) found = real;
+        } catch { /* xcrun 不可用，沿用 which 结果（shim 在沙箱里会挂，由其它放行规则兜底） */ }
+      }
     }
     return [...new Set([dirname(found), dirname(realpathSync(found))])];
   } catch {
