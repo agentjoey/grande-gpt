@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { dirname } from "node:path";
 import { buildProfile, type SandboxPaths } from "../src/sbpl.ts";
+import { defaultExecRoots } from "../src/sandbox.ts";
 
 const paths: SandboxPaths = {
   worktree: "/W/.grande-work/worktrees/demo/task_1",
@@ -103,5 +106,33 @@ describe("buildProfile()", () => {
     expect(() => buildProfile({ ...paths, execRoots: [] })).toThrow(
       expect.objectContaining({ code: "INVALID_INPUT" }),
     );
+  });
+
+  it("含 /dev/null 读写放行与 /dev/urandom /dev/random 读放行，且不含 (subpath \"/dev\")", () => {
+    const p = buildProfile(paths);
+    expect(p).toContain('(allow file-read* file-write* (literal "/dev/null"))');
+    expect(p).toContain('(literal "/dev/urandom")');
+    expect(p).toContain('(literal "/dev/random")');
+    // 注释里允许提到 subpath "/dev"，但实际 SBPL 规则（非注释非空行）中不能有
+    const rules = p.split("\n").filter((l) => !l.startsWith(";;") && l.trim() !== "");
+    expect(rules.some((l) => l.includes('(subpath "/dev")'))).toBe(false);
+  });
+
+  it("execRoots 里出现真实 git 所在目录", () => {
+    const roots = defaultExecRoots();
+    // 用 xcrun --find 拿到真实 git 二进制路径（处理 /usr/bin/git 是 shim 的情况），
+    // 不可用时退回 which
+    let gitPath = "";
+    try {
+      gitPath = execFileSync("/usr/bin/xcrun", ["--find", "git"], { encoding: "utf8" }).trim();
+    } catch {
+      try {
+        gitPath = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
+      } catch {
+        return; // git 未安装，跳过
+      }
+    }
+    if (!gitPath) return;
+    expect(roots).toContain(dirname(gitPath));
   });
 });

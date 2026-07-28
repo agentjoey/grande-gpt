@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -414,4 +415,78 @@ describe("PATH 与 execRoots 同源（回归：修复前二者是两处独立硬
     expect(line).toBeDefined();
     expect(line!.slice("PATH=".length).split(":").sort()).toEqual([...roots].sort());
   }, 25_000);
+});
+
+describe("git 在沙箱内可用", () => {
+  let root: string;
+  let paths: SandboxPaths;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "git-sbx-"));
+    paths = {
+      worktree: join(root, "worktree"),
+      canonicalGit: join(root, "canonical", ".git"),
+      jobTmp: join(root, "jobtmp"),
+      controlRoot: join(root, "control"),
+      worktreesRoot: join(root, "worktrees"),
+      execRoots: defaultExecRoots(),
+    };
+    for (const d of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
+      mkdirSync(d, { recursive: true });
+    }
+    execFileSync("git", ["init"], { cwd: paths.worktree });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: paths.worktree });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: paths.worktree });
+    writeFileSync(join(paths.worktree, "README.md"), "# Test\n");
+    execFileSync("git", ["add", "."], { cwd: paths.worktree });
+    execFileSync("git", ["commit", "-m", "init"], { cwd: paths.worktree });
+  });
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("沙箱内 git rev-parse HEAD 返回 40 位 sha", async () => {
+    const r = await runSandboxed({
+      argv: ["git", "rev-parse", "HEAD"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("沙箱内 git status --short 在干净 worktree 上返回空", async () => {
+    const r = await runSandboxed({
+      argv: ["git", "status", "--short"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe("");
+  });
+
+  it("反向：沙箱内写 worktree 之外路径仍被拒", async () => {
+    const r = await runSandboxed({
+      argv: ["/bin/sh", "-c", "echo x > /pwned.txt"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).not.toBe(0);
+  });
+
+  it("反向：沙箱内 git ls-remote 仍失败（网络仍被拒）", async () => {
+    const r = await runSandboxed({
+      argv: ["git", "ls-remote", "https://github.com/anomalyco/opencode.git"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 15_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.exitCode).not.toBe(0);
+  });
 });
