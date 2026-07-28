@@ -131,3 +131,10 @@ features:
         reviewer: claude
         spec: .pact/tasks/s05-2-sandbox-git.md
         evidence: null
+      - id: s05-3-worktree-gc
+        owner: w1
+        status: assigned
+        reviewer: claude
+        spec: .pact/tasks/s05-3-worktree-gc.md
+        evidence: null
+        deps: [s05-1-taskclose]
