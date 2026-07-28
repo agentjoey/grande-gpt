@@ -110,7 +110,7 @@ features:
         deps: [s0d-4-write-audit]
       - id: s0d-6-e2e
         owner: w1
-        status: assigned
+        status: in_progress
         reviewer: rev
         spec: .pact/tasks/s0d-6-e2e.md
         evidence: null
