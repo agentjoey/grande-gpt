@@ -29,6 +29,23 @@ describe("buildProfile()", () => {
     expect(buildProfile(paths)).toContain(`(deny file-read* (subpath "${paths.controlRoot}"))`);
   });
 
+  it("worktreesRoot 目录条目自身放行 file-read-metadata——否则向上遍历目录树找 workspace root 的工具（pnpm/npm/yarn/vitest/tsc）在 lstat(worktreesRoot) 这一级直接 EPERM，实测 100% 复现", () => {
+    const p = buildProfile(paths);
+    expect(p).toContain(`(allow file-read-metadata (literal "${paths.worktreesRoot}"))`);
+  });
+
+  it("worktree 与 worktreesRoot 之间的中间祖先目录（真实布局的 <repoId> 那一级）同样放行 file-read-metadata——否则向上遍历会先死在这一级而不是 worktreesRoot", () => {
+    // fixture 的 worktree 是 worktreesRoot + "/demo/task_1"，中间夹着 "demo"
+    // 这一级（对应真实布局 join(worktreesRoot, repoId, taskId) 里的 repoId）。
+    const p = buildProfile(paths);
+    expect(p).toContain(`(allow file-read-metadata (literal "${paths.worktreesRoot}/demo"))`);
+  });
+
+  it("worktree 自己不出现在 file-read-metadata 的 literal 放行里——它已经由 file-read* 整体放行，不需要重复", () => {
+    const p = buildProfile(paths);
+    expect(p).not.toContain(`(allow file-read-metadata (literal "${paths.worktree}"))`);
+  });
+
   it("先 deny worktrees 父目录、再 allow 本任务 worktree（依赖最具体规则优先）", () => {
     const p = buildProfile(paths);
     const denyIdx = p.indexOf(`(deny file-read* (subpath "${paths.worktreesRoot}"))`);

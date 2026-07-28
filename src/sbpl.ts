@@ -28,7 +28,8 @@ export interface SandboxPaths {
   jobTmp: string;
   /** 控制平面根（状态/配置/审计）——被审计者不能读 */
   controlRoot: string;
-  /** 全部 worktree 的父目录——先整体拒读，再单独放行本任务的 */
+  /** 全部 worktree 的父目录——内容整体拒读，目录条目自身放行 stat/lstat
+   *  （否则向上遍历目录树的工具在这一级直接 EPERM），再单独放行本任务的 */
   worktreesRoot: string;
   /** 允许 process-exec 的根目录列表。显式作为输入而非硬编码常量：node/pnpm 的
    *  实际安装位置因安装方式而异（官方安装器、nvm、volta、asdf、Intel/Apple
@@ -44,6 +45,37 @@ function q(path: string): string {
     throw new SbplError("INVALID_INPUT", `SBPL 的 subpath 必须是绝对路径，收到：${path}`);
   }
   return path.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * 真实布局是 `worktreesRoot/<repoId>/<taskId>`（见 `worktree.ts` 的
+ * `join(layout.worktreesRoot, repoId, taskId)`）——worktree 与 worktreesRoot
+ * 之间还夹着一层 `<repoId>` 目录。实测发现只放行 worktreesRoot 这一个 literal
+ * 不够：向上遍历目录树的工具（pnpm 的 workspace-root 查找）会先经过 `<repoId>`
+ * 这一级，它同样落在 `deny file-read* (subpath worktreesRoot)` 的覆盖范围内，
+ * 同样的 EPERM 会在这一级重演，只是路径多一段。这里把 worktree 到
+ * worktreesRoot 之间的**每一级**祖先目录都枚举出来（worktree 自己不算——它已经
+ * 由后面 `(allow file-read* (subpath worktree))` 整体放行），逐个放行
+ * file-read-metadata。不用 `subpath worktreesRoot` 整体放行 metadata：那样会
+ * 连兄弟 `<repoId>`/`<taskId>` 目录的 stat 也放开，超出「向上遍历自己的祖先链」
+ * 这个最小需求；这里只放行 worktree 实际所在的那一条祖先链。
+ *
+ * worktree 没有真的嵌在 worktreesRoot 之下时（不少单测 fixture 图省事没嵌套）
+ * 退化为只放行 worktreesRoot 自己，不额外猜测。
+ */
+function worktreeAncestors(worktreesRoot: string, worktree: string): string[] {
+  if (worktree !== worktreesRoot && worktree.startsWith(`${worktreesRoot}/`)) {
+    const relSegments = worktree.slice(worktreesRoot.length + 1).split("/");
+    relSegments.pop(); // 去掉最后一段（worktree 自己，已由整体 file-read* 覆盖）
+    const ancestors = [worktreesRoot];
+    let cur = worktreesRoot;
+    for (const seg of relSegments) {
+      cur = `${cur}/${seg}`;
+      ancestors.push(cur);
+    }
+    return ancestors;
+  }
+  return [worktreesRoot];
 }
 
 /**
@@ -64,6 +96,9 @@ export function buildProfile(p: SandboxPaths): string {
       "execRoots 不能为空：空数组会让 (allow process-exec) 退化成不带过滤条件的规则，等于放行一切可执行文件",
     );
   }
+  const ancestorMetadataAllows = worktreeAncestors(p.worktreesRoot, p.worktree).map(
+    (dir) => `(allow file-read-metadata (literal "${q(dir)}"))`,
+  );
   return [
     "(version 1)",
     "(deny default)",
@@ -73,6 +108,24 @@ export function buildProfile(p: SandboxPaths): string {
     "(allow file-read*)",
     `(deny file-read* (subpath "${q(p.controlRoot)}"))`,
     `(deny file-read* (subpath "${q(p.worktreesRoot)}"))`,
+    ";; pnpm/npm/yarn/vitest/tsc 启动时都会向上遍历目录树找 workspace root/配置/",
+    ";; lockfile——这一步只会 lstat/stat 经过的每一级目录，不会读它们的内容。",
+    ";; `subpath` 连目录条目自身都拒，于是从 worktree 出发向上走、经过",
+    ";; worktreesRoot（以及真实布局里夹在中间的 <repoId> 那一级，见",
+    ";; worktreeAncestors() 的注释）时 lstat 直接 EPERM，工具还没跑测试就先死在",
+    ";; 启动阶段（实测：worktree 内 `pnpm test` 100% 复现）。",
+    ";; 我们真正要的隔离性质是「一个任务读不到兄弟 worktree 的内容」，不需要",
+    ";; 连这条祖先链上的目录条目本身『存在、是目录、属主是谁』都不让问。",
+    ";; Seatbelt 把 file-read* 拆成 file-read-metadata（stat/lstat 一类，只问",
+    ";; 属性）和 file-read-data（真正读内容，对目录来说即 readdir 列出条目）",
+    ";; 两个更细的操作，`literal` 又比 `subpath` 更具体——因此可以只把",
+    ";; file-read-metadata 单独放行给 worktree 到 worktreesRoot 之间的每一级",
+    ";; literal 路径（不是整个 worktreesRoot 的 subpath——那样会连兄弟",
+    ";; <repoId>/<taskId> 目录的 stat 也放开，超出「向上遍历自己祖先链」这个",
+    ";; 最小需求）：向上走的 lstat 能通过，但 file-read-data（含 readdir 列出",
+    ";; 兄弟任务目录名、以及下面这条 deny 覆盖的兄弟内容）依旧被拒——AC-3 的",
+    ";; 兄弟隔离不受影响。",
+    ...ancestorMetadataAllows,
     `(allow file-read* (subpath "${q(p.worktree)}"))`,
     "",
     ";; 写：只有本任务 worktree 与本 job 临时目录",

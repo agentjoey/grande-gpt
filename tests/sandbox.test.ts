@@ -87,6 +87,40 @@ describe("runSandboxed()", () => {
     expect(readFileSync(worktreeGit, "utf8")).not.toContain("pwned");
   });
 
+  it("worktreesRoot 目录条目本身可被 lstat/stat——祖先目录遍历不再在这一级 EPERM", async () => {
+    // 复现真实故障：`pnpm test`（以及 npm/yarn/vitest/tsc 几乎所有 JS 工具链）启动时
+    // 会从 cwd 向上遍历目录树找 workspace root/配置/lockfile，这一步只 lstat 经过的
+    // 每一级目录、不读其内容。旧规则用 `subpath` 整体拒读 worktreesRoot，连目录条目
+    // 自身『是否存在』都问不到，遍历在这一级直接 EPERM——这里让 worktree 真正嵌在
+    // worktreesRoot 之下（贴近 `.grande-work/worktrees/<repo>/<task>/` 的真实形状），
+    // 断言从 worktree 出发能 lstat 到 worktreesRoot 本身。
+    const ownWorktree = join(paths.worktreesRoot, "task-own");
+    mkdirSync(ownWorktree, { recursive: true });
+    const scopedPaths: SandboxPaths = { ...paths, worktree: ownWorktree };
+
+    const rLs = await runSandboxed({
+      argv: ["/bin/ls", "-d", paths.worktreesRoot],
+      cwd: ownWorktree,
+      paths: scopedPaths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(rLs.exitCode).toBe(0);
+    expect(rLs.stdout.trim()).toBe(paths.worktreesRoot);
+
+    // 与故障报告原文同形的复现：node 直接 lstatSync worktreesRoot。
+    const rNode = await runSandboxed({
+      argv: [process.execPath, "-e", `require("fs").lstatSync(${JSON.stringify(paths.worktreesRoot)})`],
+      cwd: ownWorktree,
+      paths: scopedPaths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(rNode.stdout + rNode.stderr).not.toContain("EPERM");
+    expect(rNode.stdout + rNode.stderr).not.toContain("operation not permitted");
+    expect(rNode.exitCode).toBe(0);
+  });
+
   it("同级 worktree 相互隔离：新建的兄弟 worktree 自动被挡住，无需逐个枚举", async () => {
     // 让「本任务」的 worktree 真正嵌在 worktreesRoot 之下（贴近真实目录形状
     // .grande-work/worktrees/<repo>/<task>/），再在它旁边造一个「隔壁任务」的
@@ -285,6 +319,63 @@ describe("pnpm 可执行（BUG 2：pnpm 是符号链接时 execvp 按字面文�
     expect(r.stdout + r.stderr).not.toContain("No such file or directory");
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("pnpm-test-ok");
+  }, 35_000);
+});
+
+describe("pnpm 向上遍历目录树时不再撞上 EPERM lstat(worktreesRoot)（真实故障复现）", () => {
+  /**
+   * 上面「BUG 2」那组测试的 worktree 是 `join(root, "worktree")`——跟 worktreesRoot
+   * 是兄弟目录，从未嵌在它下面，所以从 worktree 向上走一步就到 root，根本不会经过
+   * worktreesRoot，测不出这个故障。真实布局是 `.grande-work/worktrees/<repo>/<task>/`，
+   * worktree 嵌在 worktreesRoot 之下；这里照实还原这个嵌套关系，跑一次跟生产 `unit`
+   * profile 同形的 `pnpm test`，验证它不再在向上找 workspace root 时死在
+   * `lstat(worktreesRoot)` 这一级（原始故障：`EPERM: operation not permitted, lstat
+   * '/…/.grande-work/worktrees'`，退出码 1）。
+   */
+  let root: string;
+  let worktree: string;
+  let paths: SandboxPaths;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "walkup-"));
+    const worktreesRoot = join(root, "worktrees");
+    worktree = join(worktreesRoot, "demo-repo", "task-1");
+    paths = {
+      worktree,
+      canonicalGit: join(root, "canonical", ".git"),
+      jobTmp: join(root, "jobtmp"),
+      controlRoot: join(root, "control"),
+      worktreesRoot,
+      execRoots: defaultExecRoots(),
+    };
+    for (const d of [worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, worktreesRoot]) {
+      mkdirSync(d, { recursive: true });
+    }
+    writeFileSync(
+      join(worktree, "package.json"),
+      JSON.stringify({
+        name: "fixture",
+        version: "1.0.0",
+        scripts: { test: "node -e \"console.log('walkup-pnpm-test-ok')\"" },
+      }),
+      "utf8",
+    );
+  });
+
+  afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+  it("pnpm test 在嵌套于 worktreesRoot 下的 worktree 里正常跑通，不因祖先目录 EPERM 而在启动阶段就死掉", async () => {
+    const r = await runSandboxed({
+      argv: ["pnpm", "test"],
+      cwd: worktree,
+      paths,
+      timeoutMs: 30_000,
+      maxOutputBytes: 65_536,
+    });
+    expect(r.stdout + r.stderr).not.toContain("EPERM");
+    expect(r.stdout + r.stderr).not.toContain("operation not permitted");
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain("walkup-pnpm-test-ok");
   }, 35_000);
 });
 
