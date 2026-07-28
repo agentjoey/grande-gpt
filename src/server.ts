@@ -86,6 +86,10 @@ export function createApp(cfg: AppConfig): Hono {
     isRegistered: (repoId) => registeredIds(layout).has(repoId),
     registeredRepoIds: () => [...registeredIds(layout)].sort(),
     keyPath: join(layout.controlRoot, "secrets", "oauth-key"),
+    // client 与 refresh_token 落在这同一个状态库（oauth_client / oauth_refresh，
+    // 见 db.ts）——db 已经在 main.ts 里用 openDb(layout) 打开过，两张表已就位，
+    // 这里直接透传，不重新开一个连接。
+    db,
   };
   const oauth = createOAuth(oauthCfg);
 

@@ -81,15 +81,29 @@ describe("openDb()", () => {
     const l = loadLayout();
     ensureLayout(l);
     const db = openDb(l);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(1);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(2);
+    db.close();
+  });
+
+  it("建出 oauth_client / oauth_refresh 两张表（U1 实测缺口：重启丢 client/refresh_token 的回归修复）", () => {
+    const l = loadLayout();
+    ensureLayout(l);
+    const db = openDb(l);
+    const names = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all()
+      .map((r) => (r as { name: string }).name);
+    expect(names).toContain("oauth_client");
+    expect(names).toContain("oauth_refresh");
     db.close();
   });
 
   it("schema 版本不匹配时 openDb 响亮拒绝，错误信息同时点出期望版本与磁盘上的实际版本", () => {
-    // 先用 openDb() 正常建一次库（user_version 落到当前 SCHEMA_VERSION=1），
+    // 先用 openDb() 正常建一次库（user_version 落到当前 SCHEMA_VERSION=2），
     // 再绕开 openDb、用一个裸连接把 user_version 强行改写成一个不匹配的值——
     // 模拟「这个库文件是被别的版本的代码建出来的」，不需要真的去改一次 schema
-    // 定义就能复现这条防线。
+    // 定义就能复现这条防线。这同时也是「老库（无 oauth 表）被新代码打开」这条
+    // 真实场景的代理：老库的 user_version 是 1，同样落在这条分支里响亮拒绝。
     const l = loadLayout();
     ensureLayout(l);
     openDb(l).close();
@@ -98,7 +112,7 @@ describe("openDb()", () => {
     raw.exec("PRAGMA user_version = 99");
     raw.close();
 
-    expect(() => openDb(l)).toThrow(/user_version=1/);
+    expect(() => openDb(l)).toThrow(/user_version=2/);
     expect(() => openDb(l)).toThrow(/user_version=99/);
   });
 

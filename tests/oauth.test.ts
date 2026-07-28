@@ -2,17 +2,41 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { openDb } from "../src/db.ts";
+import type { Layout } from "../src/layout.ts";
 import { createOAuth } from "../src/oauth.ts";
 
 const ISSUER = "https://grande.example.test";
 
-const oauth = (registered: ReadonlySet<string> = new Set(["demo"])) =>
+/**
+ * openDb() 只用得到 `layout.stateDb`（建目录 + 打开文件），其余字段在这里
+ * 用不上——不走 loadLayout()/真实的 GRANDE_WORKSPACE 环境变量，是为了让每个
+ * 测试能各自拿到一个独立、互不干扰的库文件，也让"关掉再用同一个路径重新
+ * openDb()"（模拟重启）这个动作不必绕道 process.env。
+ */
+function tempLayout(): Layout {
+  const stateDb = join(mkdtempSync(join(tmpdir(), "oauth-db-")), "grande.db");
+  return {
+    workspaceRoot: "/unused",
+    controlRoot: "/unused",
+    stateDb,
+    configDir: "/unused",
+    reposConfig: "/unused",
+    artifactsDir: "/unused",
+    derivedRoot: "/unused",
+    worktreesRoot: "/unused",
+  };
+}
+
+const oauth = (registered: ReadonlySet<string> = new Set(["demo"]), db?: DatabaseSync) =>
   createOAuth({
     issuer: ISSUER,
     endpointFor: (r) => `${ISSUER}/mcp/${r}`,
     isRegistered: (r) => registered.has(r),
     keyPath: join(mkdtempSync(join(tmpdir(), "oauth-key-")), "oauth-key"),
+    db: db ?? openDb(tempLayout()),
   });
 
 const s256 = (v: string) => createHash("sha256").update(v).digest("base64url");
@@ -287,5 +311,136 @@ describe("verifyBearer —— D5 每-repo 隔离", () => {
     const o2 = oauth();
     const { tok } = await fullFlow(o1, "demo");
     await expect(o2.verifyBearer(tok.access_token, `${ISSUER}/mcp/demo`)).rejects.toThrow();
+  });
+});
+
+describe("持久化：重启不丢 client / refresh_token（U1 实测缺口，本切片核心）", () => {
+  // 同一份 layout + keyPath 在两次 createOAuth() 之间复用，模拟"同一个网关
+  // 进程重启"：DB 文件与签名密钥文件都还在磁盘上，只是内存状态（Map）被清空。
+  function restartable() {
+    const layout = tempLayout();
+    const keyPath = join(mkdtempSync(join(tmpdir(), "oauth-key-")), "oauth-key");
+    return { layout, keyPath };
+  }
+
+  function openOauth(
+    layout: Layout,
+    keyPath: string,
+    registered: ReadonlySet<string> = new Set(["demo"]),
+  ) {
+    const db = openDb(layout);
+    const o = createOAuth({
+      issuer: ISSUER,
+      endpointFor: (r) => `${ISSUER}/mcp/${r}`,
+      isRegistered: (r) => registered.has(r),
+      keyPath,
+      db,
+    });
+    return { o, db };
+  }
+
+  it("client 在网关重启后仍能完成 authorize——这正是实测复现的那条日志（invalid_client）", async () => {
+    const { layout, keyPath } = restartable();
+    const { o: o1, db: db1 } = openOauth(layout, keyPath);
+    const reg = await o1.register({
+      client_name: "ChatGPT",
+      redirect_uris: ["https://chatgpt.com/connector/oauth/opaque"],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    });
+    db1.close(); // 模拟网关进程退出：内存 Map 消失，DB 文件还在
+
+    const { o: o2 } = openOauth(layout, keyPath);
+    const verifier = randomBytes(48).toString("base64url");
+    // 用【原始】client_id——ChatGPT 存的就是这个，不会重新走一遍 DCR
+    const code = await o2.authorize({
+      client_id: reg.client_id,
+      redirect_uri: reg.redirect_uris[0]!,
+      code_challenge: s256(verifier),
+      code_challenge_method: "S256",
+      resource: `${ISSUER}/mcp/demo`,
+      scope: "grande:repo:demo",
+    });
+    expect(typeof code).toBe("string");
+  });
+
+  it("refresh_token 在重启后仍可兑换新 access_token，包括重启前已经轮换过的那一枚", async () => {
+    const { layout, keyPath } = restartable();
+    const { o: o1, db: db1 } = openOauth(layout, keyPath);
+    const { tok } = await fullFlow(o1, "demo");
+    const rotatedBeforeRestart = await o1.token({
+      grant_type: "refresh_token",
+      refresh_token: tok.refresh_token,
+      resource: `${ISSUER}/mcp/demo`,
+    });
+    db1.close();
+
+    const { o: o2 } = openOauth(layout, keyPath);
+    const next = await o2.token({
+      grant_type: "refresh_token",
+      refresh_token: rotatedBeforeRestart.refresh_token,
+      resource: `${ISSUER}/mcp/demo`,
+    });
+    expect(typeof next.access_token).toBe("string");
+    expect(next.access_token).not.toBe(rotatedBeforeRestart.access_token);
+  });
+
+  it("reuse-detection 在重启后依然生效：回放重启前的旧 refresh_token 被拒，且它的后代一并被吊销", async () => {
+    const { layout, keyPath } = restartable();
+    const { o: o1, db: db1 } = openOauth(layout, keyPath);
+    const { tok } = await fullFlow(o1, "demo");
+    const rotated = await o1.token({
+      grant_type: "refresh_token",
+      refresh_token: tok.refresh_token,
+      resource: `${ISSUER}/mcp/demo`,
+    });
+    db1.close();
+
+    const { o: o2 } = openOauth(layout, keyPath);
+    // 回放重启前已经被轮换掉的旧 token
+    await expect(o2.token({
+      grant_type: "refresh_token",
+      refresh_token: tok.refresh_token,
+      resource: `${ISSUER}/mcp/demo`,
+    })).rejects.toThrow();
+    // 它的后代（rotated.refresh_token）必须一并被吊销——链状态没有因重启而丢失
+    await expect(o2.token({
+      grant_type: "refresh_token",
+      refresh_token: rotated.refresh_token,
+      resource: `${ISSUER}/mcp/demo`,
+    })).rejects.toThrow();
+  });
+
+  it("授权码不会在重启后存活——这是刻意的选择（见 oauth.ts codes 上的注释），不是遗漏", async () => {
+    const { layout, keyPath } = restartable();
+    const { o: o1, db: db1 } = openOauth(layout, keyPath);
+    const reg = await o1.register({
+      client_name: "ChatGPT",
+      redirect_uris: ["https://chatgpt.com/connector/oauth/opaque"],
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    });
+    const verifier = randomBytes(48).toString("base64url");
+    const code = await o1.authorize({
+      client_id: reg.client_id,
+      redirect_uri: reg.redirect_uris[0]!,
+      code_challenge: s256(verifier),
+      code_challenge_method: "S256",
+      resource: `${ISSUER}/mcp/demo`,
+      scope: "grande:repo:demo",
+    });
+    db1.close();
+
+    const { o: o2 } = openOauth(layout, keyPath);
+    await expect(o2.token({
+      grant_type: "authorization_code",
+      code,
+      code_verifier: verifier,
+      client_id: reg.client_id,
+      redirect_uri: reg.redirect_uris[0]!,
+      resource: `${ISSUER}/mcp/demo`,
+    })).rejects.toThrow();
   });
 });

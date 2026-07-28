@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
+import type { DatabaseSync } from "node:sqlite";
 import { SignJWT, jwtVerify } from "jose";
 
 export interface OAuthConfig {
@@ -10,6 +11,14 @@ export interface OAuthConfig {
    *  客户端据此判断能请求哪些 scope，空数组会让它认为无 scope 可用。 */
   registeredRepoIds?: () => string[];
   keyPath: string;
+  /**
+   * client 与 refresh_token 落在这个库里（`oauth_client` / `oauth_refresh`
+   * 表，schema 见 db.ts）——两者都要跨网关重启存活。调用方必须传入一个已经
+   * 跑过 `openDb()` 的连接（那两张表由 openDb 建，本模块不重复建表），
+   * `src/server.ts` 从 `AppConfig.db` 直接透传。授权码（code）不经过这个库，
+   * 见下方 `codes` 上的注释。
+   */
+  db: DatabaseSync;
 }
 
 export class OAuthError extends Error {
@@ -38,6 +47,19 @@ interface RefreshTokenRecord {
   repoId: string;
   parent?: string;
   valid: boolean;
+}
+
+/** `oauth_client` 一行的落库形态（`redirectUris` 是 JSON 字符串）。 */
+interface ClientRow {
+  redirectUris: string;
+}
+
+/** `oauth_refresh` 一行的落库形态（SQLite 没有 boolean，`valid` 是 0/1）。 */
+interface RefreshRow {
+  resource: string;
+  repoId: string;
+  parent: string | null;
+  valid: number;
 }
 
 const SUPPORTED_GRANT_TYPES = ["authorization_code", "refresh_token"] as const;
@@ -75,27 +97,75 @@ function resourceToRepoId(cfg: OAuthConfig, resource: string): string | null {
   return resource === cfg.endpointFor(repoId) ? repoId : null;
 }
 
-function invalidateChain(
-  start: string,
-  refreshTokens: Map<string, RefreshTokenRecord>,
-) {
-  for (const [handle, rec] of refreshTokens) {
-    if (rec.parent === start && rec.valid) {
-      rec.valid = false;
-      invalidateChain(handle, refreshTokens);
-    }
-  }
-}
-
 function scopeFor(repoId: string): string {
   return `grande:repo:${repoId}`;
 }
 
 export function createOAuth(cfg: OAuthConfig) {
   const KEY = getOrCreateKey(cfg.keyPath);
+  const db = cfg.db;
+
+  // codes 故意留在内存、不落库。授权码活不过 10 分钟且只用一次，持久化它
+  // 除了给"重启后一个本还没过期的 code 也会消失"这个无害的边界情况之外没有
+  // 任何好处——而代价很大：计划审查抓到过，`token()` 里对 code 的
+  // 「查一下还在不在、马上删掉」（claim）必须是**同步的一行**，中间不能有
+  // 任何 `await`，否则三个并发请求会各自读到"还在"，都兑出令牌（同一个
+  // code 被兑换三次）。只要 codes 还是内存 Map，`codes.get` / `codes.delete`
+  // 天然是同步、原子的；一旦换成 DB 查询，SELECT 和 DELETE 之间就有了
+  // 可以插进 await 的缝——即使当前实现凑巧还是同步调用 DatabaseSync，也会
+  // 诱使未来的人在两者之间插入 await（比如加一层异步校验）。不做这个改动，
+  // 就是把这条并发防线钉死在类型层面：Map 的方法根本没有 Promise 可 await。
   const codes = new Map<string, CodeRecord>();
-  const clients = new Map<string, ClientRecord>();
-  const refreshTokens = new Map<string, RefreshTokenRecord>();
+
+  const insertClientStmt = db.prepare(
+    "INSERT INTO oauth_client (clientId, redirectUris, createdAt) VALUES (?, ?, ?)",
+  );
+  const getClientStmt = db.prepare(
+    "SELECT redirectUris FROM oauth_client WHERE clientId = ?",
+  );
+
+  const insertRefreshStmt = db.prepare(
+    "INSERT INTO oauth_refresh (handle, resource, repoId, parent, valid, createdAt) VALUES (?, ?, ?, ?, ?, ?)",
+  );
+  const getRefreshStmt = db.prepare(
+    "SELECT resource, repoId, parent, valid FROM oauth_refresh WHERE handle = ?",
+  );
+  const invalidateRefreshStmt = db.prepare(
+    "UPDATE oauth_refresh SET valid = 0 WHERE handle = ?",
+  );
+  const validChildrenStmt = db.prepare(
+    "SELECT handle FROM oauth_refresh WHERE parent = ? AND valid = 1",
+  );
+
+  function getClient(clientId: string): ClientRecord | undefined {
+    const row = getClientStmt.get(clientId) as ClientRow | undefined;
+    if (row === undefined) return undefined;
+    return { redirectUris: JSON.parse(row.redirectUris) as string[] };
+  }
+
+  function getRefreshToken(handle: string): RefreshTokenRecord | undefined {
+    const row = getRefreshStmt.get(handle) as RefreshRow | undefined;
+    if (row === undefined) return undefined;
+    return {
+      resource: row.resource,
+      repoId: row.repoId,
+      parent: row.parent ?? undefined,
+      valid: row.valid === 1,
+    };
+  }
+
+  /**
+   * 与旧版（走内存 Map）行为等价：把从 `start` 往下、当前仍 `valid` 的整条
+   * 链吊销。查询本身已经用 `valid = 1` 过滤，所以不会重复吊销、也不会在
+   * 已经吊销过的分支上死循环。
+   */
+  function invalidateChain(start: string) {
+    const children = validChildrenStmt.all(start) as { handle: string }[];
+    for (const { handle } of children) {
+      invalidateRefreshStmt.run(handle);
+      invalidateChain(handle);
+    }
+  }
 
   async function register(params: {
     client_name?: string;
@@ -122,7 +192,7 @@ export function createOAuth(cfg: OAuthConfig) {
       }
     }
     const clientId = `client_${randomUUID()}`;
-    clients.set(clientId, { redirectUris: params.redirect_uris });
+    insertClientStmt.run(clientId, JSON.stringify(params.redirect_uris), Date.now());
     const requested = params.grant_types ?? [];
     const granted = SUPPORTED_GRANT_TYPES.filter((g) => requested.includes(g));
     return {
@@ -164,7 +234,7 @@ export function createOAuth(cfg: OAuthConfig) {
       );
     }
 
-    const client = clients.get(params.client_id);
+    const client = getClient(params.client_id);
     if (client === undefined)
       throw new OAuthError("invalid_client", "client_id 未注册");
     if (!client.redirectUris.includes(params.redirect_uri)) {
@@ -245,7 +315,7 @@ export function createOAuth(cfg: OAuthConfig) {
         .sign(KEY);
 
       const rt = randomUUID();
-      refreshTokens.set(rt, { resource, repoId: rec.repoId, valid: true });
+      insertRefreshStmt.run(rt, resource, rec.repoId, null, 1, Date.now());
 
       return {
         access_token: accessToken,
@@ -260,11 +330,11 @@ export function createOAuth(cfg: OAuthConfig) {
       const rt = form.refresh_token;
       if (!rt) throw new OAuthError("invalid_request", "缺少 refresh_token");
 
-      const rec = refreshTokens.get(rt);
+      const rec = getRefreshToken(rt);
       if (!rec) throw new OAuthError("invalid_grant", "未知的 refresh_token");
 
       if (!rec.valid) {
-        invalidateChain(rt, refreshTokens);
+        invalidateChain(rt);
         throw new OAuthError(
           "invalid_grant",
           "refresh_token 已被吊销（检测到复用）",
@@ -279,7 +349,7 @@ export function createOAuth(cfg: OAuthConfig) {
         );
       }
 
-      rec.valid = false;
+      invalidateRefreshStmt.run(rt);
 
       const accessToken = await new SignJWT({
         scope: scopeFor(rec.repoId),
@@ -294,12 +364,7 @@ export function createOAuth(cfg: OAuthConfig) {
         .sign(KEY);
 
       const newRt = randomUUID();
-      refreshTokens.set(newRt, {
-        resource: rec.resource,
-        repoId: rec.repoId,
-        parent: rt,
-        valid: true,
-      });
+      insertRefreshStmt.run(newRt, rec.resource, rec.repoId, rt, 1, Date.now());
 
       return {
         access_token: accessToken,

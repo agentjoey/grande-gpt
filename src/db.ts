@@ -11,8 +11,13 @@ import type { Layout } from "./layout.ts";
  * 拒绝」，不需要「自动把旧库改造成新库」；本 slice 已经改过一次 schema
  * （audit 表补 `reason` 列），后续 slice 还会再改，此刻先把检测钉住，迁移留给
  * 真正需要它的那一天。
+ *
+ * `1 → 2`：新增 `oauth_client` / `oauth_refresh` 两张表（U1 实测缺口的回归修
+ * 复——client 与 refresh_token 原先只活在 oauth.ts 的内存 Map 里，网关一重启
+ * 就全丢，ChatGPT 存的 `client_id` 立刻变成「未注册」）。旧库（`user_version=1`）
+ * 没有这两张表，靠下面同一套版本检测响亮拒绝，不新开一条检测路径。
  */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 /**
  * 打开状态库并保证 schema 就位。
@@ -115,6 +120,24 @@ export function openDb(layout: Layout): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_job_taskId  ON job(taskId);
     CREATE INDEX IF NOT EXISTS idx_audit_task  ON audit(taskId);
     CREATE INDEX IF NOT EXISTS idx_audit_state ON audit(state);
+
+    -- OAuth client 与 refresh_token 都要长期存活（client_id 是 ChatGPT 无限期
+    -- 复用的标识；refresh_token 存在的意义就是"跨重启不用重新授权"），所以落库。
+    -- 授权码（code）刻意不落库——见 oauth.ts 里 codes 那个 Map 上的注释。
+    CREATE TABLE IF NOT EXISTS oauth_client (
+      clientId     TEXT PRIMARY KEY,
+      redirectUris TEXT NOT NULL,   -- JSON array
+      createdAt    INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS oauth_refresh (
+      handle    TEXT PRIMARY KEY,
+      resource  TEXT NOT NULL,
+      repoId    TEXT NOT NULL,
+      parent    TEXT,
+      valid     INTEGER NOT NULL,
+      createdAt INTEGER NOT NULL
+    );
   `);
 
   // 只在「真正新建」这一次盖版本号；已有 schema 的库在上面已经验过版本相等，
