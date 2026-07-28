@@ -246,8 +246,9 @@ describe("applyGc()", () => {
     db2.close();
   });
 
-  it("没有 branch 信息的孤儿 worktree，applyGc 时跳过", () => {
-    // 建一个 orphan worktree，但刻意不提供分支信息
+  it("branch 为 null 的孤儿 worktree 仍然通过 git worktree remove --force 回收，且 git worktree 注册项也被清掉", () => {
+    // 建一个 orphan worktree，然后模拟 branch 信息丢失的场景（git gc / prune）。
+    // 即使拿不到分支名，也必须通过 git worktree remove 清理注册项，不能只 rm -rf。
     const info = openWorktree(layout, "demo", "fix", "task_nobranch");
 
     const db = openDb(layout);
@@ -257,12 +258,22 @@ describe("applyGc()", () => {
     const db2 = openDb(layout);
     let plan = planGc(db2, layout);
     expect(plan.orphanWorktrees).toHaveLength(1);
-    // 篡改 plan 中的 branch 为 null
+    // 篡改 branch 为 null 模拟分支信息丢失（git prune 清了注册项 / detached HEAD）
     plan = { ...plan, orphanWorktrees: plan.orphanWorktrees.map((o) => ({ ...o, branch: null })) };
 
+    const beforeExists = existsSync(info.worktreePath);
+    expect(beforeExists).toBe(true);
+
     const result = applyGc(db2, layout, plan);
-    // branch 为 null 时跳过 removeWorktree，但仍计入 removed
+    // branch 为 null 时仍走 git worktree remove --force，目录被真实回收
     expect(result.removed).toBe(1);
+
+    // 目录消失
+    expect(existsSync(info.worktreePath)).toBe(false);
+
+    // git worktree 注册项也被清掉（不能是 rm -rf 的假清除）
+    const paths = gitWorktreePaths(repo);
+    expect(paths.has(info.worktreePath)).toBe(false);
     db2.close();
   });
 });

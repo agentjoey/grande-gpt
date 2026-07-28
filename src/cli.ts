@@ -10,15 +10,15 @@ import { getTask, listActiveTasks } from "./tasks.ts";
 import { discoverRepos, loadRegistry } from "./registry.ts";
 import { applyGc, planGc } from "./worktreeGc.ts";
 
-const USAGE = `grande —— GrandeGPT 控制平面的只读查看器
+const USAGE = `grande —— GrandeGPT 控制平面运维工具
 
   grande status                 活跃任务：分支、worktree、状态、最近 job
   grande jobs [--task <id>]     job 列表：profile、状态、耗时、退出码
   grande audit [--task <id>]    审计流水：opId、工具、决策、触及路径
   grande doctor                 环境自检
-  grande gc                     worktree 与 task 对账（默认 dry-run）
+  grande gc [--apply]           worktree 与 task 对账（默认 dry-run）
 
-本工具只读，不提供任何变更能力（规格 §8.2）。`;
+除 gc --apply 外均为只读。`;
 
 function fmtTime(ms: number): string {
   return new Date(ms).toISOString().slice(11, 19);
@@ -265,6 +265,16 @@ function cmdGc(out: (l: string) => void, apply: boolean): number {
     const result = applyGc(db, layout, plan);
     out(`  回收孤儿 worktree：${result.removed} 条`);
     out(`  关闭幽灵 task：${result.closed} 条`);
+
+    const orphanSkipped = plan.orphanWorktrees.length - result.removed;
+    const ghostSkipped = plan.ghostTasks.length - result.closed;
+    if (orphanSkipped > 0) {
+      out(`  ⚠️  ${orphanSkipped} 条孤儿 worktree 无法回收（目录仍存在，可能是权限不足或 repo 未注册）`);
+    }
+    if (ghostSkipped > 0) {
+      out(`  ⚠️  ${ghostSkipped} 条幽灵 task 无法关闭`);
+    }
+
     out("完成。");
     return 0;
   });

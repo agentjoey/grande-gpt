@@ -5,7 +5,9 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Layout } from "./layout.ts";
 import { assertTaskId } from "./paths.ts";
 import { getTask, listActiveTasks } from "./tasks.ts";
-import { removeWorktree } from "./worktree.ts";
+import { registeredIds } from "./registry.ts";
+import { GitError, removeWorktree } from "./worktree.ts";
+import { resolveRepoPath } from "./paths.ts";
 
 export interface GcPlan {
   orphanWorktrees: { repoId: string; taskId: string; path: string; branch: string | null }[];
@@ -110,16 +112,19 @@ export function planGc(db: DatabaseSync, layout: Layout): GcPlan {
 /**
  * 应用 GC 计划。
  *
- * 方向 A：对每个孤儿 worktree 调用 removeWorktree（走 git worktree remove，
- * 清理 canonical 里的 .git/worktrees/<name> 注册项 + 分支）。
- * branch 为 null 时无法安全删除分支，只做 rm -rf 目录本身已在 removeWorktree
- * 之前被跳过——保留在磁盘上供人工清理。
+ * 方向 A：对每个孤儿 worktree 尝试 `git worktree remove --force`。
+ *   branch 已知时走完整的 `removeWorktree`（含分支清理）；
+ *   branch 为 null 时（git worktree 注册项已被 prune / canonical .git 缺失 /
+ *   detached HEAD）只做 `git worktree remove --force`，不做分支删除。
+ *   两者都以「目录是否真的被清掉了」为准计数——若 removeWorktree 因分支删除
+ *   失败而抛错、但 worktree 目录本身已被移除，仍计入 removed。
+ *   目录仍然在磁盘上时不计入 removed（不是「跳过并谎报」，是「真的没回收成功」）。
  *
  * 方向 B：对每个幽灵 task 做直接 UPDATE 标为 CLOSED（不做文件系统操作——
- * worktree 目录已经不存在，没有东西可删）。
+ *   worktree 目录已经不存在，没有东西可删）。
  *
  * CAS 守卫：每一条 task 更新都加了 `AND state != 'CLOSED'`，防止并发/反复
- * 调用覆盖已经 CLOSED 的记录（与 jobs.ts 里 finishJob 的 CAS 同源）。
+ *   调用覆盖已经 CLOSED 的记录（与 jobs.ts 里 finishJob 的 CAS 同源）。
  */
 export function applyGc(db: DatabaseSync, layout: Layout, plan: GcPlan): { removed: number; closed: number } {
   let removed = 0;
@@ -127,14 +132,30 @@ export function applyGc(db: DatabaseSync, layout: Layout, plan: GcPlan): { remov
 
   for (const o of plan.orphanWorktrees) {
     if (!existsSync(o.path)) continue;
-    if (o.branch !== null) {
-      try {
+
+    try {
+      if (o.branch !== null) {
         removeWorktree(layout, { repoId: o.repoId, worktreePath: o.path, branch: o.branch });
-      } catch {
-        continue;
+      } else {
+        const repoRoot = resolveRepoPath(layout, o.repoId, registeredIds(layout));
+        execFileSync("git", ["worktree", "remove", "--force", o.path], {
+          cwd: repoRoot,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "pipe"],
+        });
       }
+      removed++;
+    } catch {
+      // removeWorktree 可能在 worktree 目录已成功移除之后、
+      // 因分支删除失败而抛错（src/worktree.ts:203-211）。
+      // 此计数落后于 removeWorktree 内部的 git branch -D 异常。
+      // 此时 worktree 目录本身已经不存在——不能因为分支删不掉就假装目录还在。
+      if (!existsSync(o.path)) {
+        removed++;
+      }
+      // 目录仍然存在：repo 未注册 / git 工作树损坏 / 权限不足……
+      // 确实没有回收成功，不计数；这个孤儿下次 gc 会再次出现。
     }
-    removed++;
   }
 
   for (const g of plan.ghostTasks) {
