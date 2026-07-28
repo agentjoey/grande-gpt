@@ -77,10 +77,10 @@ features:
     tasks:
       - id: s0d-1-errors
         owner: w1
-        status: in_progress
+        status: awaiting_review
         reviewer: rev
         spec: .pact/tasks/s0d-1-errors.md
-        evidence: null
+        evidence: All steps completed per spec: - Step 0: tasks.ts/jobs.ts migrated from bare Error to structured StateError. All 35 existing tests pass (tasks.test.ts, jobs.test.ts, runner.test.ts). - Step 1-2: tests/errors.test.ts written with 23 tests, initially all fail (toToolError/redact not yet implemented). - Step 3-4: Full errors.ts implemented with MAP, KNOWN, toToolError, redact. All 23 tests pass. - Step 5: Stress test — removed KNOWN guard from structuredCode, confirmed "非 Error 值也能安全处理" test turns red; restored guard, all 23 tests green again. Demonstrates that bare objects with {code: "POLICY_DENIED"} cannot impersonate policy decisions. - Full suite: 19 files, 362 tests pass. - Typecheck: clean.
       - id: s0d-2-oauth
         owner: w1
         status: in_progress
