@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createTask } from "../src/tasks.ts";
+import { getJob } from "../src/jobs.ts";
+import { awaitJobSettled } from "../src/runner.ts";
 import { buildTools, type ToolDeps } from "../src/tools.ts";
 
 let ws: string, ctrl: string, layout: Layout, deps: ToolDeps;
@@ -45,13 +47,26 @@ beforeEach(() => {
   });
   writeFileSync(
     join(layout.configDir, "profiles.yaml"),
-    'repos:\n  demo:\n    ok: { argv: ["/bin/sh", "-c", "echo hello; exit 0"], timeoutSeconds: 30 }\n',
+    "repos:\n  demo:\n" +
+    '    ok: { argv: ["/bin/sh", "-c", "echo hello; exit 0"], timeoutSeconds: 30 }\n' +
+    '    slow: { argv: ["/bin/sh", "-c", "sleep 5"], timeoutSeconds: 30 }\n' +
+    '    curl-probe: { argv: ["/usr/bin/curl", "-sS", "--max-time", "3", "http://example.com"], timeoutSeconds: 10 }\n' +
+    '    fail: { argv: ["/bin/sh", "-c", "echo boom >&2; exit 1"], timeoutSeconds: 30 }\n',
     "utf8",
   );
 
   deps = { db, layout, repoId: "demo" };
 });
-afterEach(() => {
+
+const started: string[] = [];
+
+async function settle(jobId: string): Promise<void> {
+  await awaitJobSettled(jobId);
+}
+
+afterEach(async () => {
+  await Promise.all(started.map(awaitJobSettled));
+  started.length = 0;
   deps.db.close();
   rmSync(ws, { recursive: true, force: true });
   rmSync(ctrl, { recursive: true, force: true });
@@ -78,11 +93,13 @@ const READ_ONLY = [
 ] as const;
 
 describe("工具注解", () => {
-  it("恰好注册六个只读工具与一个写工具，且名字与规格 §5.2 一致", () => {
+  it("恰好注册六个只读工具与三个写工具，且名字与规格 §5.2 一致", () => {
     const names = buildTools(deps).map((t) => t.name).sort();
     expect(names.filter((n) => READ_ONLY.includes(n as typeof READ_ONLY[number]))).toEqual([...READ_ONLY].sort());
     expect(names).toContain("grande_repo_edit");
-    expect(names).toHaveLength(READ_ONLY.length + 1);
+    expect(names).toContain("grande_run");
+    expect(names).toContain("grande_task_open");
+    expect(names).toHaveLength(READ_ONLY.length + 3);
   });
 
   it("六个只读工具全部 readOnlyHint: true", () => {
@@ -94,10 +111,13 @@ describe("工具注解", () => {
   });
 
   it("写工具 readOnlyHint: false, destructiveHint: true", () => {
-    const edit = buildTools(deps).find((t) => t.name === "grande_repo_edit");
-    expect(edit).toBeDefined();
-    expect(edit!.annotations.readOnlyHint).toBe(false);
-    expect(edit!.annotations.destructiveHint).toBe(true);
+    const writeNames = ["grande_repo_edit", "grande_run", "grande_task_open"];
+    for (const name of writeNames) {
+      const t = buildTools(deps).find((tool) => tool.name === name);
+      expect(t, name).toBeDefined();
+      expect(t!.annotations.readOnlyHint, `${name} readOnlyHint`).toBe(false);
+      expect(t!.annotations.destructiveHint, `${name} destructiveHint`).toBe(true);
+    }
   });
 
   it("所有工具 openWorldHint: false（S0 全禁网）", () => {
@@ -152,3 +172,35 @@ describe("响应信封", () => {
     expect(existsSync(join(canonical, ".git/hooks/pre-commit"))).toBe(false);
   });
 });
+
+describe("grande_run / grande_run_result", () => {
+  it("grande_run 立刻返回 jobId 与 pollAfterSeconds，不等命令跑完，且真的 spawn 了", async () => {
+    const t0 = Date.now();
+    const r = JSON.parse(await callTool("grande_run", { taskId: "task_abcd", profile: "slow" }));
+    started.push(r.data.jobId);
+    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(r.data.jobId).toMatch(/^job_/);
+    expect(r.data.pollAfterSeconds).toBeGreaterThan(0);
+    expect(r.hint).toContain("grande_run_result");
+    const row = getJob(deps.db, r.data.jobId);
+    expect(row).toBeDefined();
+    expect(row!.state).toBe("running");
+    await settle(r.data.jobId);
+  }, 15_000);
+
+  it("联网尝试产生 NETWORK_DENIED，而不是与普通测试失败混在一起", async () => {
+    const r = JSON.parse(await callTool("grande_run", { taskId: "task_abcd", profile: "curl-probe" }));
+    started.push(r.data.jobId);
+    await settle(r.data.jobId);
+    const res = JSON.parse(await callTool("grande_run_result", { jobId: r.data.jobId }));
+    expect(res.data.networkDenied).toBe(true);
+  });
+
+  it("普通的测试失败【不】被误判成 NETWORK_DENIED（过度触发也是 bug）", async () => {
+    const r = JSON.parse(await callTool("grande_run", { taskId: "task_abcd", profile: "fail" }));
+    started.push(r.data.jobId);
+    await settle(r.data.jobId);
+    const res = JSON.parse(await callTool("grande_run_result", { jobId: r.data.jobId }));
+    expect(res.data.networkDenied).toBe(false);
+  });
+}, 15_000);

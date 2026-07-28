@@ -8,7 +8,7 @@ import { ensureLayout, loadLayout } from "../src/layout.ts";
 import type { Layout } from "../src/layout.ts";
 import { getJob, listJobs } from "../src/jobs.ts";
 import { createTask } from "../src/tasks.ts";
-import { awaitJobSettled, jobReport, startJob } from "../src/runner.ts";
+import { awaitJobSettled, jobReport, jobStateToError, startJob } from "../src/runner.ts";
 import { getAudit, beginAudit, type AuditHandle } from "../src/audit.ts";
 import { allowedHandle } from "./_audit.ts";
 
@@ -332,3 +332,32 @@ describe("jobReport()", () => {
     );
   });
 }, 30_000);
+
+import type { JobReport } from "../src/runner.ts";
+
+const BASE_REPORT: JobReport = {
+  truncated: false, state: "passed", exitCode: 0, outputTruncated: false,
+  killedBy: null, durationMs: 100, peakRssMb: 50, artifactPath: null,
+  summary: "ok", networkDenied: false,
+};
+
+describe("jobStateToError()", () => {
+  it("timeout 终态映射到 JOB_TIMEOUT", () => {
+    const r = { ...BASE_REPORT, state: "timeout", killedBy: "timeout" } as JobReport;
+    expect(jobStateToError(r)?.code).toBe("JOB_TIMEOUT");
+  });
+
+  it("killed + killedBy rss 映射到 RESOURCE_EXHAUSTED", () => {
+    const r = { ...BASE_REPORT, state: "killed", killedBy: "rss", peakRssMb: 4200 } as JobReport;
+    expect(jobStateToError(r)?.code).toBe("RESOURCE_EXHAUSTED");
+  });
+
+  it("passed/failed 终态不映射（不是异常）", () => {
+    expect(jobStateToError({ ...BASE_REPORT, state: "passed", killedBy: null } as JobReport)).toBeNull();
+    expect(jobStateToError({ ...BASE_REPORT, state: "failed", killedBy: null } as JobReport)).toBeNull();
+  });
+
+  it("running 终态不映射（还没到终态）", () => {
+    expect(jobStateToError({ ...BASE_REPORT, state: "running", killedBy: null } as JobReport)).toBeNull();
+  });
+});

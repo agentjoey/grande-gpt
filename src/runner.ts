@@ -10,6 +10,7 @@ import { getProfile } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
 import { defaultExecRoots, runSandboxed } from "./sandbox.ts";
 import type { AuditHandle } from "./audit.ts";
+import type { ToolError } from "./errors.ts";
 
 export class RunnerError extends Error {
   readonly code: string;
@@ -240,13 +241,42 @@ export interface JobReport {
   outputTruncated: boolean;
   killedBy: "timeout" | "rss" | null;
   durationMs: number | null;
+  peakRssMb: number | null;
   artifactPath: string | null;
   summary: string;
+  networkDenied: boolean;
+}
+
+/** jobReport 的终态 → 工具错误码。这一层不经过 toToolError：它不是异常，是 job 结果。 */
+export function jobStateToError(r: JobReport): ToolError | null {
+  if (r.state === "timeout") {
+    return { code: "JOB_TIMEOUT", message: "作业超过 profile 的 timeoutSeconds。", retryable: false, details: { killedBy: r.killedBy } };
+  }
+  if (r.state === "killed" && r.killedBy === "rss") {
+    return { code: "RESOURCE_EXHAUSTED", message: "作业 RSS 超限被终止。", retryable: false, details: { peakRssMb: r.peakRssMb } };
+  }
+  return null;
 }
 
 /** 摘要给模型看的尾部行数（规格 §5.4②：失败用例名 + 关键堆栈 + 尾部 40 行） */
 const TAIL_LINES = 40;
 const SUMMARY_MAX_BYTES = 8 * 1024;
+
+/**
+ * 启发式检测网络被 Seatbelt `(deny network*)` 规则拦截。
+ * 非权威信号——Seatbelt 不提供"因为网络被拒"的明确标记，只能从
+ * 进程输出中匹配常见特征。不要依赖它为唯一判定依据。
+ */
+function detectNetworkDenied(artifactContent: string): boolean {
+  return (
+    // curl exit code 6 (DNS) or 7 (connection), with or without sub-code like 65
+    /(?:^|\n)curl:\s*\(\s*[67]\d{0,1}\s*\)/m.test(artifactContent) ||
+    // Node.js EPERM + connect
+    /EPERM.*connect/i.test(artifactContent) ||
+    // Generic: Operation not permitted + network syscall
+    /Operation not permitted.*(?:connect|socket|sendto|recvfrom|gethostbyname)/i.test(artifactContent)
+  );
+}
 
 /**
  * 生成给模型看的 job 报告。完整日志留在 artifact，这里只给尾部摘要 ——
@@ -259,24 +289,28 @@ export function jobReport(db: DatabaseSync, jobId: string): JobReport {
   const j = getJob(db, jobId);
   if (!j) throw new RunnerError("JOB_NOT_FOUND", `job 不存在：${jobId}`);
 
+  const s = j.summary;
+
   if (j.state === "running") {
     return {
       truncated: false, state: "running", exitCode: null, outputTruncated: false,
-      killedBy: null, durationMs: null, artifactPath: null, summary: "仍在运行中。",
+      killedBy: null, durationMs: null, peakRssMb: null, artifactPath: null,
+      summary: "仍在运行中。", networkDenied: false,
     };
   }
 
   let tail = "";
+  let networkDenied = false;
   if (j.artifactPath !== null) {
     try {
-      const all = readFileSync(j.artifactPath, "utf8").split("\n");
-      tail = all.slice(-TAIL_LINES).join("\n");
+      const all = readFileSync(j.artifactPath, "utf8");
+      networkDenied = detectNetworkDenied(all);
+      tail = all.split("\n").slice(-TAIL_LINES).join("\n");
     } catch {
       tail = "（artifact 不可读）";
     }
   }
   const capped = truncateText(tail, SUMMARY_MAX_BYTES);
-  const s = j.summary;
   return {
     truncated: capped.truncated,
     state: j.state,
@@ -284,7 +318,9 @@ export function jobReport(db: DatabaseSync, jobId: string): JobReport {
     outputTruncated: (s?.truncated as boolean | undefined) ?? false,
     killedBy: (s?.killedBy as JobReport["killedBy"] | undefined) ?? null,
     durationMs: (s?.durationMs as number | undefined) ?? null,
+    peakRssMb: (s?.peakRssMb as number | undefined) ?? null,
     artifactPath: j.artifactPath,
     summary: capped.text,
+    networkDenied,
   };
 }

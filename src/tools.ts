@@ -4,14 +4,14 @@ import { ok, err, type TaskContext } from "./envelope.ts";
 import { toToolError, redact, StateError } from "./errors.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
-import { getTask, listActiveTasks } from "./tasks.ts";
+import { getTask, listActiveTasks, createTask } from "./tasks.ts";
 import { getJob, listJobs } from "./jobs.ts";
-import { jobReport } from "./runner.ts";
+import { jobReport, jobStateToError, startJob } from "./runner.ts";
 import { repoRead } from "./repoFile.ts";
 import { repoEdit, type EditOp } from "./repoFile.ts";
 import { repoSearch } from "./repoSearch.ts";
 import { repoMap } from "./repoMap.ts";
-import { listChangedFiles, repoDiff } from "./worktree.ts";
+import { listChangedFiles, repoDiff, openWorktree } from "./worktree.ts";
 import type { Layout } from "./layout.ts";
 import { loadDenyRules } from "./policy.ts";
 import { beginAudit } from "./audit.ts";
@@ -213,6 +213,70 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           }),
       },
       {
+        name: "grande_task_open",
+        description: "为新任务创建 worktree 和分支，准备沙箱执行环境",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskId: { type: "string", description: "任务ID" },
+            slug: { type: "string", description: "任务简称（1–40 个小写字母、数字或连字符）" },
+          },
+          required: ["taskId", "slug"],
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        handler: async (args) =>
+          wrap(deps, args.taskId as string, () => {
+            const taskId = args.taskId as string;
+            const slug = args.slug as string;
+            const wt = openWorktree(layout, repoId, slug, taskId);
+            const t = createTask(db, {
+              taskId, repoId, branch: wt.branch, baseCommit: wt.baseCommit,
+              worktreePath: wt.worktreePath, state: "READY",
+            });
+            return ok({
+              taskId,
+              data: { taskId: t.taskId, branch: t.branch, baseCommit: t.baseCommit, worktreePath: t.worktreePath },
+              hint: `已创建任务 ${t.taskId}，分支 ${t.branch}，worktree：${t.worktreePath}`,
+              taskContext: makeTaskContext(db, layout, taskId),
+            });
+          }),
+      },
+      {
+        name: "grande_run",
+        description: "在沙箱中异步执行一个 profile 命令，立即返回 jobId 供后续查询",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskId: { type: "string", description: "关联的任务ID" },
+            profile: { type: "string", description: "要执行的 profile 名称" },
+          },
+          required: ["taskId", "profile"],
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+        handler: async (args) =>
+          wrap(deps, args.taskId as string, () => {
+            const taskId = args.taskId as string;
+            const profileName = args.profile as string;
+            const t = getTask(db, taskId);
+            if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+            const rules = loadDenyRules(layout);
+            const h = beginAudit(db, { taskId, tool: "grande_run", input: { profile: profileName } });
+            h.allowed();
+            const s = startJob(
+              { db, layout },
+              { taskId, repoId, worktreePath: t.worktreePath, profileName },
+              h,
+            );
+            return ok({
+              taskId,
+              data: { jobId: s.jobId, state: s.state, pollAfterSeconds: s.pollAfterSeconds },
+              hint: `Job ${s.jobId} 已启动（profile: ${profileName}），` +
+                `稍后可通过 grande_run_result 查询结果，轮询间隔约 ${s.pollAfterSeconds} 秒`,
+              taskContext: makeTaskContext(db, layout, taskId),
+            });
+          }),
+      },
+      {
         name: "grande_repo_edit",
         description: "批量修改仓库文件：create（新建）、modify（修改，需要 expectedSha256 防冲突）、move（移动）。不支持删除",
         inputSchema: {
@@ -295,15 +359,19 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           const r = jobReport(db, jobId);
           const j = getJob(db, jobId);
           const taskId = j?.taskId ?? null;
+          const jobErr = jobStateToError(r);
+          if (jobErr) {
+            return err({ code: jobErr.code, message: jobErr.message, retryable: jobErr.retryable, details: jobErr.details, taskId });
+          }
           return ok({
             taskId,
             data: r,
             hint: r.state === "running"
               ? `Job ${jobId} 仍在运行中`
-              : `Job ${jobId} 状态：${r.state}${r.exitCode !== null ? `，exitCode: ${r.exitCode}` : ""}`,
+              : `Job ${jobId} 状态：${r.state}${r.exitCode !== null ? `，exitCode: ${r.exitCode}` : ""}${r.networkDenied ? "（疑似网络被拒——启发式判定，非沙箱权威信号）" : ""}`,
             truncated: r.truncated,
             taskContext: taskId ? makeTaskContext(db, layout, taskId) : null,
-          });
+          })
         }),
     },
   ];
