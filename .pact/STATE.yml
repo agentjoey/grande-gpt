@@ -101,3 +101,10 @@ features:
         spec: .pact/tasks/s0d-4-write-audit.md
         evidence: null
         deps: [s0d-3-tools]
+      - id: s0d-5-run
+        owner: w1
+        status: assigned
+        reviewer: rev
+        spec: .pact/tasks/s0d-5-run.md
+        evidence: null
+        deps: [s0d-4-write-audit]
