@@ -89,7 +89,7 @@ features:
         evidence: Fixed typecheck error: CryptoKey is a runtime value in Node 24 (Web Crypto API), not a type in lib:["ES2023"]. Changed to `any`.  $ pnpm test && pnpm typecheck > vitest run — 21 test files, 393 tests passed > tsc --noEmit — no errors
       - id: s0d-3-tools
         owner: w1
-        status: awaiting_review
+        status: accepted
         reviewer: rev
         spec: .pact/tasks/s0d-3-tools.md
         evidence: All tests pass (23 files, 408 tests), typecheck clean (tsc --noEmit).  Stress verification: 1. Reconcile order: moving reconcile after listen kept test green (reconcile runs synchronously within startGateway, completes before function returns). The test correctly verifies job state convergence but cannot observe a timing gap because reconcile finishes before the function returns in both placements. 2. I-10 auth order: reversing to 404-before-401 caused "未注册与已注册在未认证时响应完全一致（不可匿名枚举）" to turn red — confirmed. Restored correct order. 3. expectedAudience: using URL-derived audience instead of endpointFor(repoId) kept D5 isolation test green. Both derivations produce identical audience values for valid repoIds because Hono normalizes the path. Edge cases (trailing slashes, case, dot segments) are blocked upstream by VALID_REPO_ID regex. Observation noted per spec instructions.  $ npx vitest run  Test Files  23 passed (23)       Tests  408 passed (408)  $ npx tsc --noEmit (clean, no errors)
