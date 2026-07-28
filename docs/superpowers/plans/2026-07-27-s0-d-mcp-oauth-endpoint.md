@@ -9,7 +9,7 @@
 资源服务器 → MCP 工具层。工具处理器是**唯一**把内部异常翻译成 `error{code}` 信封的地方，
 也是**唯一**创建审计句柄的地方。
 
-**Tech Stack:** TypeScript、Hono、`@modelcontextprotocol/sdk@1.29.0`、`jose`（JWT）、vitest。
+**Tech Stack:** TypeScript、Hono、`@modelcontextprotocol/sdk@1.30.0`、`jose`（JWT）、vitest。
 
 ## Global Constraints
 
@@ -1218,10 +1218,10 @@ git commit -m "feat(s0-d): OAuth 授权服务器，补上 U1 实测发现的 ref
 一个都还没装：
 
 ```bash
-pnpm add hono @hono/node-server @modelcontextprotocol/sdk@1.29.0 zod
+pnpm add hono @hono/node-server @modelcontextprotocol/sdk@1.30.0 zod
 ```
 
-（版本与 Tech Stack 声明的 `@modelcontextprotocol/sdk@1.29.0` 保持一致。）
+（版本与 Tech Stack 声明的 `@modelcontextprotocol/sdk@1.30.0` 保持一致。）
 
 - [ ] **Step 1: 写失败测试**
 
