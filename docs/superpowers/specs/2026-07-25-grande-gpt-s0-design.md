@@ -253,7 +253,7 @@ S0-A 实测确认三者均被 `resolveInRepo` 接受：`.git/config`、`.git/hoo
 **读操作可以细，写操作必须粗。** 每次写调用都会弹一次确认框 —— 把「改 5 个文件」拆成 5 次调用
 就是 5 个对话框。
 
-### 5.2 九个工具
+### 5.2 十个工具
 
 `repoId` 由端点决定，不作为参数（见 D5）。
 
@@ -268,6 +268,7 @@ S0-A 实测确认三者均被 `resolveInRepo` 接受：`.git/config`、`.git/hoo
 | `grande_diff` | ✓ | — | worktree vs base 的 diff | < 3s |
 | `grande_run` | ✗ | ✗ | 启动注册 profile，**立即返回 `jobId`** | < 1s |
 | `grande_run_result` | ✓ | — | 轮询 job + 摘要日志 | < 1s |
+| `grande_task_close` | ✗ | ✓ | 关闭任务，删除 worktree 与分支（**不可逆**） | < 3s |
 
 所有工具 `openWorldHint: false`（S0 全禁网，无外部副作用）。
 
