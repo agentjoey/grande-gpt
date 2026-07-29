@@ -1,4 +1,23 @@
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
+
+/**
+ * 一条绝对路径从自身的父目录一路向上到（但不含）`/` 的每一级。
+ *
+ * 白名单化读放行之后必须显式补这条链：此前 `(allow file-read*)` 把整台机器都放行了，
+ * 向上遍历自然通过；改成白名单后，从 worktree 往上走到 `/Users` 就断了——实测 git
+ * 报 `fatal: Invalid path '/Users': Operation not permitted`。
+ *
+ * 既有的 `worktreeAncestors()` 只覆盖 worktreesRoot **以下**那几级，覆盖不到这里。
+ */
+function pathAncestors(p: string): string[] {
+  const out: string[] = [];
+  let cur = dirname(p);
+  while (cur !== "/" && cur !== "." && cur !== dirname(cur)) {
+    out.push(cur);
+    cur = dirname(cur);
+  }
+  return out;
+}
 
 /**
  * I3：`sbpl.ts` 里此前有两处裸 `Error`（`q()` 的相对路径校验、`buildProfile()`
@@ -96,7 +115,33 @@ export function buildProfile(p: SandboxPaths): string {
       "execRoots 不能为空：空数组会让 (allow process-exec) 退化成不带过滤条件的规则，等于放行一切可执行文件",
     );
   }
-  const ancestorMetadataAllows = worktreeAncestors(p.worktreesRoot, p.worktree).map(
+  // worktreeAncestors 只覆盖 worktreesRoot **以下**那几级；白名单化读放行之后还要补
+  // worktreesRoot 与 canonicalGit 各自往上直到 `/` 的每一级，否则 git 向上找仓库根时
+  // 在 `/Users` 就断了（实测 `fatal: Invalid path '/Users': Operation not permitted`）。
+  const ancestorDirs = [
+    ...worktreeAncestors(p.worktreesRoot, p.worktree),
+    ...pathAncestors(p.worktreesRoot),
+    ...pathAncestors(p.canonicalGit),
+    ...pathAncestors(p.jobTmp),
+    // execRoots 的祖先链同样要补：Node 解析 CJS 模块路径时会对每一级 realpath，
+    // 一路向上走到 `/Users`。生产布局里 worktree 恰好也在 `/Users` 之下，于是这条
+    // 需求被上面几条顺带满足了；测试夹具的 worktree 在 `/private/var/folders/...`，
+    // 才把它暴露出来（`EPERM: operation not permitted, lstat '/Users'`，栈顶是
+    // `Module._findPath`）。**不要因为生产上碰巧不复现就省掉这条。**
+    ...p.execRoots.flatMap((r) => pathAncestors(r)),
+  ];
+  // macOS 把 /var、/tmp、/etc 做成指向 /private/... 的符号链接。调用方传进来的路径
+  // 已经 realpath 过（见 sandbox.ts 的 canonicalPaths），于是这里拿到的一律是
+  // `/private/var/folders/...` 这种形式；但**进程实际使用的仍是 `/var/folders/...`**
+  // （cwd、argv、TMPDIR 都是未解析的原始串），解析这一步要读 `/var` 这个符号链接本身。
+  //
+  // 旧的无条件 `(allow file-read*)` 顺带覆盖了它，白名单化之后就断了。症状具有欺骗性：
+  // 报的是**写**失败（`/bin/sh: …/a.txt: Operation not permitted`），而真正缺的是对
+  // `/var` 的**读**——因为路径根本解析不到那个可写目录。
+  const privateAliases = [...new Set(ancestorDirs)]
+    .filter((d) => d.startsWith("/private/"))
+    .map((d) => d.slice("/private".length));
+  const ancestorMetadataAllows = [...new Set([...ancestorDirs, ...privateAliases])].map(
     (dir) => `(allow file-read-metadata (literal "${q(dir)}"))`,
   );
   return [
@@ -112,10 +157,68 @@ export function buildProfile(p: SandboxPaths): string {
     ";; 可读句柄。只有这一个字符设备是 git 实际需要的最小集合。",
     "(allow file-read* file-write* (literal \"/dev/null\"))",
     "",
-    ";; 读：整体放宽，再挖掉两块",
-    "(allow file-read*)",
+    ";; 读：显式白名单。此前是 `(allow file-read*)` 无条件放行再挖掉两块——规格里写的是",
+    ";; 「读放宽」，有意为之，但威胁模型只覆盖了「写」与「网络」两个方向，漏掉了这条：",
+    ";; **沙箱内读宿主文件 → 写进 worktree → 模型 grande_repo_read 读走 → 出到 ChatGPT**。",
+    ";; 网络封死使直接外传不通，worktree 中转这条通。实测确认 `~/.npmrc`（含明文",
+    ";; registry token）、`~/.ssh`、`~/.aws`、工作区里别的仓库当时全部可读。",
+    ";;",
+    ";; 白名单只有两条**固定常量**，其余全部从输入派生——本机路径不进代码：",
+    ";;   /System —— dyld 共享缓存与系统 framework。实测：删掉它，node/git/pnpm 三者",
+    ";;              全部以 SIGABRT 静默中止（连错误信息都打不出来，因为动态链接器就没起来）。",
+    ";;   /etc    —— git 读 /etc/gitconfig；另有 passwd/localtime 一类。注意 /etc 是",
+    ";;              指向 /private/etc 的符号链接，而 Seatbelt 按**给出的路径**匹配，",
+    ";;              所以放行 /private 并不能替代它（实测：只放 /private 时 git 报",
+    ";;              `unable to access '/etc/gitconfig'`）。",
+    ";;",
+    ";; 最小性证明（实测，探针 = node -e / git rev-parse / pnpm lint / pnpm verify）：",
+    ";; /usr、/bin、/sbin、/private 四条候选逐一删除后全部探针仍绿——它们被下面",
+    ";; 「execRoots 及其父目录」那两条覆盖了，因此**不予保留**。",
+    "(allow file-read* (subpath \"/System\"))",
+    ";; /etc 与 /private/etc **两个都要写**。它们是同一份内容的两条路径（/etc 是指向",
+    ";; private/etc 的符号链接），而 Seatbelt 按进程给出的路径匹配，不同程序用哪一条",
+    ";; 全看它自己怎么拼：git 读 `/etc/gitconfig`，curl 读 `/private/etc/ssl/openssl.cnf`。",
+    ";; 只放一条的症状是「一个工具好了另一个还坏」，而且报错完全不像权限问题",
+    ";; （curl 报的是 `Auto configuration failed` 加一串 libressl 的内部路径）。",
+    "(allow file-read* (subpath \"/etc\"))",
+    "(allow file-read* (subpath \"/private/etc\"))",
+    ";; macOS 的 /bin/sh 经 /private/var/select/sh 解析到真正的 shell（bash 或 zsh）。",
+    ";; 不放行的症状是 `Error opening /private/var/select/sh: Operation not permitted`——",
+    ";; 任何用 `/bin/sh -c` 形式的 profile（本仓库自己的测试 profile 就是）以及 pnpm",
+    ";; 派生子 shell 的脚本都会在这里挂掉。用 subpath 只覆盖这一个选择器目录。",
+    "(allow file-read* (subpath \"/private/var/select\"))",
+    ";; 根目录条目本身：动态链接器与多数工具启动时会 readdir \"/\"。这里必须是",
+    ";; file-read*（含 file-read-data，对目录即 readdir），file-read-metadata 不够",
+    ";; ——实测只给 metadata 时 /bin/echo 都起不来。放行的内容仅仅是「根下有哪些",
+    ";; 顶层目录名」，本身不含任何用户数据。",
+    "(allow file-read* (literal \"/\"))",
+    ";; execRoots 必须**可读**，不只是可执行：process-exec 只管「能否执行」，而 PATH",
+    ";; 逐目录查找、读 shebang 首行、dyld 读二进制本身，走的都是 file-read*。",
+    ";; 实测漏掉这条的症状是 `env: pnpm: No such file or directory`——看起来像 PATH",
+    ";; 配错，实际是目录读不到。",
+    ...p.execRoots.map((root) => `(allow file-read* (subpath "${q(root)}"))`),
+    ";; 以及每个 execRoot 的**父目录**：工具链把 libexec/share/lib 放在 bin 旁边",
+    ";; （git 的子命令在 <toolchain>/libexec/git-core）。这条泛化替掉了原本要硬编码",
+    ";; 的 `/Applications/Xcode.app/Contents/Developer/usr`——别的机器上可能是",
+    ";; CommandLineTools 或 Homebrew，路径不该进代码。",
+    ...[...new Set(p.execRoots.map((r) => dirname(r)).filter((d) => d !== "/"))].map(
+      (d) => `(allow file-read* (subpath "${q(d)}"))`,
+    ),
+    ";; canonical 的 .git：worktree 里的 .git 是一个指向 <canonical>/.git/worktrees/<name>",
+    ";; 的文件，git 任何一条命令都要顺着它读过去。写仍然是拒的（见下方 file-write* 段）。",
+    `(allow file-read* (subpath "${q(p.canonicalGit)}"))`,
+    ";; 这两条 deny 在白名单模型下已经冗余（没被 allow 覆盖的默认就拒），保留作纵深。",
+    ";;",
+    ";; ⚠️ **顺序是有意义的，且规则是「后匹配者胜」，不是「更具体者胜」。**",
+    ";; 实测：把 `(allow file-read* (subpath jobTmp))` 写在下面这条 controlRoot 的 deny",
+    ";; **之前**，jobTmp 就读不到了——尽管它是 controlRoot 的子路径、明显更具体。",
+    ";; 症状极隐蔽：git 照常工作（它不碰 TMPDIR），node 在 InitializeOncePerProcess",
+    ";; 阶段直接 SIGABRT，栈里只有 dyld，看不出跟 TMPDIR 有任何关系。",
+    ";; 原实现把 worktree 的 allow 放在 worktreesRoot 的 deny 之后，靠的正是这条规则。",
     `(deny file-read* (subpath "${q(p.controlRoot)}"))`,
     `(deny file-read* (subpath "${q(p.worktreesRoot)}"))`,
+    ";; 必须排在上面两条 deny 之后：jobTmp 在生产布局里位于 controlRoot 之下。",
+    `(allow file-read* (subpath "${q(p.jobTmp)}"))`,
     ";; pnpm/npm/yarn/vitest/tsc 启动时都会向上遍历目录树找 workspace root/配置/",
     ";; lockfile——这一步只会 lstat/stat 经过的每一级目录，不会读它们的内容。",
     ";; `subpath` 连目录条目自身都拒，于是从 worktree 出发向上走、经过",

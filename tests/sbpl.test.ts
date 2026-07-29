@@ -133,4 +133,40 @@ describe("buildProfile()", () => {
     if (!gitPath) return;
     expect(roots).toContain(dirname(gitPath));
   });
+
+  it("读放行是显式白名单，绝不出现无条件的 (allow file-read*)", () => {
+    // 这条钉的是 2026-07-29 的收紧：此前是 `(allow file-read*)` 再挖掉两块，实测
+    // 走通了「沙箱内读宿主文件 → 写进 worktree → 模型 repo_read 读走 → 出到 ChatGPT」。
+    // 没有这条断言，任何人把那一行加回来都不会有测试变红。
+    const sb = buildProfile(paths);
+    const lines = sb.split("\n").map((l) => l.trim()).filter((l) => !l.startsWith(";;"));
+    expect(lines).not.toContain("(allow file-read*)");
+    // 且必须仍然带过滤条件——`(allow file-read* )` 这种空条件同样等于全放行
+    for (const l of lines.filter((l) => l.startsWith("(allow file-read*"))) {
+      expect(l).toMatch(/\((?:subpath|literal|regex)\s/);
+    }
+  });
+
+  it("execRoots 既可执行也【可读】——PATH 查找与读 shebang 走 file-read*", () => {
+    const p = paths;
+    const sb = buildProfile(p);
+    for (const root of p.execRoots) {
+      expect(sb).toContain(`(allow file-read* (subpath "${root}"))`);
+    }
+  });
+
+  it("/etc 与 /private/etc 两条都在——git 用前者、curl 用后者，只放一条会一个好一个坏", () => {
+    const sb = buildProfile(paths);
+    expect(sb).toContain('(allow file-read* (subpath "/etc"))');
+    expect(sb).toContain('(allow file-read* (subpath "/private/etc"))');
+  });
+
+  it("jobTmp 的 allow 必须排在 controlRoot 的 deny【之后】——Seatbelt 是后匹配者胜", () => {
+    const p = paths;
+    const sb = buildProfile(p);
+    const denyIdx = sb.indexOf(`(deny file-read* (subpath "${p.controlRoot}"))`);
+    const allowIdx = sb.indexOf(`(allow file-read* (subpath "${p.jobTmp}"))`);
+    expect(denyIdx).toBeGreaterThan(-1);
+    expect(allowIdx).toBeGreaterThan(denyIdx);
+  });
 });

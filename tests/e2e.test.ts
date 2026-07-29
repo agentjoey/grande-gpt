@@ -78,7 +78,11 @@ fi`,
     "repos:\n  demo:\n" +
     `    fail: { argv: ["/bin/sh", "-c", "echo boom >&2; exit 1"], timeoutSeconds: 30 }\n` +
     `    ok: { argv: ["/bin/sh", "-c", "echo hello; exit 0"], timeoutSeconds: 30 }\n` +
-    `    check-e2e: { argv: ["/bin/sh", "${repoDir}/check-status.sh"], timeoutSeconds: 30 }\n`,
+    // 用**相对**路径：cwd 就是任务 worktree，脚本随 git worktree add 一起检出到那里。
+    // 此前写的是 canonical 的绝对路径，在「读无条件放行」的旧策略下侥幸能跑；读改成
+    // 白名单之后 canonical 对沙箱不可见，`/bin/sh` 打不开脚本、退出码 126。
+    // 这不是回归而是收紧生效了——沙箱 job 本来就只该看见自己那份 worktree（D4）。
+    `    check-e2e: { argv: ["/bin/sh", "check-status.sh"], timeoutSeconds: 30 }\n`,
     "utf8",
   );
 
