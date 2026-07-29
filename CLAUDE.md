@@ -109,6 +109,58 @@
 | 1 | `task_close` 的守卫写 `j.state === "running"` 而非用 `jobs.ts` 的 `TERMINAL` 集合 | 今天行为等价（`JobState` 6 值、`TERMINAL` 占 5），将来加状态会漏。**同源漏改**形状 |
 | 2 | GC 方向 A 只认「完全没有 task 行」。`CLOSED` 但目录残留（`removeWorktree` 在 `branch -D` 抛错）两个方向都看不见 | 由 w1 在 s05-3 报告里主动提出，规格合规，候选第三种情形 |
 | 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项，**单次样本**，不足以定性 |
+| 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
+| 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
+
+### ⚠️ ChatGPT 权限档会「列出」但「拒绝调用」写工具（2026-07-29 实测）
+
+**症状**：模型能列出 `grande_task_open` 等工具，调用却报
+`Resource not found: GrandeGPT.grande_task_open`，而**服务端日志里连一条请求都没有**。
+只读工具（`readOnlyHint: true`）全部正常。
+
+**根因**：ChatGPT 在 `Allow low-risk actions` 档下拒绝调用 `readOnlyHint: false` 的工具。
+**修法：把连接器权限改成 `Allow all actions`。**
+
+**这与 AC-13 那轮矛盾**——同一档位下 `repo_edit`/`run` 当时跑完了完整开发闭环，
+期间我们没动过工具注解。所以这是 **ChatGPT 侧的平台行为变化**，不是本项目的 bug。
+**不要为了绕过它把写工具的 `readOnlyHint` 改成 `true`**：那是对客户端撒谎，会让
+ChatGPT 的权限机制整体失效——而我们主动依赖那一层（`task_close` 的
+`destructiveHint: true` 让它在低风险档下被正确隐藏，就是它在工作）。
+
+#### 排查方法（这次绕了三个错误假设才找到，下次直接照做）
+
+**第一步永远是看服务端日志，判断请求到底有没有到。** 这是区分「客户端没发」与
+「服务端拒了」的唯一可靠办法，而后者在日志里必然留痕、前者必然无痕。
+
+**「服务端全绿、日志无失败、用户侧完全不可用」是一个真实的盲区形态。**
+一旦确认请求没到达，问题在客户端，**不要再在服务端找**。
+
+拿到「部分工具能用、部分不能」之后，**先比对 `tools/list` 里两组工具的结构差异，
+把变量隔离到只剩一个，再动手**。用库里的签名密钥自签一枚本地 token 就能直接问：
+
+```
+POST http://127.0.0.1:8787/mcp  {"jsonrpc":"2.0","id":1,"method":"tools/list"}
+  Authorization: Bearer <用 ~/.grande-control/secrets/oauth-key 自签>
+```
+
+这次比对下来，能用与不能用的两组在顶层键、`type`、`required` 形状上**完全相同**，
+唯一差别就是 `readOnlyHint`——一条命令就锁定了变量。翻转它做单变量实验即可判决。
+
+被这次实测**排除**的三个假设（别再重猜）：
+① 注册循环中途抛错导致后续工具没注册 —— 10 个全在 `tools/list` 里
+② `tools/list` 响应被 ChatGPT 静默截断 —— 只有 8.2KB，远低于 POC 实测的 ~73,896 字节
+③ 权限档被误设成 `Allow read actions` —— 用户确认是 `Allow low-risk actions`
+
+还有一个中间判断也错了：从「读工具到达、写工具从不到达」直接跳到「被过滤」，
+**漏掉了第三种可能——工具在客户端的表里、但调用路由不到**。
+判别办法：让模型直接列出它能看见的全部工具名。
+
+#### 由此暴露的两个待办
+
+| # | 缺口 |
+|---|---|
+| 1 | **`tools/list` 没有进日志。** 现在只有 `POST /mcp → 200`，看不出客户端取过几次工具表、拿走了什么。这次全靠自签 token 手查才拿到服务端视角 |
+| 2 | **没有「客户端视角」的自检手段。** 目前唯一办法是让模型自己报它看得见什么——这不该是排查时才临时想起来的招 |
 
 ### 沙箱读放行已收紧为显式白名单（2026-07-29，`95eec1b`）
 
