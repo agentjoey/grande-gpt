@@ -27,10 +27,40 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 | D16 | **S0 接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | D13/D15 已作废：OpenAI Secure MCP Tunnel 需要 Platform API key（另一套计费），与「用 chat 额度」的初衷冲突 |
 | D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp`（D18 之后；`/mcp/<repoId>` 保留为兼容别名） | 已实测跑通 |
 
-## 当前状态：S0 全部实现完毕，已在真实 ChatGPT 上跑通
+## 当前状态：S0 + S0.5 全部完成，在真实 ChatGPT 上跑通并已投入使用
 
-**S0-A / S0-B / S0-C / S0-D 均已合并到 `main`，整分支审查已跑完。**
-482 测试通过，typecheck 干净。**GrandeGPT 可以给任意已注册 repo 用了。**
+**S0-A/B/C/D 与 S0.5 均已合并到 `main`，整分支审查已跑完。**
+508 测试通过，typecheck 干净。25 个 src 模块 / 5,586 行，测试 6,408 行。
+**GrandeGPT 可以给任意已注册 repo 用了。**
+
+### 已实现的能力
+
+**十个 MCP 工具**（`src/tools.ts`；仓库始终由 `taskId` 单向推导，D18）：
+
+| 工具 | 类型 | 作用 |
+|---|---|---|
+| `grande_task_status` | 只读 | 任务状态/分支/改动/最近 job；**无参调用列出所有仓库与活跃任务**（跨会话恢复靠它） |
+| `grande_repo_map` | 只读 | 目录树 + 关键文件 |
+| `grande_repo_search` | 只读 | 文本/正则/glob 搜索，支持 `nextCursor` 续读 |
+| `grande_repo_read` | 只读 | 读文件，返回 `sha256` |
+| `grande_diff` | 只读 | worktree vs base，按文件分页 |
+| `grande_run_result` | 只读 | 轮询 job + 摘要日志 |
+| `grande_task_open` | 写 | 建分支与 worktree（**唯一**由模型显式指定 `repoId` 之处），克隆 `depDirs` |
+| `grande_repo_edit` | 写 | 一次调用改多文件：create / modify（`expectedSha256` 防冲突）/ move |
+| `grande_run` | 写 | 在 Seatbelt 沙箱里跑白名单 profile，立即返回 `jobId` |
+| `grande_task_close` | **破坏性** | 删 worktree 与分支回收磁盘（**全表唯一** `destructiveHint: true`，ChatGPT 会弹确认框） |
+
+**五个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`。
+`gc` 默认 dry-run，`--apply` 才执行。
+
+**基础设施**：
+- OAuth 2.1 + PKCE(S256) + DCR + refresh 轮换（含复用检测），单一 `/mcp` 端点，
+  `aud` 恒从服务端配置推导；client 与 refresh token 跨重启持久化
+- Cloudflare Access 门禁挡在 `/authorize` 第一行，配置缺失 fail-closed
+- macOS Seatbelt 沙箱：`deny default` + `deny network*`，写只放行本任务 worktree，
+  沙箱内 `git` / `pnpm` / `vitest` / `tsc` 可用
+- 审计账本（PENDING→ALLOWED→EXECUTING→终态，CAS 推进），启动时 job + worktree 双向对账
+- 优雅关停等在途 job 收尾（30s 上限）
 
 **已在真实 ChatGPT 普通对话里验证通过的三件事**：
 
@@ -64,13 +94,22 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 不是「函数算得对不对」。P-A 那个「遍历所有导出、查生产调用点」的机械探针
 值得每轮都跑一次。
 
+**S0.5 可用性收尾（2026-07-29 完成）**
+
+三项都是「不做就会坏」的地基，不是功能增强：`grande_task_close`（worktree 无限累积
+——2 个任务已占 722M）、沙箱内 `git`（不修就没法用 GrandeGPT 开发 GrandeGPT）、
+`grande gc` 双向对账（库与磁盘**当时已经不一致**，有一个孤儿 worktree）。
+已用 `grande gc --apply` 完成首次真实回收：722M → 635M，git 注册项与分支一并清掉，
+活跃任务无误伤，重跑幂等。
+
 **已知遗留**（按优先级）：
 
 | # | 问题 | 状态 |
 |---|---|---|
-| 1 | `removeWorktree` 与 `TaskState "CLOSED"` 无生产入口——规格 §5.2 的 S0 只有 9 个工具、没有 `task_close` | S1 范畴。后果：worktree 与分支会累积，无回收路径 |
-| 2 | 沙箱内 `git` 需要 Xcode developer dir，环境清洗后不可用 | 仅影响调 git 的项目（本仓库自身），普通项目无感 |
-| 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项，单次样本 |
+| 1 | **沙箱 `(allow file-read*)` 读放宽** —— 规格 §(约 425 行) 白纸黑字的有意设计，但实测走通了「沙箱内读宿主文件 → 写进 worktree → 模型 `grande_repo_read` 读走 → 出到 ChatGPT」这条链。网络封死，直接外传不通；worktree 中转这条通。`~/.npmrc`（含明文 token）、`~/.ssh`、`~/.aws` 都在可读范围 | **建议进 S1 头部**。修法是换成显式白名单，但需一轮实测确认不误伤 pnpm/vitest/tsc 的启动路径（U2 spike 干过同类的事） |
+| 2 | `task_close` 的守卫写 `j.state === "running"` 而非用 `jobs.ts` 的 `TERMINAL` 集合 | 今天行为等价（`JobState` 6 值、`TERMINAL` 占 5），将来加状态会漏。**同源漏改**形状 |
+| 3 | GC 方向 A 只认「完全没有 task 行」。`CLOSED` 但目录残留（`removeWorktree` 在 `branch -D` 抛错）两个方向都看不见 | 由 w1 在 s05-3 报告里主动提出，规格合规，候选第三种情形 |
+| 4 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项，**单次样本**，不足以定性 |
 
 
 **POC 已通过**（观察记录 [`docs/research/2026-07-26-poc-observation.md`](docs/research/2026-07-26-poc-observation.md)）——

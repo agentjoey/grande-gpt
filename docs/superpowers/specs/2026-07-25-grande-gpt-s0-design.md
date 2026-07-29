@@ -806,17 +806,18 @@ AC-7 堵沙箱内子进程，AC-14 堵写工具自身。**只做 AC-7 会留下�
 
 ## 10. 路线图
 
-| 切片 | 内容 | 粗估（人日） |
-|---|---|---|
-| **POC** | **交互可行性验证：假 MCP 服务端 + 硬编码数据，验 P-1～P-5（§9.1）** | **1–2** |
-| **S0** | 薄端到端：九工具 + Seatbelt + `/mcp/<repoId>` + CLI 调试视图 | 13–19 |
-| S1 | 安全写入层：OID 校验、事务 patch、Checkpoint、Trash、删除解禁 | 8–11 |
-| S1.5 | 开发约束层：硬 policy 门禁 + 软方法论指引 | 3–4 |
-| S2 | 本地开发闭环：worktree 生命周期、commit、base sync、Verification Attestation | 11–15 |
-| S2.5 | 前端控制台（**T3**，须过 Mockup Gate） | 10–15 |
-| S3 | GitHub 闭环：GitHub App、push、Draft PR、CI | 6–9 |
-| S4 | 稳固化：审计对账、僵尸恢复、保留策略 | 4–7 |
-| S5 | 外部校验器接入（按需评估，很可能不做） | 0–5 |
+| 切片 | 内容 | 粗估（人日） | 状态 |
+|---|---|---|---|
+| **POC** | **交互可行性验证：假 MCP 服务端 + 硬编码数据，验 P-1～P-5（§9.1）** | **1–2** | ✅ 完成 |
+| **S0** | 薄端到端：九工具 + Seatbelt + 单一 `/mcp` 端点（D18）+ CLI 调试视图 | 13–19 | ✅ 完成 |
+| **S0.5** | 可用性收尾：`grande_task_close` + 沙箱内 `git` + `grande gc` 双向对账 | 1–2 | ✅ 完成 |
+| S1 | 安全写入层：OID 校验、事务 patch、Checkpoint、Trash、删除解禁 | 8–11 | |
+| S1.5 | 开发约束层：硬 policy 门禁 + 软方法论指引 | 3–4 | |
+| S2 | 本地开发闭环：worktree 生命周期、commit、base sync、Verification Attestation | 11–15 | |
+| S2.5 | 前端控制台（**T3**，须过 Mockup Gate） | 10–15 | |
+| S3 | GitHub 闭环：GitHub App、push、Draft PR、CI | 6–9 | |
+| S4 | 稳固化：审计对账、僵尸恢复、保留策略 | 4–7 | |
+| S5 | 外部校验器接入（按需评估，很可能不做） | 0–5 | |
 
 **合计 55–85 人日**，与草案 49–72 的区间基本吻合，多出的主要是控制台。
 
