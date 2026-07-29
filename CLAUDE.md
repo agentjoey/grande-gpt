@@ -1,7 +1,7 @@
 # GrandeGPT — 项目说明
 
 让用户在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行平台。
-POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架）**。
+**S0 与 S0.5 均已完成并在真实 ChatGPT 上跑通，已投入使用**（详见下方「当前状态」）。
 
 权威文档：[`docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md)
 
