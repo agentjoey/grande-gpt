@@ -27,9 +27,9 @@
 | D16 | **S0 接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | D13/D15 已作废：OpenAI Secure MCP Tunnel 需要 Platform API key（另一套计费），与「用 chat 额度」的初衷冲突 |
 | D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp`（D18 之后；`/mcp/<repoId>` 保留为兼容别名） | 已实测跑通 |
 
-## 当前状态：S0 + S0.5 + S1 + S1.5 全部完成；S1 由 ChatGPT 自举实现
+## 当前状态：S0 → S2 全部完成；S1 与 S2 由 ChatGPT 自举实现
 
-**S0-A/B/C/D、S0.5、S1、S1.5 均已合并到 `main`。** 555 测试通过，typecheck 干净。
+**S0-A/B/C/D、S0.5、S1、S1.5、S2 均已合并到 `main`。** 581 测试通过，typecheck 干净。
 
 **S1 是第一个由 ChatGPT 经 GrandeGPT 自身完成的切片**——9 个任务、17 个文件、外加 review 后一轮修复。记录见
 [`docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md`](docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md)。
@@ -37,7 +37,7 @@
 
 ### 已实现的能力
 
-**十一个 MCP 工具**（`src/tools.ts`；仓库始终由 `taskId` 单向推导，D18）：
+**十三个 MCP 工具**（`src/tools.ts`；仓库始终由 `taskId` 单向推导，D18）：
 
 | 工具 | 类型 | 作用 |
 |---|---|---|
@@ -52,6 +52,8 @@
 | `grande_run` | 写 | 在 Seatbelt 沙箱里跑白名单 profile，立即返回 `jobId` |
 | `grande_task_close` | **破坏性** | 删 worktree 与分支回收磁盘（**全表唯一** `destructiveHint: true`，ChatGPT 会弹确认框） |
 | `grande_rollback` | 写 | 把 worktree 回滚到某个 checkpoint（S1；被覆盖的内容进 Trash，故 `destructiveHint: false`） |
+| `grande_commit` | 写 | 提交任务 worktree 的全部改动到任务分支（S2）。**所有 git 调用带 `-c core.hooksPath=/dev/null`**，见下方安全说明 |
+| `grande_sync_base` | 写 | 把 base 同步到 canonical 当前分支（S2）。用 merge 不用 rebase；冲突一律拒绝并 `merge --abort` |
 
 **五个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`。
 `gc` 默认 dry-run，`--apply` 才执行。
@@ -115,6 +117,7 @@
 | 6 | `repoEdit` 里 `const taskId = basename(root)` | 引入「`root` 最后一段必须是合法 taskId」这个**签名上看不见的前置条件**。安全上无洞（`root` 来自库里的 `task.worktreePath`，且 `createCheckpoint`/`moveToTrash` 都会再 `assertTaskId`），但脆。应改为显式传 `taskId` |
 | 7 | `repoEdit` 里调 `loadLayout()` | 原本只依赖入参的函数现在读全局配置，测试与复用都变难 |
 | 8 | 历史 S0 文档仍写着 `repo_edit` 不支持 delete | 已被 S1 规格取代；实现者主动标注过，未做全仓历史文档改写 |
+| 9 | **`unit-selfhost` 排除的 5 个文件，其不变量在自举时完全失去保护** | S2 实测撞上：工具计数从 11 变 13，`tools.test.ts` 的计数不变量红了而实现者看不见。这次后果轻，下次可能是安全断言。**建议加一个 `grande outer-test` CLI 子命令**，让「该跑外层了」有机制提醒，而不是靠人记得 |
 | 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
 
@@ -167,6 +170,33 @@ POST http://127.0.0.1:8787/mcp  {"jsonrpc":"2.0","id":1,"method":"tools/list"}
 |---|---|
 | 1 | **`tools/list` 没有进日志。** 现在只有 `POST /mcp → 200`，看不出客户端取过几次工具表、拿走了什么。这次全靠自签 token 手查才拿到服务端视角 |
 | 2 | **没有「客户端视角」的自检手段。** 目前唯一办法是让模型自己报它看得见什么——这不该是排查时才临时想起来的招 |
+
+### ⚠️ git hooks 是沙箱之外的代码执行入口（S2，2026-07-30 实测）
+
+`git commit` / `git merge` 会执行 hooks，而**这些命令只能跑在 Gateway 进程里**
+（沙箱 `deny file-write*` 盖住 `.git`）。于是 hook 里的任何东西都在**沙箱之外、
+以 Gateway 身份**执行。
+
+`.git/hooks/` 本身写不进去（`policy.ts` 的 `BUILTIN_PREFIXES` 硬拒，且已堵掉
+`src/../.git/` 与 `vendor -> .git` 两条绕行）。**但 `core.hooksPath` 能把 hooks
+指向仓库内【被跟踪的】目录**——那是很多项目的正常做法（共享 hooks），而
+`repo_edit` 写得了那种普通文件。**实测确认这条链走得通。**
+
+**所以 `src/` 里每一条 git 调用都必须带 `-c core.hooksPath=/dev/null`。**
+不要用 `--no-verify`——它文档上只保证跳过 `pre-commit` 与 `commit-msg`；
+hooksPath 覆写无条件杀掉全部，对将来 git 新增的 hook 类型也成立。
+目前 `commit.ts` / `syncBase.ts` / `baseStatus.ts` / `attestation.ts` 四处都有，
+**新增任何 git 调用点时必须一并加上**（这是 P-C 同源漏改的高危形状）。
+
+#### 沙箱本身也挡这条，但那让测试成了假阴性
+
+沙箱的 `process-exec` 白名单只放行 execRoots 与 `node_modules/.bin`，所以
+worktree 里的 hook 会 `execvp() failed: Operation not permitted`，git 拿到 EPERM
+后**静默当作「没有 hook」继续**。这是纵深防御的好消息，但意味着：
+
+**AC-S2-1（hook 不执行）在 `unit-selfhost` 里无论有没有防护都绿。**
+这条 load-bearing 证明**只能在沙箱外做**。S2 那轮实现者正确地在此停机、拒绝用
+形状断言凑数，由 reviewer 在沙箱外补完。
 
 ### 沙箱读放行已收紧为显式白名单（2026-07-29，`95eec1b`）
 
