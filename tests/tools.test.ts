@@ -110,14 +110,15 @@ const READ_ONLY = [
 ] as const;
 
 describe("工具注解", () => {
-  it("恰好注册六个只读工具与四个写工具，且名字与规格 §5.2 一致", () => {
+  it("恰好注册六个只读工具与五个写工具，且名字与规格一致", () => {
     const names = buildTools(deps).map((t) => t.name).sort();
     expect(names.filter((n) => READ_ONLY.includes(n as typeof READ_ONLY[number]))).toEqual([...READ_ONLY].sort());
     expect(names).toContain("grande_repo_edit");
+    expect(names).toContain("grande_rollback");
     expect(names).toContain("grande_run");
     expect(names).toContain("grande_task_open");
     expect(names).toContain("grande_task_close");
-    expect(names).toHaveLength(READ_ONLY.length + 4);
+    expect(names).toHaveLength(READ_ONLY.length + 5);
   });
 
   it("六个只读工具全部 readOnlyHint: true", () => {
@@ -130,7 +131,7 @@ describe("工具注解", () => {
 
   it("写工具 readOnlyHint: false，但除 task_close 外 destructiveHint 必须是 false", () => {
     // task_close 删 worktree 与分支，真正不可逆，destructiveHint 标 true 是规格要求（§5.2）。
-    const writeNames = ["grande_repo_edit", "grande_run", "grande_task_open"];
+    const writeNames = ["grande_repo_edit", "grande_rollback", "grande_run", "grande_task_open"];
     for (const name of writeNames) {
       const t = buildTools(deps).find((tool) => tool.name === name);
       expect(t, name).toBeDefined();
@@ -157,6 +158,32 @@ describe("工具注解", () => {
     // fixture 在 beforeEach 里注册了 ok/slow/curl-probe/fail 四个 profile
     expect(haystack).toMatch(/\bok\b|\bslow\b|curl-probe|\bfail\b/);
   });
+
+  it("grande_repo_edit 的 description 与 JSON Schema 明确暴露 delete，且 expectedSha256 必填", () => {
+    const tool = buildTools(deps).find((t) => t.name === "grande_repo_edit")!;
+    const ops = tool.inputSchema.properties.ops as {
+      description?: string;
+      items?: { oneOf?: { properties?: { op?: { const?: string } }; required?: string[] }[] };
+    };
+    const haystack = `${tool.description} ${ops.description ?? ""}`;
+    expect(haystack).toContain("delete");
+    expect(haystack).toContain("expectedSha256");
+
+    const variants = ops.items?.oneOf ?? [];
+    const deleteVariant = variants.find((v) => v.properties?.op?.const === "delete");
+    expect(deleteVariant).toBeDefined();
+    expect(deleteVariant!.required).toEqual(expect.arrayContaining(["op", "path", "expectedSha256"]));
+  });
+
+  it("grande_rollback 的 taskId/checkpointId 必填，且 destructiveHint=false", () => {
+    const tool = buildTools(deps).find((t) => t.name === "grande_rollback")!;
+    expect(tool.inputSchema.required).toEqual(expect.arrayContaining(["taskId", "checkpointId"]));
+    expect(tool.annotations).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false,
+    });
+  });
 });
 
 describe("D18：repoId 参数只出现在该出现的地方（单一端点 + 任务绑定隔离）", () => {
@@ -174,8 +201,8 @@ describe("D18：repoId 参数只出现在该出现的地方（单一端点 + 任
     }
   });
 
-  it("grande_repo_edit / grande_run 不接受 repoId——仓库完全由 taskId 推导，模型无法自由指定写到哪个仓库", () => {
-    for (const name of ["grande_repo_edit", "grande_run"]) {
+  it("grande_repo_edit / grande_rollback / grande_run 不接受 repoId——仓库完全由 taskId 推导", () => {
+    for (const name of ["grande_repo_edit", "grande_rollback", "grande_run"]) {
       const tool = buildTools(deps).find((t) => t.name === name)!;
       expect(Object.keys(tool.inputSchema.properties ?? {}), name).not.toContain("repoId");
     }
@@ -440,13 +467,9 @@ describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
    * 规格 §5.2 明确规定了每个工具的 readOnlyHint 与 destructiveHint。
    *
    * 这一条不是形式主义：ChatGPT 的 per-app 权限档【就是按注解放行的】。
-   * 三个写工具曾被实现成 destructiveHint: true，结果在 `Allow low-risk actions`
+   * 写工具曾被实现成 destructiveHint: true，结果在 `Allow low-risk actions`
    * 档下全部被客户端拦掉——ChatGPT 只说「被禁用」，服务端日志里连请求都看不到，
    * 审计账本零记录。整整两轮真实测试才定位到。
-   *
-   * 而且 §5.3 说得很清楚：S0 之所以【放弃删除文件】，就是为了让 repo_edit 能
-   * 诚实地保持 destructive: false（标 true 会导致每次弹框且无法「记住」）。
-   * 把它标成 true 等于代价照付、好处没拿到。
    */
   const SPEC: Record<string, { readOnly: boolean; destructive: boolean }> = {
     grande_task_open:   { readOnly: false, destructive: false },
@@ -455,18 +478,19 @@ describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
     grande_repo_search: { readOnly: true,  destructive: false },
     grande_repo_read:   { readOnly: true,  destructive: false },
     grande_repo_edit:   { readOnly: false, destructive: false },
+    grande_rollback:    { readOnly: false, destructive: false },
     grande_diff:        { readOnly: true,  destructive: false },
     grande_run:         { readOnly: false, destructive: false },
     grande_run_result:  { readOnly: true,  destructive: false },
     grande_task_close:  { readOnly: false, destructive: true  },
   };
 
-  it("十个工具的注解与规格逐项一致", () => {
+  it("十一个工具的注解与规格逐项一致", () => {
     const tools = buildTools(deps);
     expect(tools).toHaveLength(Object.keys(SPEC).length);
     for (const t of tools) {
       const want = SPEC[t.name];
-      expect(want, `${t.name} 不在规格 §5.2 的表里`).toBeDefined();
+      expect(want, `${t.name} 不在规格表里`).toBeDefined();
       expect(t.annotations.readOnlyHint, `${t.name}.readOnlyHint`).toBe(want!.readOnly);
       expect(t.annotations.destructiveHint, `${t.name}.destructiveHint`).toBe(want!.destructive);
       expect(t.annotations.openWorldHint, `${t.name}.openWorldHint（S0 全禁网）`).toBe(false);
@@ -570,12 +594,12 @@ describe("grande_task_close", () => {
     expect(a.pathsTouched.length).toBeGreaterThan(0);
   });
 
-  it("task_close 注解：destructiveHint === true，其余三个写工具仍然是 false", () => {
+  it("task_close 注解：destructiveHint === true，其余四个写工具仍然是 false", () => {
     const tools = buildTools(deps);
     const tc = tools.find((t) => t.name === "grande_task_close")!;
     expect(tc.annotations.destructiveHint).toBe(true);
 
-    for (const name of ["grande_repo_edit", "grande_run", "grande_task_open"]) {
+    for (const name of ["grande_repo_edit", "grande_rollback", "grande_run", "grande_task_open"]) {
       const t = tools.find((tool) => tool.name === name)!;
       expect(t.annotations.destructiveHint, `${name} destructiveHint`).toBe(false);
     }

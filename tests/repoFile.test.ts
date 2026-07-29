@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -13,14 +14,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getAudit, beginAudit, type AuditHandle } from "../src/audit.ts";
+import { restoreCheckpoint } from "../src/checkpoint.ts";
 import { openDb } from "../src/db.ts";
-import type { Layout } from "../src/layout.ts";
+import { loadLayout, type Layout } from "../src/layout.ts";
 import type { DenyRules } from "../src/policy.ts";
 import { repoEdit, repoRead, type EditOp } from "../src/repoFile.ts";
+import { buildTools } from "../src/tools.ts";
 import { allowedHandle } from "./_audit.ts";
 
 let root: string;
+let testRoot: string;
+let layout: Layout;
 let db: ReturnType<typeof openDb>;
+let previousWorkspace: string | undefined;
+let previousControl: string | undefined;
+const TASK_ID = "task-1";
 const RULES: DenyRules = { prefixes: [".git/"] };
 
 const sha = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
@@ -36,12 +44,27 @@ function file(rel: string, content: string) {
 const read = (rel: string) => readFileSync(join(root, rel), "utf8");
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "rf-"));
+  testRoot = mkdtempSync(join(tmpdir(), "rf-"));
+  const workspaceRoot = join(testRoot, "workspace");
+  const controlRoot = join(testRoot, "control");
+  mkdirSync(workspaceRoot, { recursive: true });
+  mkdirSync(controlRoot, { recursive: true });
+  previousWorkspace = process.env.GRANDE_WORKSPACE;
+  previousControl = process.env.GRANDE_CONTROL;
+  process.env.GRANDE_WORKSPACE = workspaceRoot;
+  process.env.GRANDE_CONTROL = controlRoot;
+  layout = loadLayout();
+  root = join(layout.worktreesRoot, "demo", TASK_ID);
+  mkdirSync(root, { recursive: true });
   db = openDb({ stateDb: ":memory:" } as Layout);
 });
 afterEach(() => {
   db.close();
-  rmSync(root, { recursive: true, force: true });
+  if (previousWorkspace === undefined) delete process.env.GRANDE_WORKSPACE;
+  else process.env.GRANDE_WORKSPACE = previousWorkspace;
+  if (previousControl === undefined) delete process.env.GRANDE_CONTROL;
+  else process.env.GRANDE_CONTROL = previousControl;
+  rmSync(testRoot, { recursive: true, force: true });
 });
 
 describe("repoRead()", () => {
@@ -263,15 +286,134 @@ describe("repoEdit()", () => {
     expect(() => repoEdit(root, [], RULES, allowedHandle(db, "grande_repo_edit"))).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
   });
 
-  it("不提供删除能力：运行时拒绝任何未知 op，包括 delete（规格 §5.3）", () => {
-    // 规格 §5.3：S0 没有 Checkpoint，删除不可撤销。若支持删除就必须标
-    // destructiveHint: true，导致每次弹框且无法「记住」。
-    // 类型层挡不住 S0-D 那边解出来的 JSON —— 所以运行时也要挡。
-    file("a.ts", "v1");
+  it("delete 把文件移进 Trash，worktree 中消失且副本内容逐字节相同", () => {
+    file("delete-me.txt", "delete me\n");
+
+    const result = repoEdit(
+      root,
+      [{ op: "delete", path: "delete-me.txt", expectedSha256: sha("delete me\n") }],
+      RULES,
+      allowedHandle(db, "grande_repo_edit"),
+    );
+
+    expect(existsSync(join(root, "delete-me.txt"))).toBe(false);
+    expect(result.applied).toEqual([{ op: "delete", path: "delete-me.txt", sha256: null }]);
+    const trashRoot = join(layout.controlRoot, "trash", TASK_ID);
+    const batches = readdirSync(trashRoot);
+    expect(batches).toHaveLength(1);
+    expect(readFileSync(join(trashRoot, batches[0]!, "delete-me.txt"), "utf8")).toBe("delete me\n");
+  });
+
+  it("delete 缺少 expectedSha256 → INVALID_INPUT；哈希错误 → STALE_FILE；两次拒绝都无副作用", () => {
+    file("safe.txt", "safe\n");
+    const trashRoot = join(layout.controlRoot, "trash", TASK_ID);
+
     expect(() =>
-      repoEdit(root, [{ op: "delete", path: "a.ts" } as unknown as EditOp], RULES, allowedHandle(db, "grande_repo_edit")),
+      repoEdit(
+        root,
+        [{ op: "delete", path: "safe.txt" } as unknown as EditOp],
+        RULES,
+        allowedHandle(db, "grande_repo_edit"),
+      ),
     ).toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
-    expect(read("a.ts")).toBe("v1");
+    expect(read("safe.txt")).toBe("safe\n");
+    expect(existsSync(trashRoot)).toBe(false);
+
+    expect(() =>
+      repoEdit(
+        root,
+        [{ op: "delete", path: "safe.txt", expectedSha256: sha("wrong\n") }],
+        RULES,
+        allowedHandle(db, "grande_repo_edit"),
+      ),
+    ).toThrow(expect.objectContaining({ code: "STALE_FILE" }));
+    expect(read("safe.txt")).toBe("safe\n");
+    expect(existsSync(trashRoot)).toBe(false);
+  });
+
+  it("delete 不存在的文件 → FILE_NOT_FOUND，且不创建 Trash 或 checkpoint 副作用", () => {
+    expect(() =>
+      repoEdit(
+        root,
+        [{ op: "delete", path: "missing.txt", expectedSha256: sha("missing") }],
+        RULES,
+        allowedHandle(db, "grande_repo_edit"),
+      ),
+    ).toThrow(expect.objectContaining({ code: "FILE_NOT_FOUND" }));
+    expect(existsSync(join(root, "missing.txt"))).toBe(false);
+    expect(existsSync(join(layout.controlRoot, "trash", TASK_ID))).toBe(false);
+    expect(existsSync(join(layout.controlRoot, "checkpoints", TASK_ID))).toBe(false);
+  });
+
+  it("delete 可与 create/modify 混在同一批，三种操作全部落盘", () => {
+    file("modify.txt", "before\n");
+    file("delete.txt", "gone\n");
+
+    const result = repoEdit(
+      root,
+      [
+        { op: "create", path: "created.txt", content: "created\n" },
+        { op: "modify", path: "modify.txt", content: "after\n", expectedSha256: sha("before\n") },
+        { op: "delete", path: "delete.txt", expectedSha256: sha("gone\n") },
+      ],
+      RULES,
+      allowedHandle(db, "grande_repo_edit"),
+    );
+
+    expect(read("created.txt")).toBe("created\n");
+    expect(read("modify.txt")).toBe("after\n");
+    expect(existsSync(join(root, "delete.txt"))).toBe(false);
+    expect(result.applied.map((a) => a.op)).toEqual(["create", "modify", "delete"]);
+  });
+
+  it("写阶段第 2 个 op 失败时自动回滚整批，并保留原始 I/O 错误", () => {
+    file("a.ts", "a1");
+    file("b.ts", "b1");
+    file("c.ts", "c1");
+    file("blocked", "not a directory");
+
+    let thrown: unknown;
+    try {
+      repoEdit(
+        root,
+        [
+          { op: "modify", path: "a.ts", content: "a2", expectedSha256: sha("a1") },
+          { op: "move", from: "b.ts", to: "blocked/b.ts" },
+          { op: "modify", path: "c.ts", content: "c2", expectedSha256: sha("c1") },
+        ],
+        RULES,
+        allowedHandle(db, "grande_repo_edit"),
+      );
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toMatchObject({ code: "EEXIST" });
+    expect(read("a.ts")).toBe("a1");
+    expect(read("b.ts")).toBe("b1");
+    expect(read("c.ts")).toBe("c1");
+    expect(read("blocked")).toBe("not a directory");
+    expect(existsSync(join(root, "blocked", "b.ts"))).toBe(false);
+  });
+
+  it("全部成功时返回 checkpointId，且 move 的 from/to 都能用它完整回滚", () => {
+    file("a.ts", "content");
+
+    const result = repoEdit(
+      root,
+      [{ op: "move", from: "a.ts", to: "src/b.ts" }],
+      RULES,
+      allowedHandle(db, "grande_repo_edit"),
+    );
+
+    expect(result.checkpointId).toEqual(expect.any(String));
+    expect(result.checkpointId.length).toBeGreaterThan(0);
+    expect(existsSync(join(root, "a.ts"))).toBe(false);
+    expect(read("src/b.ts")).toBe("content");
+
+    expect(restoreCheckpoint(layout, TASK_ID, root, result.checkpointId)).toEqual(["a.ts", "src/b.ts"]);
+    expect(read("a.ts")).toBe("content");
+    expect(existsSync(join(root, "src", "b.ts"))).toBe(false);
   });
 
   it("repoEdit 在写盘【之前】把句柄推进到 EXECUTING", () => {
@@ -314,5 +456,22 @@ describe("repoEdit()", () => {
 
   it("repoEdit 的形参数量仍是 4（tsc 才是真正拦住漏传 audit 的那道关卡）", () => {
     expect(repoEdit.length).toBe(4);
+  });
+});
+
+describe("grande_repo_edit tool metadata", () => {
+  it("description 与 JSON Schema 暴露 delete，且 delete 的 expectedSha256 必填", () => {
+    const tool = buildTools({ db, layout }).find((t) => t.name === "grande_repo_edit")!;
+    const ops = tool.inputSchema.properties.ops as {
+      description?: string;
+      items?: { oneOf?: { properties?: { op?: { const?: string } }; required?: string[] }[] };
+    };
+    const haystack = `${tool.description} ${ops.description ?? ""}`;
+    expect(haystack).toContain("delete");
+    expect(haystack).toContain("expectedSha256");
+
+    const deleteVariant = (ops.items?.oneOf ?? []).find((v) => v.properties?.op?.const === "delete");
+    expect(deleteVariant).toBeDefined();
+    expect(deleteVariant!.required).toEqual(expect.arrayContaining(["op", "path", "expectedSha256"]));
   });
 });
