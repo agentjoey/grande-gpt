@@ -30,7 +30,7 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 ## 当前状态：S0 + S0.5 全部完成，在真实 ChatGPT 上跑通并已投入使用
 
 **S0-A/B/C/D 与 S0.5 均已合并到 `main`，整分支审查已跑完。**
-508 测试通过，typecheck 干净。25 个 src 模块 / 5,586 行，测试 6,408 行。
+512 测试通过，typecheck 干净。25 个 src 模块 / 5,586 行，测试 6,408 行。
 **GrandeGPT 可以给任意已注册 repo 用了。**
 
 ### 已实现的能力
@@ -106,10 +106,33 @@ POC 与 S0-0 spike 均已通过，**当前正在实现 S0-A（控制平面骨架
 
 | # | 问题 | 状态 |
 |---|---|---|
-| 1 | **沙箱 `(allow file-read*)` 读放宽** —— 规格 §(约 425 行) 白纸黑字的有意设计，但实测走通了「沙箱内读宿主文件 → 写进 worktree → 模型 `grande_repo_read` 读走 → 出到 ChatGPT」这条链。网络封死，直接外传不通；worktree 中转这条通。`~/.npmrc`（含明文 token）、`~/.ssh`、`~/.aws` 都在可读范围 | **建议进 S1 头部**。修法是换成显式白名单，但需一轮实测确认不误伤 pnpm/vitest/tsc 的启动路径（U2 spike 干过同类的事） |
-| 2 | `task_close` 的守卫写 `j.state === "running"` 而非用 `jobs.ts` 的 `TERMINAL` 集合 | 今天行为等价（`JobState` 6 值、`TERMINAL` 占 5），将来加状态会漏。**同源漏改**形状 |
-| 3 | GC 方向 A 只认「完全没有 task 行」。`CLOSED` 但目录残留（`removeWorktree` 在 `branch -D` 抛错）两个方向都看不见 | 由 w1 在 s05-3 报告里主动提出，规格合规，候选第三种情形 |
-| 4 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项，**单次样本**，不足以定性 |
+| 1 | `task_close` 的守卫写 `j.state === "running"` 而非用 `jobs.ts` 的 `TERMINAL` 集合 | 今天行为等价（`JobState` 6 值、`TERMINAL` 占 5），将来加状态会漏。**同源漏改**形状 |
+| 2 | GC 方向 A 只认「完全没有 task 行」。`CLOSED` 但目录残留（`removeWorktree` 在 `branch -D` 抛错）两个方向都看不见 | 由 w1 在 s05-3 报告里主动提出，规格合规，候选第三种情形 |
+| 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项，**单次样本**，不足以定性 |
+
+### 沙箱读放行已收紧为显式白名单（2026-07-29，`95eec1b`）
+
+原先 `(allow file-read*)` 无条件放行。规格 §425「读放宽」是有意设计，但威胁模型
+只覆盖了「写」与「网络」，漏掉了这条实测走通的链：**沙箱内读宿主文件 → 写进
+worktree → 模型 `grande_repo_read` 读走 → 出到 ChatGPT**。
+
+**改 `src/sbpl.ts` 的读规则前必读的四条实测结论**（每条都在代码注释里，别再踩一遍）：
+
+1. **Seatbelt 是「后匹配者胜」，不是「最具体者胜」。** `allow jobTmp` 写在
+   `deny controlRoot` 之前，jobTmp 就读不到——尽管它明显更具体。症状骗人：git 照常
+   工作，node 在 `InitializeOncePerProcess` 直接 SIGABRT，栈里只有 dyld。
+   规格 §444 那句「具体 deny 胜过泛 allow」是巧合（deny 恰好写在后面）。
+2. **execRoots 必须可读，不只可执行。** PATH 查找、读 shebang、dyld 读二进制都走
+   `file-read*`。漏掉的症状是 `env: pnpm: No such file or directory`——像 PATH 配错。
+3. **`/etc` 与 `/private/etc` 两条都要写**（git 用前者、curl 用后者）；`/var` ↔
+   `/private/var` 同理，且漏掉后者时报的是**写**失败、真正缺的是对 `/var` 的**读**。
+4. **execRoots 的祖先链也要补。** Node 解析 CJS 模块对每级 realpath，走到 `/Users`。
+   生产布局里 worktree 恰好也在 `/Users` 下，**只有测试夹具才暴露**——不要因为生产
+   上碰巧不复现就省掉。
+
+验收探针（13 条，`tests/sbpl.test.ts` + `tests/sandbox.test.ts` 已覆盖其中可自动化的部分）：
+正向 `node` / `git` / `/bin/sh -c` / `pnpm verify` / `pnpm lint`；反向 `~/.npmrc`、
+`~/.ssh`、工作区里别的仓库、控制平面配置与状态库、canonical 源码、写宿主、网络。
 
 
 **POC 已通过**（观察记录 [`docs/research/2026-07-26-poc-observation.md`](docs/research/2026-07-26-poc-observation.md)）——
