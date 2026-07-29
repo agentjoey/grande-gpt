@@ -30,8 +30,20 @@
    **本切片的任何任务都不得要求删除已有文件。** 需要「移除」的语义一律用 `move` 到
    一个明确的废弃位置，或直接留着不动。
 2. **没有 shell。** 没有 `shell_exec`（铁律二，永久非目标）。所有验证只能经
-   `grande_run` 跑已注册 profile。grande-gpt 目前只有两个：`unit`（`pnpm test`）与
-   `typecheck`（`pnpm typecheck`）。**设计不得依赖任何第三个命令。**
+   `grande_run` 跑已注册 profile。**设计不得依赖任何未注册的命令。**
+
+   **验收用 `unit-selfhost` + `typecheck`，不要用 `unit`。**
+   `unit`（`pnpm test`）在沙箱里**永远绿不了**——本仓库有 5 个测试文件自己要 spawn
+   `sandbox-exec`（它们测的就是沙箱本身）或绑真实端口，在沙箱里跑等于**嵌套沙箱**，
+   而内层只能比外层更严，永远拿不回外层拒掉的权限。实测基线（2026-07-29）：沙箱内
+   524 测试中 40 失败，全部落在 `sandbox` / `runner` / `server` / `tools` / `e2e`
+   这 5 个文件。`unit-selfhost` 排除它们（沙箱外实测 20 文件 / 394 全绿），排除清单
+   明写在 `~/.grande-control/config/profiles.yaml` 注释里，**不是静默丢弃**；那 5 个
+   由 Human Owner 在沙箱外跑 `pnpm test` 覆盖，合并前不可跳过。
+
+   **这是自举的结构性上限，值得单独记一笔**：一个把沙箱作为核心能力的工具，
+   无法用自己的沙箱跑自己关于沙箱的测试。将来任何「让 GrandeGPT 开发 GrandeGPT」
+   的切片都要面对这一条。
 3. **不能新增 profile。** profile 白名单在控制平面（`~/.grande-control/config/`），
    仓库内改不动（铁律一）。需要新 profile 必须由 Human Owner 在控制平面加。
 4. **`modify` 必须带 `expectedSha256`。** 先 `grande_repo_read` 拿哈希再改。

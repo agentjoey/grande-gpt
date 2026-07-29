@@ -1,10 +1,41 @@
 # S1 + S1.5 实施计划（由 ChatGPT 经 GrandeGPT 执行）
 
 **设计文档** [`../specs/2026-07-29-grande-gpt-s1-design.md`](../specs/2026-07-29-grande-gpt-s1-design.md)
-**仓库** `grande-gpt` · **可用 profile** `unit`（`pnpm test`）、`typecheck`
+**仓库** `grande-gpt` · **验收 profile** `unit-selfhost` + `typecheck`
+
+> ## ⚠️ 不要用 `unit` —— 它在沙箱里【永远绿不了】
+>
+> **这是自举的结构性上限，不是 bug，也不是你的代码有问题。**
+>
+> 本仓库有 5 个测试文件自己要 spawn `sandbox-exec`（它们测的就是沙箱本身）或绑真实
+> 端口。在沙箱里跑它们等于**嵌套沙箱**，而内层沙箱只能比外层更严，**永远拿不回外层
+> 拒掉的权限**。典型报错长这样，看起来像权限配错，实际是结构性的：
+>
+> ```
+> Error: EPERM: operation not permitted, scandir '.../.grande-control/derived/tmp'
+>   ❯ assertOnDiskSpelling src/sandbox.ts
+> Error: listen EPERM: operation not permitted 0.0.0.0
+> ```
+>
+> **实测基线（2026-07-29，沙箱内跑全量）：524 个测试中 40 个失败，全部落在这 5 个文件：**
+> `tests/sandbox.test.ts` · `tests/runner.test.ts` · `tests/server.test.ts` ·
+> `tests/tools.test.ts` · `tests/e2e.test.ts`
+>
+> **所以：一律用 `unit-selfhost`**（控制平面里已配好，排除这 5 个文件；沙箱外实测
+> 20 文件 / 394 测试全绿）。它排除了什么、为什么排除，明写在
+> `~/.grande-control/config/profiles.yaml` 的注释里——**不是静默丢弃**。
+>
+> 那 5 个文件由 Human Owner 在沙箱**外**跑 `pnpm test` 覆盖，**合并前不可跳过**。
+>
+> 好消息：`tests/repoFile.test.ts`（30 tests）在沙箱内**通过**——那正是 S1-3 要改的
+> 文件，你的改动验得了。
+>
+> *（这条最初写错成「`unit` 必须绿」，会卡死每一个任务。是实现者跑出红灯、拒绝
+> 在红灯下往下做、并把「新回归 vs 既有环境问题」两种可能交回来判断，才暴露出来的。
+> 那个判断是对的。）*
 
 > **给实现者**：先完整读一遍设计文档的 **§0（自举约束）**，它列出了你做不到的事。
-> 尤其：**你不能删除文件**、**没有 shell**、**只能跑上面两个 profile**。
+> 尤其：**你不能删除文件**、**没有 shell**、**验收只能用 `unit-selfhost` + `typecheck`**。
 
 ---
 
@@ -31,7 +62,8 @@ grande_diff        { taskId }      ← 已经做了什么
 
 1. **改已有文件前先 `grande_repo_read` 拿 `sha256`**，`modify` 时带上。跳步会 `STALE_FILE`。
 2. **一次 `repo_edit` 里同一路径只能出现一次。** 要改两次就分两次调用。
-3. **每个任务结束时必须跑 `unit` 与 `typecheck` 两个 profile**，两个都绿才算完成。
+3. **每个任务结束时必须跑 `unit-selfhost` 与 `typecheck` 两个 profile**，两个都绿才算完成。
+   **不要用 `unit`**——见文档开头的警告，它在沙箱里结构上不可能全绿。
 4. **不要删除任何文件。** 需要废弃就留着不动，或 `move` 到明确位置。
 5. **测试必须断言真实状态**（文件系统内容、数据库行），不是「函数返回了一个对象」。
 6. `grande_run` 立即返回 `jobId`，用 `grande_run_result` 轮询到终态。
@@ -82,7 +114,7 @@ export function moveToTrash(
 6. 源文件不存在 → `FILE_NOT_FOUND`
 
 ### 验收
-`grande_run unit` 与 `typecheck` 均绿。
+`grande_run unit-selfhost` 与 `typecheck` 均绿。
 
 ---
 
@@ -129,7 +161,7 @@ export function restoreCheckpoint(
 6. 同一任务连续两次 checkpoint，两个都可独立回滚（互不干扰）
 
 ### 验收
-`unit` + `typecheck` 均绿。
+`unit-selfhost` + `typecheck` 均绿。
 
 ---
 
@@ -170,7 +202,7 @@ export function restoreCheckpoint(
 3. 既有的 repoFile 测试**全部仍绿**（不要为了新功能改坏旧行为）
 
 ### 验收
-`unit` + `typecheck` 均绿。**这个任务改的是所有写操作都要经过的核心路径——
+`unit-selfhost` + `typecheck` 均绿。**这个任务改的是所有写操作都要经过的核心路径——
 既有测试一条都不许红。**
 
 ---
@@ -209,7 +241,7 @@ export function restoreCheckpoint(
    `grande_task_close` 仍为 `true`
 
 ### 验收
-`unit` + `typecheck` 均绿。
+`unit-selfhost` + `typecheck` 均绿。
 
 ---
 
@@ -250,7 +282,7 @@ name: "grande_rollback"
 5. 注解断言：`destructiveHint === false`
 
 ### 验收
-`unit` + `typecheck` 均绿。
+`unit-selfhost` + `typecheck` 均绿。
 
 ---
 
@@ -312,7 +344,7 @@ export function mergePolicy(global: RepoPolicy, repo: RepoPolicy): RepoPolicy;
 5. `.grande/policy.yaml` 是目录而不是文件 → 抛错，不崩
 
 ### 验收
-`unit` + `typecheck` 均绿。
+`unit-selfhost` + `typecheck` 均绿。
 
 ---
 
@@ -339,7 +371,7 @@ export function mergePolicy(global: RepoPolicy, repo: RepoPolicy): RepoPolicy;
 4. repo policy 新增的规则**确实生效**（不是只有全局规则起作用）
 
 ### 验收
-`unit` + `typecheck` 均绿。
+`unit-selfhost` + `typecheck` 均绿。
 
 ---
 
@@ -372,7 +404,7 @@ export function mergePolicy(global: RepoPolicy, repo: RepoPolicy): RepoPolicy;
 4. 两条规则同时存在时，缺哪条报哪条
 
 ### 验收
-`unit` + `typecheck` 均绿。
+`unit-selfhost` + `typecheck` 均绿。
 
 ---
 
@@ -400,7 +432,7 @@ export function mergePolicy(global: RepoPolicy, repo: RepoPolicy): RepoPolicy;
 3. `guidance.yaml` 不存在 → 不报错
 
 ### 验收
-`unit` + `typecheck` 均绿。
+`unit-selfhost` + `typecheck` 均绿。
 
 ---
 
