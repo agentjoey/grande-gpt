@@ -1,10 +1,13 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, matchesGlob } from "node:path";
 import { parse } from "yaml";
+import type { Layout } from "./layout.ts";
 
 export interface RepoPolicy {
   readOnlyPaths: string[];
   pairedEdits: { when: string; require: string }[];
+  /** S2 commit 门禁；为空时省略，保持旧响应与对象字面量兼容。 */
+  requireGreenBeforeCommit?: string[];
 }
 
 export class RepoPolicyError extends Error {
@@ -34,8 +37,6 @@ function validateGlob(file: string, field: string, value: unknown): string {
     return badConfig(file, `的 ${field} 必须是非空 glob 字符串`);
   }
   try {
-    // Node 24 的内置 glob 解析器是后续策略匹配的唯一实现；这里提前解析一次，
-    // 让无效 pattern 在加载阶段 fail closed，而不是等到写入门禁时才出错。
     matchesGlob("__grande_policy_probe__", value);
   } catch (error) {
     return badConfig(
@@ -46,35 +47,23 @@ function validateGlob(file: string, field: string, value: unknown): string {
   return value;
 }
 
-/** 从 <worktreeRoot>/.grande/policy.yaml 加载 repo 级收紧规则。 */
-export function loadRepoPolicy(worktreeRoot: string): RepoPolicy {
-  const file = join(worktreeRoot, ".grande", "policy.yaml");
-  if (!existsSync(file)) return emptyPolicy();
-
-  try {
-    if (!statSync(file).isFile()) badConfig(file, "必须是普通文件");
-  } catch (error) {
-    if (error instanceof RepoPolicyError) throw error;
-    throw new RepoPolicyError(
-      "BAD_CONFIG",
-      `无法检查 ${file}：${error instanceof Error ? error.message : String(error)}`,
-    );
+function validateProfile(file: string, field: string, value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return badConfig(file, `的 ${field} 必须是非空 profile 名称字符串`);
   }
+  return value.trim();
+}
 
-  let document: unknown;
-  try {
-    document = parse(readFileSync(file, "utf8"));
-  } catch (error) {
-    throw new RepoPolicyError(
-      "BAD_CONFIG",
-      `无法解析 ${file}：${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
+function parsePolicyDocument(file: string, document: unknown, allowOtherControlFields = false): RepoPolicy {
   if (document === null || document === undefined) return emptyPolicy();
   if (!isMapping(document)) badConfig(file, "顶层必须是映射");
 
-  const allowedTopLevel = new Set(["readOnlyPaths", "pairedEdits"]);
+  const allowedTopLevel = new Set([
+    "readOnlyPaths",
+    "pairedEdits",
+    "requireGreenBeforeCommit",
+    ...(allowOtherControlFields ? ["prefixes"] : []),
+  ]);
   for (const key of Object.keys(document)) {
     if (!allowedTopLevel.has(key)) badConfig(file, `包含未知字段 ${key}`);
   }
@@ -106,10 +95,63 @@ export function loadRepoPolicy(worktreeRoot: string): RepoPolicy {
     }
   }
 
-  return { readOnlyPaths, pairedEdits };
+  const requireGreenBeforeCommit: string[] = [];
+  const rawRequired = document.requireGreenBeforeCommit;
+  if (rawRequired !== undefined) {
+    if (!Array.isArray(rawRequired)) {
+      badConfig(file, "的 requireGreenBeforeCommit 必须是数组");
+    }
+    for (let index = 0; index < rawRequired.length; index += 1) {
+      requireGreenBeforeCommit.push(
+        validateProfile(file, `requireGreenBeforeCommit[${index}]`, rawRequired[index]),
+      );
+    }
+  }
+
+  const result: RepoPolicy = { readOnlyPaths, pairedEdits };
+  if (requireGreenBeforeCommit.length > 0) result.requireGreenBeforeCommit = requireGreenBeforeCommit;
+  return result;
 }
 
-/** 合并全局与 repo 规则；两类规则均取并集，因此 repo 无法移除全局约束。 */
+function readYaml(file: string): unknown {
+  try {
+    return parse(readFileSync(file, "utf8"));
+  } catch (error) {
+    throw new RepoPolicyError(
+      "BAD_CONFIG",
+      `无法解析 ${file}：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+}
+
+/** 从 <worktreeRoot>/.grande/policy.yaml 加载 repo 级收紧规则。 */
+export function loadRepoPolicy(worktreeRoot: string): RepoPolicy {
+  const file = join(worktreeRoot, ".grande", "policy.yaml");
+  if (!existsSync(file)) return emptyPolicy();
+
+  try {
+    if (!statSync(file).isFile()) badConfig(file, "必须是普通文件");
+  } catch (error) {
+    if (error instanceof RepoPolicyError) throw error;
+    throw new RepoPolicyError(
+      "BAD_CONFIG",
+      `无法检查 ${file}：${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return parsePolicyDocument(file, readYaml(file));
+}
+
+/**
+ * 从控制平面 deny.yaml 读取与 repo policy 同形的收紧字段。`prefixes` 是 deny.yaml
+ * 自己已有的字段，在这里允许但不消费；其余未知字段仍 fail closed。
+ */
+export function loadControlRepoPolicy(layout: Layout): RepoPolicy {
+  const file = join(layout.configDir, "deny.yaml");
+  if (!existsSync(file)) return emptyPolicy();
+  return parsePolicyDocument(file, readYaml(file), true);
+}
+
+/** 合并全局与 repo 规则；三类规则均取并集，因此 repo 无法移除全局约束。 */
 export function mergePolicy(global: RepoPolicy, repo: RepoPolicy): RepoPolicy {
   const readOnlyPaths = [...new Set([...global.readOnlyPaths, ...repo.readOnlyPaths])];
   const pairedEdits: RepoPolicy["pairedEdits"] = [];
@@ -122,5 +164,17 @@ export function mergePolicy(global: RepoPolicy, repo: RepoPolicy): RepoPolicy {
     pairedEdits.push({ when: pair.when, require: pair.require });
   }
 
-  return { readOnlyPaths, pairedEdits };
+  const requireGreenBeforeCommit = [
+    ...new Set([
+      ...(global.requireGreenBeforeCommit ?? []),
+      ...(repo.requireGreenBeforeCommit ?? []),
+    ]),
+  ];
+  const result: RepoPolicy = { readOnlyPaths, pairedEdits };
+  if (requireGreenBeforeCommit.length > 0) result.requireGreenBeforeCommit = requireGreenBeforeCommit;
+  return result;
+}
+
+export function loadEffectiveCommitPolicy(layout: Layout, worktreeRoot: string): RepoPolicy {
+  return mergePolicy(loadControlRepoPolicy(layout), loadRepoPolicy(worktreeRoot));
 }

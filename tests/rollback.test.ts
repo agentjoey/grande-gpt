@@ -201,11 +201,11 @@ describe("grande_rollback", () => {
     expect(audit?.pathsTouched).toEqual(["a.txt"]);
   });
 
-  it("注册为第 11 个工具，参数必填且 destructiveHint 保持 false", () => {
+  it("注册为工具，参数必填且 destructiveHint 保持 false", () => {
     const tools = buildTools(deps);
     const rollback = tools.find((tool) => tool.name === "grande_rollback");
 
-    expect(tools).toHaveLength(11);
+    expect(tools).toHaveLength(13);
     expect(rollback).toBeDefined();
     expect(rollback!.inputSchema.required).toEqual(expect.arrayContaining(["taskId", "checkpointId"]));
     expect(rollback!.annotations).toEqual({

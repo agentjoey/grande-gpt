@@ -110,7 +110,7 @@ const READ_ONLY = [
 ] as const;
 
 describe("工具注解", () => {
-  it("恰好注册六个只读工具与五个写工具，且名字与规格一致", () => {
+  it("恰好注册六个只读工具与七个写工具，且名字与规格一致", () => {
     const names = buildTools(deps).map((t) => t.name).sort();
     expect(names.filter((n) => READ_ONLY.includes(n as typeof READ_ONLY[number]))).toEqual([...READ_ONLY].sort());
     expect(names).toContain("grande_repo_edit");
@@ -118,7 +118,11 @@ describe("工具注解", () => {
     expect(names).toContain("grande_run");
     expect(names).toContain("grande_task_open");
     expect(names).toContain("grande_task_close");
-    expect(names).toHaveLength(READ_ONLY.length + 5);
+    expect(names).toContain("grande_commit");
+    expect(names).toContain("grande_sync_base");
+    // 这个数字是【有意的不变量】：意外多注册一个工具必须让它变红。
+    // S2 把写工具从 5 个加到 7 个（commit、sync_base）。
+    expect(names).toHaveLength(READ_ONLY.length + 7);
   });
 
   it("六个只读工具全部 readOnlyHint: true", () => {
@@ -483,9 +487,13 @@ describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
     grande_run:         { readOnly: false, destructive: false },
     grande_run_result:  { readOnly: true,  destructive: false },
     grande_task_close:  { readOnly: false, destructive: true  },
+    // S2：本地开发闭环。两者都不是 destructive——commit 只往任务分支追加，
+    // sync_base 冲突时整体 merge --abort 回到操作前。真正不可逆的仍只有 task_close。
+    grande_commit:      { readOnly: false, destructive: false },
+    grande_sync_base:   { readOnly: false, destructive: false },
   };
 
-  it("十一个工具的注解与规格逐项一致", () => {
+  it("每个工具的注解与规格逐项一致，且工具总数与规格表严格相等", () => {
     const tools = buildTools(deps);
     expect(tools).toHaveLength(Object.keys(SPEC).length);
     for (const t of tools) {

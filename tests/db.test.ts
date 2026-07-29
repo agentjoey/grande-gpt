@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 describe("openDb()", () => {
-  it("建出三张表", () => {
+  it("建出核心状态表与 attestation 表", () => {
     const l = loadLayout();
     ensureLayout(l);
     const db = openDb(l);
@@ -38,6 +38,7 @@ describe("openDb()", () => {
     expect(names).toContain("task");
     expect(names).toContain("job");
     expect(names).toContain("audit");
+    expect(names).toContain("attestation");
     db.close();
   });
 
@@ -81,7 +82,7 @@ describe("openDb()", () => {
     const l = loadLayout();
     ensureLayout(l);
     const db = openDb(l);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(3);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
     db.close();
   });
 
@@ -99,12 +100,6 @@ describe("openDb()", () => {
   });
 
   it("schema 版本不匹配时 openDb 响亮拒绝，错误信息同时点出期望版本与磁盘上的实际版本", () => {
-    // 先用 openDb() 正常建一次库（user_version 落到当前 SCHEMA_VERSION=3），
-    // 再绕开 openDb、用一个裸连接把 user_version 强行改写成一个不匹配的值——
-    // 模拟「这个库文件是被别的版本的代码建出来的」，不需要真的去改一次 schema
-    // 定义就能复现这条防线。这同时也是「老库（无 oauth 表，或 oauth_refresh
-    // 还带着 D18 之前的 repoId 列）被新代码打开」这条真实场景的代理：老库的
-    // user_version 是 1 或 2，同样落在这条分支里响亮拒绝。
     const l = loadLayout();
     ensureLayout(l);
     openDb(l).close();
@@ -113,7 +108,7 @@ describe("openDb()", () => {
     raw.exec("PRAGMA user_version = 99");
     raw.close();
 
-    expect(() => openDb(l)).toThrow(/user_version=3/);
+    expect(() => openDb(l)).toThrow(/user_version=4/);
     expect(() => openDb(l)).toThrow(/user_version=99/);
   });
 

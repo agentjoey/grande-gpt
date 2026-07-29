@@ -96,8 +96,8 @@ describe("grande_task_open guidance", () => {
     expect(result.data).not.toHaveProperty("guidance");
   });
 
-  it("guidance.yaml 不存在时不报错、不带 guidance，也没有新增工具", async () => {
-    expect(buildTools(deps)).toHaveLength(11);
+  it("guidance.yaml 不存在时不报错、不带 guidance，也保留完整工具列表", async () => {
+    expect(buildTools(deps)).toHaveLength(13);
 
     const result = await openTask();
 
