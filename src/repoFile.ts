@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { basename, dirname } from "node:path";
+import type { AuditHandle } from "./audit.ts";
+import { createCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
 import { truncateText } from "./envelope.ts";
+import { loadLayout } from "./layout.ts";
 import { resolveInRepo } from "./paths.ts";
 import { assertWritable, assertWritableResolved, type DenyRules } from "./policy.ts";
-import type { AuditHandle } from "./audit.ts";
+import { moveToTrash } from "./trash.ts";
 
 export class EditError extends Error {
   readonly code: string;
@@ -122,9 +125,11 @@ export function repoRead(
 export type EditOp =
   | { op: "create"; path: string; content: string }
   | { op: "modify"; path: string; content: string; expectedSha256: string }
-  | { op: "move"; from: string; to: string };
+  | { op: "move"; from: string; to: string }
+  | { op: "delete"; path: string; expectedSha256: string };
 
 export interface EditResult {
+  checkpointId: string;
   applied: { op: string; path: string; sha256: string | null }[];
 }
 
@@ -134,12 +139,11 @@ function pathsOf(op: EditOp): string[] {
 }
 
 /**
- * 批量修改仓库文件。**不支持删除**（规格 §5.3）。
+ * 批量修改仓库文件。支持 create、modify、move 与可恢复的 delete。
  *
- * **先全量校验、再逐个落盘。** S0 没有事务性 patch（留 S1），所以落盘过程中
- * 出现 I/O 错误仍会留下改了一半的状态；但一个**非法**的 op 绝不会导致部分应用，
- * 因为所有校验都在第一次写之前完成。这两者的区别很重要：前者是已知缺口，
- * 后者会是缺陷。
+ * 先全量校验，再为本批涉及的路径建立 checkpoint，最后逐个落盘。写阶段任一步
+ * 抛错都会先尝试恢复 checkpoint，再把导致失败的原始错误重新抛出；回滚自己的
+ * 错误只记日志，不能掩盖调用方真正需要处理的那一个错误。
  */
 export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules, audit: AuditHandle): EditResult {
   if (ops.length === 0) throw new EditError("INVALID_INPUT", "ops 不能为空");
@@ -152,7 +156,7 @@ export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules,
     const resolved: { op: EditOp; abs: string; absTo?: string }[] = [];
 
     for (const op of ops) {
-      if (op.op !== "create" && op.op !== "modify" && op.op !== "move") {
+      if (op.op !== "create" && op.op !== "modify" && op.op !== "move" && op.op !== "delete") {
         throw new EditError("INVALID_INPUT", `不支持的 op：${JSON.stringify((op as { op: unknown }).op)}`);
       }
 
@@ -183,14 +187,14 @@ export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules,
           throw new EditError("FILE_EXISTS", `文件已存在：${op.path}。修改已有文件请用 modify。`);
         }
       } else {
-        if (!existsSync(abs)) throw new EditError("FILE_NOT_FOUND", `文件不存在：${op.path}`);
-        // I1：modify 分支此前完全没有二进制守卫，只靠 sha256 是否对得上——而
-        // sha256 校验的是 staleness，不是「这份内容能不能安全地当文本改写」。
-        // 按原始字节读、按原始字节判定是否二进制，两条都要在与 expectedSha256
-        // 比较**之前**做：即使调用方碰巧算出了一个匹配的哈希（例如拿 repoRead
-        // 返回的哈希——modify 这里也必须独立拒绝，不能信任上游已经拒过一次）。
+        if (!existsSync(abs) || !statSync(abs).isFile()) {
+          throw new EditError("FILE_NOT_FOUND", `文件不存在：${op.path}`);
+        }
+        if (typeof op.expectedSha256 !== "string" || op.expectedSha256.length === 0) {
+          throw new EditError("INVALID_INPUT", `${op.op} 必须提供 expectedSha256`);
+        }
         const rawExisting = readFileSync(abs);
-        if (isBinary(rawExisting)) {
+        if (op.op === "modify" && isBinary(rawExisting)) {
           throw new EditError(
             "INVALID_INPUT",
             `${op.path} 是二进制文件（含 NUL 字节，或不是合法 UTF-8）；S0 的读写工具只处理文本，` +
@@ -201,34 +205,62 @@ export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules,
         if (actual !== op.expectedSha256) {
           throw new EditError(
             "STALE_FILE",
-            `${op.path} 自上次读取后已改变。请重新 read 取得最新 sha256 后再改 —— ` +
-              `否则你会用旧内容覆盖掉中间的修改。`,
+            `${op.path} 自上次读取后已改变。请重新 read 取得最新 sha256 后再${op.op === "delete" ? "删除" : "改"} —— ` +
+              `否则你会基于旧内容覆盖或删除中间的修改。`,
           );
         }
       }
       resolved.push({ op, abs });
     }
 
-    // 推进审计句柄到 EXECUTING —— 必须在写盘之前成功
+    // 推进审计句柄到 EXECUTING —— 必须在 checkpoint 与写盘之前成功
     if (!audit.executing()) {
       throw new EditError("POLICY_DENIED", "审计句柄推进失败——Policy 未放行或已被他人使用。");
     }
 
-    // ── 阶段二：落盘 ──
+    const layout = loadLayout();
+    // grande_repo_edit 只接受 taskId，并总是把对应 task.worktreePath 作为 root；worktree
+    // 目录的最后一段就是 taskId。保留 repoEdit 的四参数公共形状，避免把布局依赖
+    // 扩散到所有既有调用点，同时由 createCheckpoint 内部再次 assertTaskId。
+    const taskId = basename(root);
+    const affectedPaths = resolved.flatMap((r) => pathsOf(r.op));
+    const checkpointId = createCheckpoint(layout, taskId, root, affectedPaths);
+
+    // ── 阶段二：落盘；失败时恢复本批 checkpoint ──
     const applied: EditResult["applied"] = [];
-    for (const r of resolved) {
-      if (r.op.op === "move") {
-        mkdirSync(dirname(r.absTo!), { recursive: true });
-        renameSync(r.abs, r.absTo!);
-        applied.push({ op: "move", path: r.op.to, sha256: null });
-      } else {
-        mkdirSync(dirname(r.abs), { recursive: true });
-        writeFileSync(r.abs, r.op.content, "utf8");
-        applied.push({ op: r.op.op, path: r.op.path, sha256: sha256Of(r.op.content) });
+    try {
+      for (const r of resolved) {
+        if (r.op.op === "move") {
+          mkdirSync(dirname(r.absTo!), { recursive: true });
+          renameSync(r.abs, r.absTo!);
+          applied.push({ op: "move", path: r.op.to, sha256: null });
+        } else if (r.op.op === "delete") {
+          moveToTrash(layout, taskId, root, r.op.path);
+          applied.push({ op: "delete", path: r.op.path, sha256: null });
+        } else {
+          mkdirSync(dirname(r.abs), { recursive: true });
+          writeFileSync(r.abs, r.op.content, "utf8");
+          applied.push({ op: r.op.op, path: r.op.path, sha256: sha256Of(r.op.content) });
+        }
       }
+    } catch (writeError) {
+      try {
+        restoreCheckpoint(layout, taskId, root, checkpointId);
+      } catch (rollbackError) {
+        try {
+          console.error(
+            `[repoEdit] checkpoint ${checkpointId} 回滚失败；保留并重新抛出原始写入错误：` +
+              `${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+          );
+        } catch {
+          // 日志通道本身也不能掩盖原始写入错误。
+        }
+      }
+      throw writeError;
     }
+
     audit.succeeded(resolved.map((r) => (r.op.op === "move" ? r.op.to : r.op.path)));
-    return { applied };
+    return { checkpointId, applied };
   } catch (e) {
     audit.failed(String(e instanceof Error ? e.message : e));
     throw e;
