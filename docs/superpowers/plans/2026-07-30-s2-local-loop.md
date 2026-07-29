@@ -75,9 +75,15 @@ export function commitWorktree(
 ### 硬性要求
 
 - **每一条 git 命令都带 `-c core.hooksPath=/dev/null`**，不只是 commit 那一条
-- **身份从控制平面读**（`~/.grande-control/config/` 下新增一个字段或文件，你定形状但
-  要写进注释）。用 `-c user.name=... -c user.email=...` 传，**绝不写进任何 `.git/config`**。
-  配置缺失 → **fail closed**，拒绝提交并说清要配什么。**不要猜默认值**
+- **身份从 `~/.grande-control/config/identity.yaml` 读**（Human Owner 已配好，形状固定）：
+  ```yaml
+  commit:
+    name: GrandeGPT
+    email: grande@ymmn
+  ```
+  用 `-c user.name=... -c user.email=...` 传，**绝不写进任何 `.git/config`**——
+  那会污染用户自己的仓库配置。文件缺失或字段为空 → **fail closed**，拒绝提交并说清
+  要配什么。**不要猜默认值，也不要回退到宿主的 git 全局配置**
 - **不接受路径参数**，提交范围就是整个 worktree 的改动（铁律二：部分暂存是逃生舱入口）
 - 无改动 → 明确报错，不产生空提交
 - **message 尾注**：在模型给的正文后追加
@@ -235,6 +241,9 @@ grande_sync_base { taskId }
 ### 要实现的
 
 `.grande/policy.yaml` 增加 `requireGreenBeforeCommit: [<profile 名>]`。
+
+**全局默认【关】**（Human Owner 已定）：全局配置里不设该键，按 repo 自己开。
+「只能收紧」语义让这个默认是安全的——repo 只能把它加上，不能把别人加的去掉。
 `grande_commit` 执行前检查：列出的每个 profile 在**当前工作区状态**上都有一条通过的
 attestation。没有 → `POLICY_DENIED`，说清缺哪个。
 

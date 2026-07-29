@@ -284,11 +284,21 @@ attestation。没有 → `POLICY_DENIED`，消息里说清缺哪个 profile。
 
 ---
 
-## 7. 给 Human Owner 的问题
+## 7. Human Owner 已确认的决定（2026-07-30）
 
-1. **提交身份用什么？** §2.2 要求从控制平面读且 fail closed。需要你定 name/email。
-   建议形如 `GrandeGPT <grande@localhost>`——一眼可辨是机器提交，且不冒充你。
-2. **`requireGreenBeforeCommit` 默认开还是关？** 我建议**全局默认关、按 repo 开**，
-   因为它会让「先提交一个 WIP 再跑测试」这种正常做法失效。但你可能更想要它默认开。
-3. **S2 之后是否仍不 push？** 规格 §2.3 的永久非目标是「直接 push 受保护分支」，
-   push 到任务分支属 S3。本切片按「完全不 push」写。
+| # | 决定 | 落地 |
+|---|---|---|
+| 1 | **提交身份** `GrandeGPT <grande@ymmn>` | 已写入 `~/.grande-control/config/identity.yaml`，实现者直接读，不必自己定形状 |
+| 2 | **`requireGreenBeforeCommit` 全局默认关、按 repo 开** | 全局配置里不设该键；repo 的 `.grande/policy.yaml` 想开就自己加。「只能收紧」语义使这个默认是安全的——repo 只能把它加上，不能把别人加的去掉 |
+| 3 | **本切片完全不 push** | push 属 S3。不要实现任何触网的 git 操作 |
+
+`identity.yaml` 的形状（已存在，照此读）：
+
+```yaml
+commit:
+  name: GrandeGPT
+  email: grande@ymmn
+```
+
+**这些值只经 `git -c user.name=... -c user.email=...` 传给单次调用，绝不写进任何
+`.git/config`**——那会污染用户自己的仓库配置。文件缺失或字段为空 → fail closed。
