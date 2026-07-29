@@ -1,7 +1,7 @@
 # GrandeGPT — 项目说明
 
 让用户在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行平台。
-**S0 与 S0.5 均已完成并在真实 ChatGPT 上跑通，已投入使用**（详见下方「当前状态」）。
+**S0 / S0.5 / S1 / S1.5 均已完成。S1 是第一个由 ChatGPT 经 GrandeGPT 自身实现的切片**（详见下方「当前状态」）。
 
 权威文档：[`docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md)
 
@@ -27,15 +27,17 @@
 | D16 | **S0 接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | D13/D15 已作废：OpenAI Secure MCP Tunnel 需要 Platform API key（另一套计费），与「用 chat 额度」的初衷冲突 |
 | D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp`（D18 之后；`/mcp/<repoId>` 保留为兼容别名） | 已实测跑通 |
 
-## 当前状态：S0 + S0.5 全部完成，在真实 ChatGPT 上跑通并已投入使用
+## 当前状态：S0 + S0.5 + S1 + S1.5 全部完成；S1 由 ChatGPT 自举实现
 
-**S0-A/B/C/D 与 S0.5 均已合并到 `main`，整分支审查已跑完。**
-512 测试通过，typecheck 干净。25 个 src 模块 / 5,586 行，测试 6,408 行。
+**S0-A/B/C/D、S0.5、S1、S1.5 均已合并到 `main`。** 555 测试通过，typecheck 干净。
+
+**S1 是第一个由 ChatGPT 经 GrandeGPT 自身完成的切片**——9 个任务、17 个文件、外加 review 后一轮修复。记录见
+[`docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md`](docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md)。
 **GrandeGPT 可以给任意已注册 repo 用了。**
 
 ### 已实现的能力
 
-**十个 MCP 工具**（`src/tools.ts`；仓库始终由 `taskId` 单向推导，D18）：
+**十一个 MCP 工具**（`src/tools.ts`；仓库始终由 `taskId` 单向推导，D18）：
 
 | 工具 | 类型 | 作用 |
 |---|---|---|
@@ -46,9 +48,10 @@
 | `grande_diff` | 只读 | worktree vs base，按文件分页 |
 | `grande_run_result` | 只读 | 轮询 job + 摘要日志 |
 | `grande_task_open` | 写 | 建分支与 worktree（**唯一**由模型显式指定 `repoId` 之处），克隆 `depDirs` |
-| `grande_repo_edit` | 写 | 一次调用改多文件：create / modify（`expectedSha256` 防冲突）/ move |
+| `grande_repo_edit` | 写 | 一次调用改多文件：create / modify / move / **delete**（S1；后两者需 `expectedSha256`）。**事务性**：任一步失败自动回滚整批，成功返回 `checkpointId` |
 | `grande_run` | 写 | 在 Seatbelt 沙箱里跑白名单 profile，立即返回 `jobId` |
 | `grande_task_close` | **破坏性** | 删 worktree 与分支回收磁盘（**全表唯一** `destructiveHint: true`，ChatGPT 会弹确认框） |
+| `grande_rollback` | 写 | 把 worktree 回滚到某个 checkpoint（S1；被覆盖的内容进 Trash，故 `destructiveHint: false`） |
 
 **五个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`。
 `gc` 默认 dry-run，`--apply` 才执行。
@@ -108,7 +111,10 @@
 |---|---|---|
 | 1 | `task_close` 的守卫写 `j.state === "running"` 而非用 `jobs.ts` 的 `TERMINAL` 集合 | 今天行为等价（`JobState` 6 值、`TERMINAL` 占 5），将来加状态会漏。**同源漏改**形状 |
 | 2 | GC 方向 A 只认「完全没有 task 行」。`CLOSED` 但目录残留（`removeWorktree` 在 `branch -D` 抛错）两个方向都看不见 | 由 w1 在 s05-3 报告里主动提出，规格合规，候选第三种情形 |
-| 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | S1 观察项，**单次样本**，不足以定性 |
+| 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | 观察项，**单次样本**，不足以定性 |
+| 6 | `repoEdit` 里 `const taskId = basename(root)` | 引入「`root` 最后一段必须是合法 taskId」这个**签名上看不见的前置条件**。安全上无洞（`root` 来自库里的 `task.worktreePath`，且 `createCheckpoint`/`moveToTrash` 都会再 `assertTaskId`），但脆。应改为显式传 `taskId` |
+| 7 | `repoEdit` 里调 `loadLayout()` | 原本只依赖入参的函数现在读全局配置，测试与复用都变难 |
+| 8 | 历史 S0 文档仍写着 `repo_edit` 不支持 delete | 已被 S1 规格取代；实现者主动标注过，未做全仓历史文档改写 |
 | 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
 
