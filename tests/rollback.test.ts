@@ -205,7 +205,6 @@ describe("grande_rollback", () => {
     const tools = buildTools(deps);
     const rollback = tools.find((tool) => tool.name === "grande_rollback");
 
-    expect(tools).toHaveLength(13);
     expect(rollback).toBeDefined();
     expect(rollback!.inputSchema.required).toEqual(expect.arrayContaining(["taskId", "checkpointId"]));
     expect(rollback!.annotations).toEqual({

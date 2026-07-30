@@ -110,7 +110,7 @@ const READ_ONLY = [
 ] as const;
 
 describe("工具注解", () => {
-  it("恰好注册六个只读工具与七个写工具，且名字与规格一致", () => {
+  it("恰好注册六个只读工具与九个写工具，且名字与规格一致", () => {
     const names = buildTools(deps).map((t) => t.name).sort();
     expect(names.filter((n) => READ_ONLY.includes(n as typeof READ_ONLY[number]))).toEqual([...READ_ONLY].sort());
     expect(names).toContain("grande_repo_edit");
@@ -122,7 +122,11 @@ describe("工具注解", () => {
     expect(names).toContain("grande_sync_base");
     // 这个数字是【有意的不变量】：意外多注册一个工具必须让它变红。
     // S2 把写工具从 5 个加到 7 个（commit、sync_base）。
-    expect(names).toHaveLength(READ_ONLY.length + 7);
+    expect(names).toContain("grande_push");
+    expect(names).toContain("grande_pr_open");
+    // 这个数字是【有意的不变量】：意外多注册一个工具必须让它变红。
+    // S3 把写工具从 7 加到 9（push、pr_open）。
+    expect(names).toHaveLength(READ_ONLY.length + 9);
   });
 
   it("六个只读工具全部 readOnlyHint: true", () => {
@@ -148,10 +152,19 @@ describe("工具注解", () => {
     expect(tc!.annotations.destructiveHint, "grande_task_close destructiveHint").toBe(true);
   });
 
-  it("所有工具 openWorldHint: false（S0 全禁网）", () => {
+  it("只有 grande_push / grande_pr_open 是 openWorldHint: true，其余全部 false", () => {
+    // S0–S2 时这条断言是「所有工具 openWorldHint: false（全禁网）」。S3 有意打破它——
+    // push 与 pr_open 确实触网。但**不能把断言删掉或放松成「至少有一个 false」**：
+    // 那样就失去了「新工具不会悄悄变成触网的」这道保护。改成精确的两者名单。
+    const OPEN_WORLD = ["grande_push", "grande_pr_open"];
     const tools = buildTools(deps);
     expect(tools.length).toBeGreaterThan(0);
-    for (const t of tools) expect(t.annotations.openWorldHint).toBe(false);
+    for (const t of tools) {
+      expect(t.annotations.openWorldHint, `${t.name}.openWorldHint`)
+        .toBe(OPEN_WORLD.includes(t.name));
+    }
+    // 名单里的两个必须真的存在——否则这条断言会因为「一个都没匹配上」而空转
+    for (const n of OPEN_WORLD) expect(tools.map((t) => t.name)).toContain(n);
   });
 
   it("grande_run 的 schema 描述里带着至少一个已注册的 profile 名字（BUG 4：此前模型只能猜，" +
@@ -475,7 +488,7 @@ describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
    * 档下全部被客户端拦掉——ChatGPT 只说「被禁用」，服务端日志里连请求都看不到，
    * 审计账本零记录。整整两轮真实测试才定位到。
    */
-  const SPEC: Record<string, { readOnly: boolean; destructive: boolean }> = {
+  const SPEC: Record<string, { readOnly: boolean; destructive: boolean; openWorld?: true }> = {
     grande_task_open:   { readOnly: false, destructive: false },
     grande_task_status: { readOnly: true,  destructive: false },
     grande_repo_map:    { readOnly: true,  destructive: false },
@@ -491,6 +504,10 @@ describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
     // sync_base 冲突时整体 merge --abort 回到操作前。真正不可逆的仍只有 task_close。
     grande_commit:      { readOnly: false, destructive: false },
     grande_sync_base:   { readOnly: false, destructive: false },
+    // S3：两个触网工具。destructive 仍为 false——push 只追加任务分支，
+    // pr_open 只开 draft PR，两者都不覆盖也不删除任何东西。
+    grande_push:        { readOnly: false, destructive: false, openWorld: true },
+    grande_pr_open:     { readOnly: false, destructive: false, openWorld: true },
   };
 
   it("每个工具的注解与规格逐项一致，且工具总数与规格表严格相等", () => {
@@ -501,7 +518,9 @@ describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
       expect(want, `${t.name} 不在规格表里`).toBeDefined();
       expect(t.annotations.readOnlyHint, `${t.name}.readOnlyHint`).toBe(want!.readOnly);
       expect(t.annotations.destructiveHint, `${t.name}.destructiveHint`).toBe(want!.destructive);
-      expect(t.annotations.openWorldHint, `${t.name}.openWorldHint（S0 全禁网）`).toBe(false);
+      // 不再硬编码 false：S3 之后触网不再是「不可能」，而是「必须在 SPEC 表里显式声明」。
+      // 新工具默认 openWorld 未声明 → 期望 false，所以悄悄加一个触网工具仍会变红。
+      expect(t.annotations.openWorldHint, `${t.name}.openWorldHint`).toBe(want!.openWorld === true);
     }
   });
 

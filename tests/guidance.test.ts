@@ -97,7 +97,9 @@ describe("grande_task_open guidance", () => {
   });
 
   it("guidance.yaml 不存在时不报错、不带 guidance，也保留完整工具列表", async () => {
-    expect(buildTools(deps)).toHaveLength(13);
+    const names = buildTools(deps).map((tool) => tool.name);
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toEqual(expect.arrayContaining(["grande_task_open", "grande_commit", "grande_sync_base"]));
 
     const result = await openTask();
 
