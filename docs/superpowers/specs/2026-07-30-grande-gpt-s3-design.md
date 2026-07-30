@@ -177,7 +177,7 @@ grande_push { taskId }
 
 黑名单要求预先枚举「所有不该碰的东西」——那是一份永远不可能完整的清单。
 白名单只要枚举「唯一该碰的东西」，而那个精确已知：任务分支只在
-`src/worktree.ts` 的 `const branch = \`grande/${slug}-${suffix}\`` 一处产生，
+`src/worktree.ts` 的 `const branch = "grande/<slug>-<suffix>"` 一处产生，
 永远带 `grande/` 前缀。
 
 **第③条是纵深防御**：假如哪天默认分支被改名成 `grande/main`（离谱但不违法），
