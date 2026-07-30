@@ -51,37 +51,93 @@ git push origin <branch>          ← 实测可用，不触网
 | ① | 凭据存取：GitHub token 从控制平面读，永不落盘到工作区 |
 | ② | `grande_push` —— 把任务分支推到 remote |
 | ③ | `grande_pr_open` —— 开一个 **Draft** PR |
-| ④ | `grande_ci_status` —— 查该 PR 的 CI 结论 |
 
-**不做**：合并 PR（那是人的决定）；review 评论的读写；issue 操作；任何对 `main`
-或受保护分支的直接写入。
+**不做**：
+- **CI 状态查询** —— 实测确认：`urbanbricks` 与 `grande-gpt` **都没有 `.github/`
+  目录，没有任何 CI**。规格 §10 把 CI 列进 S3，但那是在任何仓库接入之前写的。
+  给不存在的东西做接口，还要靠猜 PAT 权限项，两头都不划算。
+  **等你真的给某个 repo 加了 Actions 再做**——那时建 PAT 时能在 UI 里看到实际选项，
+  且能确定该读 check runs 还是 workflow runs（取决于用什么 CI）。加一个只读工具是小活。
+- 合并 PR（那是人的决定）；review 评论；issue 操作；任何对 `main` 或受保护分支的直接写入。
 
 ---
 
-## 2. 凭据：GitHub App 还是 PAT
+## 2. 凭据：第一个决定是「专用凭据 vs 宿主凭据」
 
-**建议用 fine-grained PAT，不用 GitHub App。理由如下，请 Human Owner 确认。**
+**它现在就已经能连 GitHub 了——这恰恰是问题。** 实测（2026-07-30）：
 
-| | GitHub App | fine-grained PAT |
+```
+git ls-remote origin HEAD   → 成功，零显式凭据
+```
+
+因为本机有两套现成认证：`credential.helper = store`（token **明文**在
+`~/.git-credentials`）+ `gh` 已登录（`gho_` token 在 keyring）。
+
+**所以 `grande_push` 什么都不做就能跑通，而那意味着模型继承你的全部 GitHub 权限：**
+
+| | 用宿主现成凭据 | 专用 PAT |
 |---|---|---|
-| 权限粒度 | 更细，可按仓库授权 | 也可按仓库授权 |
-| 实现成本 | 需要 JWT 签名 + installation token 交换，**规格 §138 已经为它预留了 `secrets/` 目录** | 一个字符串 |
-| 令牌轮换 | 自动（1 小时） | 手动 |
-| **单用户场景的实际收益** | **接近零**——App 的价值在于「代表多个安装方行事」，而 D2 明确单用户 | — |
+| 能碰哪些仓库 | **你能碰的全部** | 只有你授权的那几个 |
+| GitHub 审计日志里是谁 | **是你** | 是 GrandeGPT 的 token |
+| 要撤销时 | 撤了你自己也用不了 | 单独吊销，不影响你 |
+| 别的代码路径误触 | 能拿到（在 ambient 环境里） | 拿不到 |
 
-规格 §10 的原话是「GitHub App」，但那是在 D2（单用户）之前的通用写法。
-**在单用户前提下 App 的复杂度换不来对应的安全收益**，而 PAT 的过期风险可以用
-「fail closed + 明确的过期错误码」覆盖。
+这与铁律三同源：「模型不该 push 到别的仓库」如果只靠它自觉就是**软约束**；
+换成一个只授权了那几个仓库的 PAT，它**做不到**。
 
-**如果 Human Owner 坚持 App，本切片人日要往上调**（JWT 签名、installation token
-缓存与刷新、时钟偏移处理），且实现者无法测试真实交换流程。
+**因此：必须显式传专用凭据，并主动阻断 ambient 凭据。**
+`grande_push` 要用 `-c credential.helper=` （**空值，清掉继承来的 helper**）
+再显式给自己的凭据。**这一条要有测试**：断言 git 调用里出现了清空 helper 的参数。
 
-### 2.1 凭据的存放与使用（无论哪种）
+### 2.0 PAT 权限清单（fine-grained）
+
+**Repository access：只勾那几个已注册仓库，绝不选 "All repositories"。**
+这是第一道也是最有效的一道。
+
+| 权限 | 级别 | 用途 |
+|---|---|---|
+| **Metadata** | Read | 强制项，其余权限的前置 |
+| **Contents** | Read and write | `git push` |
+| **Pull requests** | Read and write | 开 Draft PR；查「是否已存在」做幂等 |
+
+**只要这三项。** CI 相关的权限本切片不需要（见 §1「不做」）。
+
+**明确不给的**，每条都有理由：
+
+| 不给 | 后果 |
+|---|---|
+| **Workflows** | **见 §2.0.1——不给它反而是本切片最有价值的一条** |
+| Actions | 给了就能触发/取消 workflow |
+| Administration | 能改仓库设置与分支保护规则——正是我们的边界所依赖的东西 |
+| Secrets / Variables / Environments | 能读写 CI 密钥 |
+| Webhooks | 能改事件投递 |
+
+#### 2.0.1 不给 `Workflows`：把软约束换成硬约束
+
+**没有这个权限，GitHub 服务端会拒掉任何修改 `.github/workflows/**` 的 push。**
+
+我们本来打算用 S1.5 的 `readOnlyPaths` 挡 workflow 文件——但那是**我们的代码**在挡，
+代码可能有 bug、可能被绕过。**GitHub 在服务端拒绝，我们的代码有没有 bug 都一样。**
+
+两层叠加，各有各的价值：
+- 我们的 policy 挡在 `repo_edit`（**早**，错误消息清楚，模型能自己改正）
+- GitHub 挡在 push（**晚**，但**不可绕**）
+
+⚠️ 这一条**只能在真实 GitHub 上验证**，实现者用本地 bare 测不出来。
+由 Human Owner 手工验一次：故意改一个 workflow 文件，确认 push 被 GitHub 拒。
+
+### 2.0.2 PAT 会过期
+
+fine-grained PAT 最长 1 年。过期后 push 失败，**必须映射成一个明确的错误码**
+（不是笼统的「push 失败」），消息里说清「PAT 已过期，去控制平面换一个」。
+fail closed 且可诊断。
+
+### 2.1 凭据的存放与使用
 
 - 位置：`~/.grande-control/secrets/github-token`，**权限 0600**
 - **绝不写进 `.git/config`**（那会落到仓库里）、**绝不进 job 环境变量**、
   **绝不出现在任何日志或错误消息里**
-- 用 `-c http.extraHeader=...` 或 `credential.helper` 的临时形式传给单次 git 调用
+- 用 `-c http.extraHeader=...` 的临时形式传给单次 git 调用，**并同时 `-c credential.helper=` 清掉继承来的 helper**（见 §2 开头）
 - **文件缺失 → fail closed**，拒绝并说明要配什么
 - **错误消息必须脱敏**：GitHub 的 401/403 响应体可能回显 token 前缀，
   转发给模型之前要过一遍脱敏
@@ -155,25 +211,11 @@ Grande-Commit: <被推送的 sha>
 
 ---
 
-## 5. `grande_ci_status`
-
-```
-grande_ci_status { taskId }
-注解 { readOnlyHint: true, destructiveHint: false, openWorldHint: true }
-```
-
-只读，但触网，所以 `openWorldHint: true`。
-
-返回该 PR head sha 上的 check runs 汇总：`{ state, checks: [{ name, conclusion }] }`。
-**不做轮询**——模型自己会轮询（P-1 已实测），工具只管返回当下状态。
-
----
-
-## 6. 验收标准
+## 5. 验收标准
 
 **所有 push/PR 测试都用本地 bare 仓库，不触真实网络。**
 
-### 6.1 凭据
+### 5.1 凭据
 
 | # | 断言 |
 |---|---|
@@ -181,7 +223,7 @@ grande_ci_status { taskId }
 | AC-S3-2 | **token 绝不出现在**：`.git/config`、job 环境变量、任何日志行、任何返回给调用方的错误消息 |
 | AC-S3-3 | 构造一个回显 token 的上游错误响应 → 最终消息**不含该 token 的任何片段** |
 
-### 6.2 push
+### 5.2 push
 
 | # | 断言 |
 |---|---|
@@ -189,23 +231,24 @@ grande_ci_status { taskId }
 | AC-S3-5 | 目标是默认分支或受保护模式 → **拒绝，且 bare 仓库无任何变化** |
 | AC-S3-6 | 无 commit 的任务 → 拒绝，说明先 commit |
 | AC-S3-7 | 没有 remote → 拒绝并说清 |
-| AC-S3-8 | **`pre-push` hook 不执行**（形状同 S2 的 AC-S2-1：hook 写标记文件，断言文件不存在）。⚠️ 这条与 AC-S2-1 一样**在沙箱内是假阴性**，见 §7 |
+| AC-S3-8 | **`pre-push` hook 不执行**（形状同 S2 的 AC-S2-1：hook 写标记文件，断言文件不存在）。⚠️ 这条与 AC-S2-1 一样**在沙箱内是假阴性**，见 §6 |
 
-### 6.3 PR / CI
+### 5.3 PR 与工具注解
 
 | # | 断言 |
 |---|---|
 | AC-S3-9 | PR 恒为 draft |
 | AC-S3-10 | body 里模型伪造的 `Grande-Attestation:` 被剥掉，最终只出现一次且值由服务端决定 |
 | AC-S3-11 | 同一 taskId 重复调用不创建第二个 PR |
-| AC-S3-12 | 三个新工具的 `openWorldHint` 都是 `true`；此前 13 个工具仍全部 `false` |
+| AC-S3-12 | **两个**新工具的 `openWorldHint` 都是 `true`；此前 13 个工具仍全部 `false` |
+| AC-S3-13 | git 调用里出现清空 ambient credential helper 的参数——**不继承宿主凭据** |
 
-### 6.4 四类探针
+### 5.4 四类探针
 
 **P-A 接线** · **P-B 反向测试** · **P-C 同源漏改**（每一条 git 调用是否都带
 `-c core.hooksPath=/dev/null`？每一处凭据使用是否都脱敏？）· **P-D 安全边界**
 
-### 6.5 Load-bearing（必做三条）
+### 5.5 Load-bearing（必做三条）
 
 | # | 改坏什么 | 应该红的 |
 |---|---|---|
@@ -215,7 +258,7 @@ grande_ci_status { taskId }
 
 ---
 
-## 7. ⚠️ 已知：AC-S3-8 在沙箱内无法证明
+## 6. ⚠️ 已知：AC-S3-8 在沙箱内无法证明
 
 **与 S2 的 AC-S2-1 完全同源。** 沙箱的 `process-exec` 白名单会让 worktree 里的
 hook 静默不执行（`execvp() failed: Operation not permitted`），所以这条 load-bearing
@@ -228,11 +271,13 @@ Human Owner 会在沙箱外补。（S2 那轮实现者在此停机是对的—�
 
 ---
 
-## 8. 给 Human Owner 的问题
+## 7. Human Owner 已确认（2026-07-30）
 
-1. **PAT 还是 GitHub App？** §2 建议 PAT，理由是单用户场景下 App 的复杂度换不来
-   对应收益。你如果坚持 App，请说明，我调整人日估算并重写 §2。
-2. **受保护分支模式清单从哪来？** 建议控制平面配一个 `protectedBranches: [main, master, release/*]`，
-   fail closed（配置缺失就拒绝所有 push）。
-3. **`grande-gpt` 要不要建 remote？** 目前没有。不建的话本切片只能对本地 bare 测试，
-   真实连通性由你手工验一次。
+| # | 决定 |
+|---|---|
+| 1 | **用专用 fine-grained PAT**，三项权限（Metadata:R / Contents:RW / Pull requests:RW），只授权已注册仓库。放 `~/.grande-control/secrets/github-token`，`chmod 600` |
+| 2 | **不做 CI 状态查询** —— 两个已注册仓库都没有任何 CI（实测确认） |
+| 3 | **`grande-gpt` 建 remote 与本切片无关**，已从问题清单移除。备份是独立议题——且真正不可重建的是控制平面（审计账本 146 行、checkpoints），不是代码 |
+
+**仍需确认**：受保护分支模式清单。建议控制平面配
+`protectedBranches: [main, master, release/*]`，**fail closed**（配置缺失就拒绝所有 push）。
