@@ -9,7 +9,7 @@ import {
   getAttestations,
   recordRunVerificationContext,
 } from "../src/attestation.ts";
-import { openDb } from "../src/db.ts";
+import { openDb, SCHEMA_VERSION } from "../src/db.ts";
 import { finishJob, createJob } from "../src/jobs.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createTask } from "../src/tasks.ts";
@@ -144,9 +144,9 @@ describe("Verification Attestation", () => {
     expect(toolchain.lockfileSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("schema 版本升到 4，旧 user_version=3 的库被版本门禁拒绝", () => {
+  it("schema 版本门禁：旧版本的库被响亮拒绝，不静默当作可用", () => {
     const disk = new DatabaseSync(layout.stateDb);
-    expect((disk.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
+    expect((disk.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
     disk.close();
 
     deps.db.close();
@@ -154,9 +154,11 @@ describe("Verification Attestation", () => {
     rmSync(`${layout.stateDb}-wal`, { force: true });
     rmSync(`${layout.stateDb}-shm`, { force: true });
     const old = new DatabaseSync(layout.stateDb);
-    old.exec("CREATE TABLE task (taskId TEXT PRIMARY KEY); PRAGMA user_version = 3;");
+    old.exec(`CREATE TABLE task (taskId TEXT PRIMARY KEY); PRAGMA user_version = ${SCHEMA_VERSION - 1};`);
     old.close();
-    expect(() => openDb(layout)).toThrow(/期望 user_version=4.*user_version=3/);
+    expect(() => openDb(layout)).toThrow(
+      new RegExp(`期望 user_version=${SCHEMA_VERSION}.*user_version=${SCHEMA_VERSION - 1}`),
+    );
     deps = { ...deps, db: new DatabaseSync(":memory:") };
   });
 });

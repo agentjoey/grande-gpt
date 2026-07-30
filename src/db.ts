@@ -13,8 +13,15 @@ import type { Layout } from "./layout.ts";
  * `2 → 3`：D18 单一端点，删除 `oauth_refresh.repoId`。
  * `3 → 4`：S2 Verification Attestation。job 增加 run 启动时的工作区摘要与本机
  * 工具链字段，并新增 attestation 表，把通过的 job 绑定到随后产生的 commit sha。
+ * `4 → 5`：token epoch。新增 `oauth_epoch` 单行表，让「吊销」能真的切断在途的
+ * 无状态 access token（此前只能等 8 小时过期）。见 `src/tokenEpoch.ts`。
+ * ⚠️ 升级到 5 之后**所有已签发的 access token 立即失效**（缺 epoch claim 一律拒绝），
+ * 客户端需要重新授权一次——这是有意的，见 tokenEpoch.ts 里的取舍说明。
+ *
+ * 导出是为了让测试断言跟着它走。**不要在测试里写死版本号**——那只会让每次升版
+ * 多一道手改杂活，而真正的门禁是运行时那道（版本不符直接拒绝打开，线上表现为 502）。
  */
-const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /** 打开状态库并保证 schema 就位；已有库版本必须与当前代码完全一致。 */
 export function openDb(layout: Layout): DatabaseSync {
@@ -117,6 +124,13 @@ export function openDb(layout: Layout): DatabaseSync {
       parent    TEXT,
       valid     INTEGER NOT NULL,
       createdAt INTEGER NOT NULL
+    );
+
+    -- 单行表（k 恒为 'access'）。递增 v = 所有在途 access token 当场失效。
+    -- 见 src/tokenEpoch.ts；用户面是 grande revoke --yes。
+    CREATE TABLE IF NOT EXISTS oauth_epoch (
+      k TEXT PRIMARY KEY,
+      v INTEGER NOT NULL
     );
   `);
 

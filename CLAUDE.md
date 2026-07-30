@@ -29,7 +29,7 @@
 
 ## 当前状态：S0 → S3 全部完成；S1 / S1.5 / S2 / S3 由 ChatGPT 自举实现
 
-**S0-A/B/C/D、S0.5、S1、S1.5、S2、S3 均已合并到 `main`。** 614 测试通过，typecheck 干净。
+**S0-A/B/C/D、S0.5、S1、S1.5、S2、S3 均已合并到 `main`。** 622 测试通过，typecheck 干净。
 
 ⚠️ **S3 的宿主验收（2026-07-30）查出 `grande_push` 从未真正推成功过一次**——
 `http.extraHeader` 用了 `Bearer`，而 GitHub 的 git 端点只接受 `Basic`
@@ -66,8 +66,12 @@
 `tests/tools.test.ts` 里有一条精确名单断言（不是「全 false」也不是「至少一个 false」），
 新增任何触网工具都必须在 `SPEC` 表里显式声明 `openWorld: true`，否则变红。
 
-**六个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`、`outer-test`。
-`gc` 与 `outer-test` 默认只列出，加 `--apply` / `--run` 才执行。
+**七个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`、`outer-test`、`revoke`。
+`gc` / `outer-test` / `revoke` 默认只列出或预演，加 `--apply` / `--run` / `--yes` 才执行。
+
+**`grande revoke --yes` 是唯一的紧急切断手段**——递增 token epoch，所有在途 access token
+当场失效。在它之前，同样的效果需要三步手工操作（停网关 → 删签名密钥 → 手改 SQLite），
+而且很容易只做前两步，那样客户端拿 refresh token 一换就自动恢复了。见 `src/tokenEpoch.ts`。
 
 ⚠️ **合并任何自举产出之前必须跑 `grande outer-test --run`**（在沙箱外）。
 它跑的是 `unit-selfhost` 排除掉的 5 个文件——那些文件保护的不变量在自举期间完全失效，
@@ -138,6 +142,7 @@
 | ~~11~~ | ~~**`unit-selfhost` 排除的 5 个文件，其不变量在自举时完全失去保护**~~ **已加 `grande outer-test`（2026-07-30）** | S2 实测撞上：工具计数从 11 变 13，`tools.test.ts` 的计数不变量红了而实现者看不见。这次后果轻，下次可能是安全断言。**建议加一个 `grande outer-test` CLI 子命令**，让「该跑外层了」有机制提醒，而不是靠人记得 |
 | ~~12~~ | ~~**`readOnlyPaths` 一条规则都没配**，实测 `grande_repo_edit` 能写 `.github/workflows/**`~~ **已配（2026-07-30）** | 全局规则写在 `~/.grande-control/config/deny.yaml` 的 `readOnlyPaths`（该文件此前只有 `prefixes`）。判定原则：**内容会在沙箱之外被执行或被信任的路径一律只读**。12 条双向探针实测（8 拒 + 4 放行无误伤）。存档副本 [`docs/reference/control-plane-config/deny.yaml`](docs/reference/control-plane-config/deny.yaml)。⚠️ 有意保留的缺口：`package.json` 的 `postinstall`/`prepare` 同样在沙箱外执行，但设成只读会让绝大多数正常任务做不了 |
 | 13 | **schema 校验失败折叠成 `INTERNAL`。** 把 `ops` 写成 `edits` 得到的是「Gateway 内部错误。详情见服务端日志。」 | **模型看不到服务端日志，撞上这个错完全无从下手。** 应返回 `INVALID_INPUT` 并点名字段 |
+| 14 | **没有「连 refresh token 一起吊销」的命令。** `grande revoke` 只切 access token；refresh 仍能换新的 | 单用户下影响有限（refresh 也在你自己机器上），但「彻底断开」目前仍要手改 `oauth_refresh`。`revoke` 的输出已明说这一点，不假装断干净了 |
 | 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
 
@@ -190,6 +195,26 @@ POST http://127.0.0.1:8787/mcp  {"jsonrpc":"2.0","id":1,"method":"tools/list"}
 |---|---|
 | 1 | **`tools/list` 没有进日志。** 现在只有 `POST /mcp → 200`，看不出客户端取过几次工具表、拿走了什么。这次全靠自签 token 手查才拿到服务端视角 |
 | 2 | **没有「客户端视角」的自检手段。** 目前唯一办法是让模型自己报它看得见什么——这不该是排查时才临时想起来的招 |
+
+### Token epoch：让「吊销」名副其实（2026-07-30，schema v5）
+
+`verifyBearer` 原先**一次库都不查**——只验签名/issuer/aud/过期。access token 是 8 小时
+无状态 JWT，而 `assertApproved`（Cloudflare Access）**只挂在 `/authorize`**，`/mcp` 只有
+bearer 一道。后果：一枚泄漏的 token 能从公网调用全部 15 个工具、最长 8 小时，
+**而当时没有任何 revoke 能力**（`吊销` 只出现在 refresh 链的复用检测里，
+且吊销 refresh 完全不影响已发出的 access token）。
+
+现在签发时写入 `epoch` claim，`verifyBearer` 每次与库里的当前值比对。
+**每请求一次 SQLite 读，不缓存**——缓存多久 revoke 就迟多久生效，那正是本特性要消灭的。
+
+三个有意的取舍：
+- **全局，不分 client**（D2 单用户，今天只有一个 client）
+- **claim 缺失一律拒绝**，不当作「老 token 放行吧」——上线前签发的恰恰是最该切断的一批
+- **refresh token 不受影响**，它们仍能换出新 access token。`revoke` 的预演输出明写了这点，
+  否则会让人以为一条命令就断干净了。要连 refresh 一起断目前仍需手工（见遗留表）
+
+⚠️ 跨进程可见性是这个特性成立的前提（网关长跑，`revoke` 是另一个进程），
+已实测：WAL 下独立进程写入后，网关同一个连接**下一次读立即**看到新值。
 
 ### 全局写入门禁：只读路径（2026-07-30 首次实际配置）
 

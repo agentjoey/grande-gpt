@@ -11,6 +11,7 @@ import { discoverRepos, loadRegistry } from "./registry.ts";
 import { applyGc, planGc } from "./worktreeGc.ts";
 import { spawnSync } from "node:child_process";
 import { planOuterTest } from "./outerTest.ts";
+import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
 
 const USAGE = `grande —— GrandeGPT 控制平面运维工具
 
@@ -20,8 +21,9 @@ const USAGE = `grande —— GrandeGPT 控制平面运维工具
   grande doctor                 环境自检
   grande gc [--apply]           worktree 与 task 对账（默认 dry-run）
   grande outer-test [--run]     跑自举时跑不了的那些测试（默认只列出）
+  grande revoke [--yes]         吊销：所有在途 access token 当场失效（默认只预演）
 
-除 gc --apply 与 outer-test --run 外均为只读。
+除 gc --apply、outer-test --run 与 revoke --yes 外均为只读。
 outer-test 必须在【沙箱外】跑——它跑的正是沙箱里结构上跑不通的那些文件。`;
 
 function fmtTime(ms: number): string {
@@ -275,6 +277,39 @@ function cmdOuterTest(out: (l: string) => void, run: boolean): number {
   });
 }
 
+/**
+ * 吊销所有在途 access token。
+ *
+ * 这是唯一的紧急切断手段。在它之前，同样的效果需要三步手工操作
+ * （停网关 → 删签名密钥 → 手改 SQLite 把 oauth_refresh.valid 置 0），
+ * 其中一步是手编数据库，而且很容易只做前两步——那样客户端拿 refresh token
+ * 一换就自动恢复了，你以为断了其实没断。
+ *
+ * 默认只预演。`--yes` 才真的递增——不设 `--apply` 是因为这个动作**不可撤销**，
+ * 参数名应当读起来就像在回答一个问句。
+ */
+function cmdRevoke(out: (l: string) => void, yes: boolean): number {
+  return withDbExitCode(out, (db) => {
+    const before = currentEpoch(db);
+    if (!yes) {
+      out(`当前 epoch：${before}`);
+      out("");
+      out("加 --yes 会把它递增到 " + (before + 1) + "，届时：");
+      out("  · 所有已签发的 access token 立即失效（不等 8 小时过期）");
+      out("  · 客户端会收到 401 + WWW-Authenticate，需要重新走一次授权");
+      out("  · refresh token 不受影响——它们仍能换新 access token。");
+      out("    要连 refresh 一起断，另行清理 oauth_refresh（尚无命令，见遗留表）");
+      out("");
+      out("这个动作不可撤销（epoch 只增不减）。");
+      return 0;
+    }
+    const after = bumpEpoch(db);
+    out(`epoch ${before} → ${after}`);
+    out("所有在途 access token 已失效。客户端下一次请求会拿到 401 并重新授权。");
+    return 0;
+  });
+}
+
 function cmdGc(out: (l: string) => void, apply: boolean): number {
   return withDbExitCode(out, (db, layout) => {
     const plan = planGc(db, layout);
@@ -376,6 +411,8 @@ export function runCli(argv: string[], out: (line: string) => void): number {
       return cmdGc(out, rest.includes("--apply"));
     case "outer-test":
       return cmdOuterTest(out, rest.includes("--run"));
+    case "revoke":
+      return cmdRevoke(out, rest.includes("--yes"));
     default:
       if (cmd !== undefined) out(`未知命令：${cmd}`);
       out(USAGE);

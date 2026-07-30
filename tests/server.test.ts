@@ -7,6 +7,7 @@ import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Hono } from "hono";
 import { openDb } from "../src/db.ts";
+import { bumpEpoch } from "../src/tokenEpoch.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createJob, getJob } from "../src/jobs.ts";
 import { createTask } from "../src/tasks.ts";
@@ -56,11 +57,18 @@ function unregister(l: Layout, id: string) {
  * 行为一致」，实际不影响换出来的 `resource`/`aud`。
  */
 async function mintToken(a: Hono): Promise<string> {
+  return (await mintTokenFull(a)).access_token;
+}
+
+/** 与 `mintToken` 同一条真实流程，但把 refresh_token 与 client_id 也带出来。 */
+async function mintTokenFull(a: Hono): Promise<{
+  access_token: string; refresh_token?: string; client_id: string;
+}> {
   const reg = await (await a.request("/register", {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({
       client_name: "test", redirect_uris: ["https://chatgpt.com/connector/oauth/x"],
-      grant_types: ["authorization_code"], response_types: ["code"],
+      grant_types: ["authorization_code", "refresh_token"], response_types: ["code"],
       token_endpoint_auth_method: "none",
     }),
   })).json() as { client_id: string; redirect_uris: string[] };
@@ -83,8 +91,8 @@ async function mintToken(a: Hono): Promise<string> {
       grant_type: "authorization_code", code, code_verifier: verifier,
       client_id: reg.client_id, redirect_uri: redirectUri, resource: `${ISSUER}/mcp`,
     }),
-  })).json() as { access_token: string };
-  return tok.access_token;
+  })).json() as { access_token: string; refresh_token?: string };
+  return { ...tok, client_id: reg.client_id };
 }
 
 beforeEach(async () => {
@@ -172,6 +180,69 @@ describe("D18：单一端点 /mcp + 认证", () => {
     const res = await app.request("/mcp", {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("revoke 之后同一枚令牌立刻被拒 —— 这是整个 tokenEpoch 特性的判据", async () => {
+    // 只证明 epoch 整数会递增是不够的：真正要证的是 /mcp 【真的会拒】。
+    // 用一枚【合法签发】的令牌（走完整 OAuth 流程），先确认它能用，
+    // 再从【另一个 db 连接】递增 epoch（模拟 `grande revoke` 是独立进程），
+    // 然后用【同一枚令牌】再打一次。
+    const token = await mintToken(app);
+    const call = () => app.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+
+    expect((await call()).status).toBe(200);
+
+    const cli = openDb(layout);            // 另一个连接 = 另一个进程的模拟
+    expect(bumpEpoch(cli)).toBe(2);
+    cli.close();
+
+    const after = await call();
+    expect(after.status).toBe(401);
+    // 401 必须带 WWW-Authenticate，否则客户端不知道去哪重新授权，
+    // 只会看到一个不明所以的失败。
+    expect(after.headers.get("WWW-Authenticate") ?? "").toContain("resource_metadata=");
+
+    // 而重新走一次授权必须能恢复——否则 revoke 就成了永久砖化。
+    const fresh = await mintToken(app);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${fresh}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("revoke 之后旧 refresh_token 换来的新令牌【可以】用 —— 这是有意的边界", async () => {
+    // refresh token 是库里的 handle，不受 epoch 影响；它换出来的 access token
+    // 带的是【换取时】的 epoch，所以是新的。`grande revoke` 的预演输出必须
+    // 说清这一点，否则会让人以为一条命令就断干净了。
+    const issued = await mintTokenFull(app);
+    const rt = issued.refresh_token;
+    expect(rt).toBeDefined();   // 防空转：拿不到 refresh_token 这条测试就没意义
+
+    const cli = openDb(layout);
+    bumpEpoch(cli);
+    cli.close();
+
+    const refreshed = await (await app.request("/token", {
+      method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token", refresh_token: rt!,
+        client_id: issued.client_id, resource: `${ISSUER}/mcp`,
+      }).toString(),
+    })).json() as { access_token?: string };
+
+    expect(refreshed.access_token).toBeDefined();
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { authorization: `Bearer ${refreshed.access_token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
     });
     expect(res.status).toBe(200);

@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { SignJWT, jwtVerify } from "jose";
+import { currentEpoch, isEpochCurrent } from "./tokenEpoch.ts";
 
 export interface OAuthConfig {
   issuer: string;
@@ -320,7 +321,7 @@ export function createOAuth(cfg: OAuthConfig) {
 
       const resource = cfg.endpointFor();
 
-      const accessToken = await new SignJWT({ scope: SCOPE, jti: randomUUID() })
+      const accessToken = await new SignJWT({ scope: SCOPE, jti: randomUUID(), epoch: currentEpoch(db) })
         .setProtectedHeader({ alg: "HS256" })
         .setIssuer(cfg.issuer)
         .setAudience(resource)
@@ -388,6 +389,7 @@ export function createOAuth(cfg: OAuthConfig) {
       const accessToken = await new SignJWT({
         scope: SCOPE,
         jti: randomUUID(),
+        epoch: currentEpoch(db),
       })
         .setProtectedHeader({ alg: "HS256" })
         .setIssuer(cfg.issuer)
@@ -449,6 +451,11 @@ export function createOAuth(cfg: OAuthConfig) {
       audience: resource,
       algorithms: ["HS256"],
     });
+    // 每次都读库，不缓存——缓存多久，`grande revoke` 就迟多久生效，
+    // 而「立即生效」正是本检查存在的全部理由。见 src/tokenEpoch.ts。
+    if (!isEpochCurrent(payload.epoch, currentEpoch(db))) {
+      throw new OAuthError("invalid_token", "access token 已被吊销，请重新走一次授权流程");
+    }
     return { sub: String(payload.sub ?? "") };
   }
 

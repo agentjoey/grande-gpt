@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { openDb } from "../src/db.ts";
+import { openDb, SCHEMA_VERSION } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 
 let ws: string;
@@ -82,7 +82,7 @@ describe("openDb()", () => {
     const l = loadLayout();
     ensureLayout(l);
     const db = openDb(l);
-    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(4);
+    expect((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
     db.close();
   });
 
@@ -108,7 +108,7 @@ describe("openDb()", () => {
     raw.exec("PRAGMA user_version = 99");
     raw.close();
 
-    expect(() => openDb(l)).toThrow(/user_version=4/);
+    expect(() => openDb(l)).toThrow(new RegExp(`user_version=${SCHEMA_VERSION}`));
     expect(() => openDb(l)).toThrow(/user_version=99/);
   });
 
