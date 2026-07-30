@@ -181,8 +181,9 @@ grande_push { taskId }
 永远带 `grande/` 前缀。
 
 **第③条是纵深防御**：假如哪天默认分支被改名成 `grande/main`（离谱但不违法），
-白名单会放行，这一条能挡。它是运行时查（`git symbolic-ref refs/remotes/origin/HEAD`），
-仍然不需要配置。
+白名单会放行，这一条能挡。它是运行时查（**`git ls-remote --symref origin HEAD`** —— 实测确认
+`git symbolic-ref refs/remotes/origin/HEAD` 在 `git remote add` 之后会
+`fatal: not a symbolic ref`，因为那个 ref 只有 clone 才会设），仍然不需要配置。
 
 ### 3.2 `--force` 一律禁止
 
