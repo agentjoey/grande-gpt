@@ -61,8 +61,13 @@
 `tests/tools.test.ts` 里有一条精确名单断言（不是「全 false」也不是「至少一个 false」），
 新增任何触网工具都必须在 `SPEC` 表里显式声明 `openWorld: true`，否则变红。
 
-**五个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`。
-`gc` 默认 dry-run，`--apply` 才执行。
+**六个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`、`outer-test`。
+`gc` 与 `outer-test` 默认只列出，加 `--apply` / `--run` 才执行。
+
+⚠️ **合并任何自举产出之前必须跑 `grande outer-test --run`**（在沙箱外）。
+它跑的是 `unit-selfhost` 排除掉的 5 个文件——那些文件保护的不变量在自举期间完全失效，
+已经连续三次造成实际后果（见遗留表）。**清单从 profile 的 `--exclude` 反推，不是硬编码**，
+所以往 profile 加排除项时它自动跟上。
 
 **基础设施**：
 - OAuth 2.1 + PKCE(S256) + DCR + refresh 轮换（含复用检测），单一 `/mcp` 端点，
@@ -125,7 +130,7 @@
 | 8 | 历史 S0 文档仍写着 `repo_edit` 不支持 delete | 已被 S1 规格取代；实现者主动标注过，未做全仓历史文档改写 |
 | 9 | **备份（Backlog，不着急）** —— 目标：本地 NAS。两件独立的事，优先级相反：① **控制平面 `~/.grande-control/`（26M）不在任何 git 仓库、无版本控制**，其中审计账本按定义不可重建；⚠️ `secrets/` 绝不能进备份仓库，需要排除方案。② `grande-gpt` 代码无 remote——注意**设计文档也在这个仓库里**，机器挂了一起丢 | Human Owner 已定：放 backlog，走本地 NAS |
 | 10 | **PAT 配置已确认正确**（截图核对）：Repository access 只有 `agentjoey/urbanbricks-poc`、无 user permissions、Repository permissions 是 metadata:R + code/commit statuses/deployments/PR:RW，2026-10-28 过期 | ⚠️ **`deployments` 与 `commit statuses` 写权限本切片用不到**，可以收掉（低优先）。另：`GET /user/repos` **不能**用来验证 fine-grained 授权范围——公开仓库对任何已认证 token 都可读（实测该 token 能读 `torvalds/linux`），该端点会把「公开可读」和「已授权」混在一起。**权限授予只能在设置页看** |
-| 11 | **`unit-selfhost` 排除的 5 个文件，其不变量在自举时完全失去保护** | S2 实测撞上：工具计数从 11 变 13，`tools.test.ts` 的计数不变量红了而实现者看不见。这次后果轻，下次可能是安全断言。**建议加一个 `grande outer-test` CLI 子命令**，让「该跑外层了」有机制提醒，而不是靠人记得 |
+| ~~11~~ | ~~**`unit-selfhost` 排除的 5 个文件，其不变量在自举时完全失去保护**~~ **已加 `grande outer-test`（2026-07-30）** | S2 实测撞上：工具计数从 11 变 13，`tools.test.ts` 的计数不变量红了而实现者看不见。这次后果轻，下次可能是安全断言。**建议加一个 `grande outer-test` CLI 子命令**，让「该跑外层了」有机制提醒，而不是靠人记得 |
 | 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
 

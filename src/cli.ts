@@ -9,6 +9,8 @@ import { assertValidId } from "./paths.ts";
 import { getTask, listActiveTasks } from "./tasks.ts";
 import { discoverRepos, loadRegistry } from "./registry.ts";
 import { applyGc, planGc } from "./worktreeGc.ts";
+import { spawnSync } from "node:child_process";
+import { planOuterTest } from "./outerTest.ts";
 
 const USAGE = `grande —— GrandeGPT 控制平面运维工具
 
@@ -17,8 +19,10 @@ const USAGE = `grande —— GrandeGPT 控制平面运维工具
   grande audit [--task <id>]    审计流水：opId、工具、决策、触及路径
   grande doctor                 环境自检
   grande gc [--apply]           worktree 与 task 对账（默认 dry-run）
+  grande outer-test [--run]     跑自举时跑不了的那些测试（默认只列出）
 
-除 gc --apply 外均为只读。`;
+除 gc --apply 与 outer-test --run 外均为只读。
+outer-test 必须在【沙箱外】跑——它跑的正是沙箱里结构上跑不通的那些文件。`;
 
 function fmtTime(ms: number): string {
   return new Date(ms).toISOString().slice(11, 19);
@@ -228,6 +232,49 @@ function cmdDoctor(out: (l: string) => void): number {
   return bad === 0 ? 0 : 1;
 }
 
+/**
+ * 列出（或运行）自举时跑不了的测试文件。
+ *
+ * **默认只列出，不跑。** 理由与 `gc` 一致：先让人看清将要发生什么。
+ * 加 `--run` 才真跑。
+ *
+ * 文件清单从 `unit-selfhost` profile 的 `--exclude` 反推（见 outerTest.ts 的注释），
+ * 不在本文件里硬编码——否则 profile 一改就漂移，那个文件会变成「谁都不跑」。
+ */
+function cmdOuterTest(out: (l: string) => void, run: boolean): number {
+  return withDbExitCode(out, (_db, layout) => {
+    const plan = planOuterTest(layout, "grande-gpt");
+    out(`自举时跑不了的测试文件：${plan.files.length} 个`);
+    out(`（清单从 ${plan.fromProfile} profile 的 --exclude 反推，不是硬编码）`);
+    out("");
+    for (const f of plan.files) {
+      const why = plan.reasons.get(f);
+      out(`  ${f}`);
+      out(`    ${why ?? "（排除理由未记录——请在 src/outerTest.ts 的 WHY 里补上）"}`);
+    }
+    out("");
+    if (!run) {
+      out("以上仅为清单。加 --run 在【当前进程】跑它们（必须在沙箱外）。");
+      return 0;
+    }
+    out("正在运行……（沙箱外）");
+    out("");
+    const r = spawnSync("npx", ["vitest", "run", ...plan.files], {
+      cwd: layout.workspaceRoot + "/grande-gpt",
+      stdio: "inherit",
+      encoding: "utf8",
+    });
+    if (r.error) {
+      out(`启动 vitest 失败：${r.error.message}`);
+      return 1;
+    }
+    const code = r.status ?? 1;
+    out("");
+    out(code === 0 ? "外层测试全部通过。" : `外层测试失败（exit ${code}）——不要合并。`);
+    return code;
+  });
+}
+
 function cmdGc(out: (l: string) => void, apply: boolean): number {
   return withDbExitCode(out, (db, layout) => {
     const plan = planGc(db, layout);
@@ -327,6 +374,8 @@ export function runCli(argv: string[], out: (line: string) => void): number {
       return cmdDoctor(out);
     case "gc":
       return cmdGc(out, rest.includes("--apply"));
+    case "outer-test":
+      return cmdOuterTest(out, rest.includes("--run"));
     default:
       if (cmd !== undefined) out(`未知命令：${cmd}`);
       out(USAGE);
