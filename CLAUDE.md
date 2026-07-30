@@ -29,7 +29,12 @@
 
 ## 当前状态：S0 → S3 全部完成；S1 / S1.5 / S2 / S3 由 ChatGPT 自举实现
 
-**S0-A/B/C/D、S0.5、S1、S1.5、S2、S3 均已合并到 `main`。** 606 测试通过，typecheck 干净。
+**S0-A/B/C/D、S0.5、S1、S1.5、S2、S3 均已合并到 `main`。** 614 测试通过，typecheck 干净。
+
+⚠️ **S3 的宿主验收（2026-07-30）查出 `grande_push` 从未真正推成功过一次**——
+`http.extraHeader` 用了 `Bearer`，而 GitHub 的 git 端点只接受 `Basic`
+（REST API 接受 Bearer，两者不是同一套）。已修并对真实 GitHub 跑通完整闭环。
+详见 [`docs/research/2026-07-30-s3-host-verification.md`](docs/research/2026-07-30-s3-host-verification.md)。
 
 **S1 是第一个由 ChatGPT 经 GrandeGPT 自身完成的切片**——9 个任务、17 个文件、外加 review 后一轮修复。记录见
 [`docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md`](docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md)。
@@ -131,6 +136,8 @@
 | 9 | **备份（Backlog，不着急）** —— 目标：本地 NAS。两件独立的事，优先级相反：① **控制平面 `~/.grande-control/`（26M）不在任何 git 仓库、无版本控制**，其中审计账本按定义不可重建；⚠️ `secrets/` 绝不能进备份仓库，需要排除方案。② `grande-gpt` 代码无 remote——注意**设计文档也在这个仓库里**，机器挂了一起丢 | Human Owner 已定：放 backlog，走本地 NAS |
 | 10 | **PAT 配置已确认正确**（截图核对）：Repository access 只有 `agentjoey/urbanbricks-poc`、无 user permissions、Repository permissions 是 metadata:R + code/commit statuses/deployments/PR:RW，2026-10-28 过期 | ⚠️ **`deployments` 与 `commit statuses` 写权限本切片用不到**，可以收掉（低优先）。另：`GET /user/repos` **不能**用来验证 fine-grained 授权范围——公开仓库对任何已认证 token 都可读（实测该 token 能读 `torvalds/linux`），该端点会把「公开可读」和「已授权」混在一起。**权限授予只能在设置页看** |
 | ~~11~~ | ~~**`unit-selfhost` 排除的 5 个文件，其不变量在自举时完全失去保护**~~ **已加 `grande outer-test`（2026-07-30）** | S2 实测撞上：工具计数从 11 变 13，`tools.test.ts` 的计数不变量红了而实现者看不见。这次后果轻，下次可能是安全断言。**建议加一个 `grande outer-test` CLI 子命令**，让「该跑外层了」有机制提醒，而不是靠人记得 |
+| 12 | **`readOnlyPaths` 门禁代码存在，但一条规则都没配置**——`~/.grande-control/config/policy.yaml` 与 `<repo>/.grande/policy.yaml` 都不存在。实测 `grande_repo_edit` 能写 `.github/workflows/**` | **现在阻止它生效的只有「PAT 恰好没给 `workflow` 权限」**——那是配置恰好安全，不是设计上安全。换一个给了该权限的 PAT，这层当场消失。修法是配全局 `readOnlyPaths`，不要依赖 PAT 权限（铁律三） |
+| 13 | **schema 校验失败折叠成 `INTERNAL`。** 把 `ops` 写成 `edits` 得到的是「Gateway 内部错误。详情见服务端日志。」 | **模型看不到服务端日志，撞上这个错完全无从下手。** 应返回 `INVALID_INPUT` 并点名字段 |
 | 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
 
@@ -183,6 +190,21 @@ POST http://127.0.0.1:8787/mcp  {"jsonrpc":"2.0","id":1,"method":"tools/list"}
 |---|---|
 | 1 | **`tools/list` 没有进日志。** 现在只有 `POST /mcp → 200`，看不出客户端取过几次工具表、拿走了什么。这次全靠自签 token 手查才拿到服务端视角 |
 | 2 | **没有「客户端视角」的自检手段。** 目前唯一办法是让模型自己报它看得见什么——这不该是排查时才临时想起来的招 |
+
+### ⚠️ 测试替身会让整整一层变成 no-op（S3 宿主验收，2026-07-30）
+
+`grande_push` 从未真正推成功过一次，而 606 个测试全绿。原因不是漏改、不是空转测试，
+而是 **S3 的测试全部推向本地 bare 仓库——那里根本不需要认证，`Authorization` 头被
+完全忽略。** AC-S3-4「push 后 bare 仓库的 sha 等于任务分支的 sha」在认证完全错误的
+情况下照样通过。断言正确、非空转、也没写错，只是它验证的东西里**不包含认证**。
+
+**一般化：凡是「用本地替身代替远端」的测试，都要问一句「这个替身是否让某一层变成了
+no-op」。** 本地 bare remote 让认证层变 no-op；本地 fixture 让网络层变 no-op；
+`/dev/null` 让写入层变 no-op。这类缺陷单元测试天然抓不到，**必须有一次真实对端的
+端到端验证**，而且要**从对端独立核对**，不能只看工具自己的返回值。
+
+同类形状已知三个：①「模块写好但没接上线」（出现 5 次，P-A 探针）②「沙箱内 hook 拿
+EPERM 导致 hook 测试假阴性」（S2/S3）③ 本条。
 
 ### ⚠️ git hooks 是沙箱之外的代码执行入口（S2，2026-07-30 实测）
 

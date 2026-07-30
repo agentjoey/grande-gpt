@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { beginAudit, type AuditHandle } from "./audit.ts";
 import { err, ok } from "./envelope.ts";
 import { StateError, redact, toToolError } from "./errors.ts";
-import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
+import { basicCredential, GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
@@ -14,12 +14,17 @@ export interface PushResult {
 
 type GithubGit = (cwd: string, args: string[], token: string) => string;
 
-/** S3 的每一条 git 调用都必须经过这一个前缀。 */
+/**
+ * S3 的每一条 git 调用都必须经过这一个前缀。
+ *
+ * `Basic` 而不是 `Bearer` —— 见 `githubAuth.ts` 的 `basicCredential()`，
+ * 那里记着实测判决与「为什么测试全绿却从未推成功」。
+ */
 export function githubGitArgv(args: string[], token: string): string[] {
   return [
     "-c", "core.hooksPath=/dev/null",
     "-c", "credential.helper=",
-    "-c", `http.extraHeader=Authorization: Bearer ${token}`,
+    "-c", `http.extraHeader=Authorization: Basic ${basicCredential(token)}`,
     ...args,
   ];
 }

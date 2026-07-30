@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listAudit } from "../src/audit.ts";
 import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
+import { basicCredential, redactToken } from "../src/githubAuth.ts";
 import { githubGitArgv } from "../src/push.ts";
 import { createTask } from "../src/tasks.ts";
 import { buildTools, type ToolDeps } from "../src/tools.ts";
@@ -154,9 +155,34 @@ describe("grande_push", () => {
     expect(argv).toEqual([
       "-c", "core.hooksPath=/dev/null",
       "-c", "credential.helper=",
-      "-c", `http.extraHeader=Authorization: Bearer ${token}`,
+      "-c", `http.extraHeader=Authorization: Basic ${basicCredential(token)}`,
       "ls-remote", "--symref", "origin", "HEAD",
     ]);
+  });
+
+  it("AC-S3-13b：认证方案必须是 Basic —— Bearer 在 git-over-HTTPS 上一律失败", () => {
+    // ⚠️ 这条**不能**证明 GitHub 接受我们的认证（本套件推的是本地 bare 仓库，
+    // 无需认证、Authorization 头被完全忽略）。它只把实测判决钉住，防止有人
+    // 「顺手统一成 Bearer」——REST API 那边 Bearer 确实是对的，所以这个改动
+    // 看起来非常合理，而后果是 push 静默地永远失败。
+    // 真实连通性判据只能在宿主上手工验，记录见 docs/research/。
+    const header = githubGitArgv([], token).find((a) => a.startsWith("http.extraHeader="))!;
+    expect(header).not.toContain("Bearer");
+    expect(header).toContain("Basic ");
+    // base64 必须解得回 GitHub 要求的 `x-access-token:<PAT>` 形态
+    const b64 = header.slice(header.indexOf("Basic ") + "Basic ".length);
+    expect(Buffer.from(b64, "base64").toString("utf8")).toBe(`x-access-token:${token}`);
+  });
+
+  it("脱敏必须同时抹掉 base64 凭据 —— 它解一次就是明文 PAT", () => {
+    const b64 = basicCredential(token);
+    // 模拟 git 回显了整条 http.extraHeader（GIT_TRACE / GIT_CURL_VERBOSE 会这样）
+    const leaked = `fatal: unable to access: http.extraHeader=Authorization: Basic ${b64}`;
+    const cleaned = redactToken(leaked, token);
+    expect(cleaned).not.toContain(b64);
+    // 前缀也要抹：base64 按 3 字节一组编码，截断的前缀仍能解出 token 前半段
+    expect(cleaned).not.toContain(b64.slice(0, 40));
+    expect(cleaned).toContain("<redacted>");
   });
 
   it("AC-S3-8：pre-push hook 不执行（沙箱内为已知假阴性，需宿主复验）", async () => {
