@@ -93,8 +93,9 @@ REST API 接受 Bearer，git 端点只接受 Basic（token 作密码）。
 | 不推默认分支 | PR 是 `grande/...` → `main`，main 未被动过 |
 | attestation 尾注唯一 | body 里 `Grande-Attestation` 恰好 1 次 |
 
-产物：PR #1 `agentjoey/urbanbricks-poc`（Draft）+ 分支 `grande/ub-probe-20260729-001--001`。
-**验证用，可删。**
+产物 PR #1 + 分支 `grande/ub-probe-20260729-001--001` 均为验证用，
+**已于同日删除**（PR closed、远端分支 deleted、本地 worktree reset 回 base），
+remote 恢复为原有的 `main` / `feat/imagery` / `feat/poc` 三个分支。
 
 ---
 
@@ -113,16 +114,24 @@ REST API 接受 Bearer，git 端点只接受 Basic（token 作密码）。
 原本预期 S1.5 的 `readOnlyPaths` 会先拦住。**实测没有**：
 `grande_repo_edit` 允许写 `.github/workflows/grande-probe.yml`。
 
-原因是 **`readOnlyPaths` 门禁代码存在，但一条规则都没配置**——
-`~/.grande-control/config/policy.yaml` 与 `urbanbricks/.grande/policy.yaml` 都不存在。
+原因是 **`readOnlyPaths` 门禁代码存在，但一条规则都没配置**。
+（我第一次查的是 `~/.grande-control/config/policy.yaml`——**那个文件名不存在**，
+真正的全局配置是 `deny.yaml`，它确实存在但当时只有 `prefixes`。查错了路径，
+结论碰巧没变，因为实测已经直接证明 `repo_edit` 写穿了。）
 S1.5 设计里 `.github/workflows/**` 只是**举例**，从未落成实际配置。
 
 所以现在：**每个已注册仓库的 `.github/workflows/**` 对 GrandeGPT 都是可写的**，
 唯一阻止它生效的是 PAT 恰好没给 `workflow` 权限。那是「配置恰好安全」，
 不是「设计上安全」——换一个给了 workflow 权限的 PAT，这层当场消失。
 
-已记入 CLAUDE.md 遗留表。修法是给全局 policy 配上 `readOnlyPaths`，
-而不是依赖 PAT 权限——**能做成硬约束的绝不做成软约束**（铁律三）。
+**已修（同日）**：`deny.yaml` 配上 8 条 `readOnlyPaths`，判定原则是
+「内容会在沙箱之外被执行或被信任的路径一律只读」。12 条双向探针实测：
+8 条拒绝（workflows/actions/husky/githooks/policy.yaml/.npmrc ×2/.pnpmfile.cjs），
+4 条放行且无误伤（`src/normal.ts`、`.github/ISSUE_TEMPLATE/b.md`、
+`README-probe.md`、`package.json.probe`）。加规则前已确认两个已注册仓库里
+这些路径一个都不存在，零误伤。
+
+**不依赖 PAT 权限**——铁律三：能做成硬约束的绝不做成软约束。
 
 ---
 

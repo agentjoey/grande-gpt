@@ -136,7 +136,7 @@
 | 9 | **备份（Backlog，不着急）** —— 目标：本地 NAS。两件独立的事，优先级相反：① **控制平面 `~/.grande-control/`（26M）不在任何 git 仓库、无版本控制**，其中审计账本按定义不可重建；⚠️ `secrets/` 绝不能进备份仓库，需要排除方案。② `grande-gpt` 代码无 remote——注意**设计文档也在这个仓库里**，机器挂了一起丢 | Human Owner 已定：放 backlog，走本地 NAS |
 | 10 | **PAT 配置已确认正确**（截图核对）：Repository access 只有 `agentjoey/urbanbricks-poc`、无 user permissions、Repository permissions 是 metadata:R + code/commit statuses/deployments/PR:RW，2026-10-28 过期 | ⚠️ **`deployments` 与 `commit statuses` 写权限本切片用不到**，可以收掉（低优先）。另：`GET /user/repos` **不能**用来验证 fine-grained 授权范围——公开仓库对任何已认证 token 都可读（实测该 token 能读 `torvalds/linux`），该端点会把「公开可读」和「已授权」混在一起。**权限授予只能在设置页看** |
 | ~~11~~ | ~~**`unit-selfhost` 排除的 5 个文件，其不变量在自举时完全失去保护**~~ **已加 `grande outer-test`（2026-07-30）** | S2 实测撞上：工具计数从 11 变 13，`tools.test.ts` 的计数不变量红了而实现者看不见。这次后果轻，下次可能是安全断言。**建议加一个 `grande outer-test` CLI 子命令**，让「该跑外层了」有机制提醒，而不是靠人记得 |
-| 12 | **`readOnlyPaths` 门禁代码存在，但一条规则都没配置**——`~/.grande-control/config/policy.yaml` 与 `<repo>/.grande/policy.yaml` 都不存在。实测 `grande_repo_edit` 能写 `.github/workflows/**` | **现在阻止它生效的只有「PAT 恰好没给 `workflow` 权限」**——那是配置恰好安全，不是设计上安全。换一个给了该权限的 PAT，这层当场消失。修法是配全局 `readOnlyPaths`，不要依赖 PAT 权限（铁律三） |
+| ~~12~~ | ~~**`readOnlyPaths` 一条规则都没配**，实测 `grande_repo_edit` 能写 `.github/workflows/**`~~ **已配（2026-07-30）** | 全局规则写在 `~/.grande-control/config/deny.yaml` 的 `readOnlyPaths`（该文件此前只有 `prefixes`）。判定原则：**内容会在沙箱之外被执行或被信任的路径一律只读**。12 条双向探针实测（8 拒 + 4 放行无误伤）。存档副本 [`docs/reference/control-plane-config/deny.yaml`](docs/reference/control-plane-config/deny.yaml)。⚠️ 有意保留的缺口：`package.json` 的 `postinstall`/`prepare` 同样在沙箱外执行，但设成只读会让绝大多数正常任务做不了 |
 | 13 | **schema 校验失败折叠成 `INTERNAL`。** 把 `ops` 写成 `edits` 得到的是「Gateway 内部错误。详情见服务端日志。」 | **模型看不到服务端日志，撞上这个错完全无从下手。** 应返回 `INVALID_INPUT` 并点名字段 |
 | 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
@@ -190,6 +190,25 @@ POST http://127.0.0.1:8787/mcp  {"jsonrpc":"2.0","id":1,"method":"tools/list"}
 |---|---|
 | 1 | **`tools/list` 没有进日志。** 现在只有 `POST /mcp → 200`，看不出客户端取过几次工具表、拿走了什么。这次全靠自签 token 手查才拿到服务端视角 |
 | 2 | **没有「客户端视角」的自检手段。** 目前唯一办法是让模型自己报它看得见什么——这不该是排查时才临时想起来的招 |
+
+### 全局写入门禁：只读路径（2026-07-30 首次实际配置）
+
+生效文件是 **`~/.grande-control/config/deny.yaml`**（不是 `policy.yaml`——那个名字不存在）。
+它同时承载 `prefixes`（AC-14 拒绝表）与 S1.5 的 `readOnlyPaths` / `pairedEdits`。
+仓库内的 `<repo>/.grande/policy.yaml` 只能在其上**继续收紧**。
+
+**判定原则只有一条：内容会在沙箱之外被执行或被信任的路径，一律只读。**
+沙箱管得住 `grande_run`，管不住 GitHub runner、你本人在 canonical 里的 git 操作、
+你手工跑的 `pnpm install`。当前 8 条规则分四组：CI（`.github/workflows|actions/**`）、
+宿主 git hooks（`**/.husky|.githooks/**`）、门禁自身（`.grande/policy.yaml`）、
+安装期执行（`**/.npmrc`、`**/.pnpmfile.cjs`）。
+
+⚠️ **`package.json` 的 `postinstall`/`prepare` 是有意保留的缺口**——它同样在沙箱外
+执行，但把 `package.json` 设成只读会让 GrandeGPT 无法做绝大多数正常任务。缓解是
+GrandeGPT 自己跑不了 `pnpm install`（profile 是 argv 白名单），要生效必须你手工装一次。
+
+glob 是 Node 内置 `path.matchesGlob`，已实测：`a/**` 匹配 `a/x` 与 `a/n/x`；
+`**/x` 在仓库根也匹配；比对大小写不敏感（APFS）。
 
 ### ⚠️ 测试替身会让整整一层变成 no-op（S3 宿主验收，2026-07-30）
 

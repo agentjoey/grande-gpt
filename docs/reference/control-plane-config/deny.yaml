@@ -1,0 +1,59 @@
+<!-- 这是【存档副本】，不是生效文件。
+     实际生效的是 ~/.grande-control/config/deny.yaml（控制平面，无版本控制）。
+     存这一份是因为控制平面不在任何 git 仓库里（遗留 #9），
+     机器挂了这些 policy 决策会一起丢，而它们是想清楚了才写下的。
+     改了生效文件记得同步这里；两边不一致时【以控制平面为准】。 -->
+
+# GrandeGPT 全局写入门禁。只从控制平面读（铁律一：仓库内容不可信）。
+# 仓库内的 .grande/policy.yaml 只能在此基础上【继续收紧】，不能放宽。
+
+# AC-14 仓内敏感路径拒绝表。内置项（.git/）恒生效，此处只能【追加】不能移除
+prefixes:
+  - node_modules/
+
+# ── 只读路径（S1.5 门禁，2026-07-30 首次实际配置）────────────────────────────
+#
+# 判定原则只有一条：**内容会在沙箱之外被执行或被信任的路径，一律只读。**
+#
+# 沙箱管得住 `grande_run` 里跑的东西，管不住这些——它们分别由 GitHub 的
+# runner、你本人在 canonical 里的 git 操作、或你手工跑的 `pnpm install` 来执行。
+# 写工具能改它们，就等于绕开沙箱拿到宿主/CI 的执行权。
+#
+# 为什么现在才配：S3 宿主验收（2026-07-30）实测发现 `grande_repo_edit` 能写
+# `.github/workflows/**`——当时唯一挡住它的是「PAT 恰好没给 workflow 权限」，
+# 那是配置恰好安全，不是设计上安全。见 docs/research/2026-07-30-s3-host-verification.md
+#
+# 加规则前先确认：两个已注册仓库（grande-gpt / urbanbricks）里这些路径
+# **一个都不存在**，所以本次配置零误伤。
+#
+# glob 是 Node 内置 `path.matchesGlob`，已实测：`a/**` 匹配 `a/x` 与 `a/n/x`
+# 但不匹配 `a` 的兄弟；`**/x` 在仓库根也匹配。比对大小写不敏感（APFS）。
+readOnlyPaths:
+  # ① 在 GitHub runner 上执行，且能读到仓库 secrets
+  - .github/workflows/**
+  - .github/actions/**
+
+  # ② 在【你本人的宿主】上执行：你在 canonical 里 commit/push 时 git 会跑它们。
+  #    我们自己的 git 调用都带 `-c core.hooksPath=/dev/null`（见 CLAUDE.md），
+  #    但那只保护 GrandeGPT 自己的调用，保护不了你手动敲的 git。
+  - "**/.husky/**"
+  - "**/.githooks/**"
+
+  # ③ 门禁自身的配置。模型能改它就等于能拆掉仓库作者设的收紧规则。
+  - .grande/policy.yaml
+
+  # ④ 在你手工 `pnpm install` 时生效：.npmrc 能改 registry 与凭据，
+  #    .pnpmfile.cjs 是安装期直接执行的 JS。
+  - "**/.npmrc"
+  - "**/.pnpmfile.cjs"
+
+# ⚠️ 本清单【不完整】，且不可能完整。已知未覆盖的同类风险：
+#
+#   package.json 的 `postinstall` / `prepare` 等脚本同样在安装期执行于沙箱之外。
+#   但 package.json 是日常开发的核心文件，设成只读会让 GrandeGPT 无法做绝大多数
+#   正常任务——收益不抵代价。**这是有意保留的缺口，不是遗漏。**
+#   缓解：GrandeGPT 自己跑不了 `pnpm install`（run profile 是 argv 白名单，
+#   见 profiles.yaml），所以要生效必须由你手工安装一次；合并前看一眼 diff 即可。
+#
+# 加新规则时问同一个问题：**这个文件的内容会不会在沙箱之外被执行或被信任？**
+# 会 → 加进来。不会 → 不要加，只读清单越长越容易误伤正常开发。
