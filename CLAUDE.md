@@ -27,9 +27,9 @@
 | D16 | **S0 接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | D13/D15 已作废：OpenAI Secure MCP Tunnel 需要 Platform API key（另一套计费），与「用 chat 额度」的初衷冲突 |
 | D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp`（D18 之后；`/mcp/<repoId>` 保留为兼容别名） | 已实测跑通 |
 
-## 当前状态：S0 → S2 全部完成；S1 与 S2 由 ChatGPT 自举实现
+## 当前状态：S0 → S3 全部完成；S1 / S1.5 / S2 / S3 由 ChatGPT 自举实现
 
-**S0-A/B/C/D、S0.5、S1、S1.5、S2 均已合并到 `main`。** 581 测试通过，typecheck 干净。
+**S0-A/B/C/D、S0.5、S1、S1.5、S2、S3 均已合并到 `main`。** 606 测试通过，typecheck 干净。
 
 **S1 是第一个由 ChatGPT 经 GrandeGPT 自身完成的切片**——9 个任务、17 个文件、外加 review 后一轮修复。记录见
 [`docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md`](docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md)。
@@ -37,7 +37,7 @@
 
 ### 已实现的能力
 
-**十三个 MCP 工具**（`src/tools.ts`；仓库始终由 `taskId` 单向推导，D18）：
+**十五个 MCP 工具**（`src/tools.ts`；仓库始终由 `taskId` 单向推导，D18）：
 
 | 工具 | 类型 | 作用 |
 |---|---|---|
@@ -54,6 +54,12 @@
 | `grande_rollback` | 写 | 把 worktree 回滚到某个 checkpoint（S1；被覆盖的内容进 Trash，故 `destructiveHint: false`） |
 | `grande_commit` | 写 | 提交任务 worktree 的全部改动到任务分支（S2）。**所有 git 调用带 `-c core.hooksPath=/dev/null`**，见下方安全说明 |
 | `grande_sync_base` | 写 | 把 base 同步到 canonical 当前分支（S2）。用 merge 不用 rebase；冲突一律拒绝并 `merge --abort` |
+| `grande_push` | 写 · **触网** | 把任务分支推到 remote（S3）。三道判据：`grande/*` 白名单、`=== task.branch`、`≠ remote 默认分支` |
+| `grande_pr_open` | 写 · **触网** | 开一个 **Draft** PR（S3）。`draft` 在类型层是字面量 `true`；幂等；body 尾注不可伪造 |
+
+⚠️ **`grande_push` / `grande_pr_open` 是全系统唯一两个 `openWorldHint: true` 的工具。**
+`tests/tools.test.ts` 里有一条精确名单断言（不是「全 false」也不是「至少一个 false」），
+新增任何触网工具都必须在 `SPEC` 表里显式声明 `openWorld: true`，否则变红。
 
 **五个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`。
 `gc` 默认 dry-run，`--apply` 才执行。
