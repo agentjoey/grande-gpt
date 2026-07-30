@@ -815,16 +815,19 @@ AC-7 堵沙箱内子进程，AC-14 堵写工具自身。**只做 AC-7 会留下�
 | S1.5 | 开发约束层：`readOnlyPaths` + `pairedEdits` 硬门禁、guidance 软指引 | 3–4 | ✅ 完成（**ChatGPT 自举**） |
 | S2 | 本地开发闭环：commit、base sync、Attestation、`requireGreenBeforeCommit`（worktree 生命周期已在 S0.5 提前做掉） | 11–15 | ✅ 完成（**ChatGPT 自举**） |
 | S2.5 | 前端控制台（**T3**，须过 Mockup Gate） | 10–15 | |
-| S3 | GitHub 闭环：GitHub App、push、Draft PR、CI | 6–9 | |
+| S3 | GitHub 闭环：**PAT**（非 App）、push、Draft PR。**CI 已砍**——两个仓库都没有 CI | 6–9 | ✅ 完成（**ChatGPT 自举**） |
 | S4 | 稳固化：审计对账、僵尸恢复、保留策略 | 4–7 | |
 | S5 | 外部校验器接入（按需评估，很可能不做） | 0–5 | |
 
 **合计 55–85 人日**，与草案 49–72 的区间基本吻合，多出的主要是控制台。
 
-**2026-07-30 进度**：POC → S2 全部完成，`main` 上 581 测试通过。
-其中 **S1 / S1.5 / S2 由 ChatGPT 经 GrandeGPT 自身实现**（两次自举），
-reviewer 在沙箱外补完那 5 个测试文件覆盖不到的验证。剩余 S2.5 / S3 / S4，
-S5 已论证很可能不做（§10.3）。
+**2026-07-30 进度**：POC → S3 全部完成，`main` 上 612 测试通过。
+其中 **S1 / S1.5 / S2 / S3 由 ChatGPT 经 GrandeGPT 自身实现**（四个切片自举），
+reviewer 在沙箱外补完那 5 个测试文件覆盖不到的验证——现已固化为
+`grande outer-test --run`，不再依赖 reviewer 记得。
+
+**剩余：S2.5（控制台）、S4（稳固化）。** S5 已论证很可能不做（§10.3）。
+S3 有三项**必须在沙箱外由 Human Owner 验**的判据尚未做（见 S3 设计 §验收）。
 
 ### 10.1 S1.5 开发约束层的设计取向
 
