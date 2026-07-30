@@ -15,6 +15,8 @@ import { commitWorktree } from "./commit.ts";
 import { err, ok, type TaskContext } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import { listJobs } from "./jobs.ts";
+import { createPrOpenTool } from "./prOpen.ts";
+import { createPushTool } from "./push.ts";
 import { syncBase } from "./syncBase.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
@@ -228,5 +230,11 @@ function wrapTaskStatusWithBase(deps: ToolDeps, tools: ToolDef[]): void {
 export function addLocalLoopTools(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
   wrapRunWithVerificationContext(deps, tools);
   wrapTaskStatusWithBase(deps, tools);
-  return [...tools, commitTool(deps), syncBaseTool(deps)];
+  return [
+    ...tools,
+    commitTool(deps),
+    syncBaseTool(deps),
+    createPushTool(deps),
+    createPrOpenTool(deps),
+  ];
 }
