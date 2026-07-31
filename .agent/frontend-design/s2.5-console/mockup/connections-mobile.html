@@ -1,0 +1,193 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>GrandeGPT · connections</title><style>
+:root{
+  --bg:#fafafa; --panel:#fff; --ink:#18181b; --muted:#71717a; --faint:#a1a1aa;
+  --line:#e4e4e7; --line2:#d4d4d8;
+  --alert:#b45309; --alert-bg:#fffbeb; --alert-line:#fcd34d;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;
+  -webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-size:12.5px;letter-spacing:-.01em}
+.wrap{max-width:390px;margin:0 auto;padding:0 24px 56px}
+
+/* top bar */
+.top{display:flex;align-items:baseline;justify-content:space-between;
+  padding:18px 0 16px;border-bottom:1px solid var(--line)}
+.brand{font-weight:640;letter-spacing:-.015em;font-size:15px}
+.brand span{color:var(--faint);font-weight:400;margin-left:10px}
+.nav{display:flex;gap:2px}
+.nav a{padding:5px 11px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13px}
+.nav a.on{background:var(--ink);color:#fff}
+
+/* SIGNATURE: health band — 全站唯一的大胆元素 */
+.health{margin:22px 0 26px;padding:20px 22px;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.health.warn{border-color:var(--alert-line);background:var(--alert-bg)}
+.health h1{margin:0;font-size:21px;font-weight:640;letter-spacing:-.02em}
+.health .facts{margin-top:9px;display:flex;flex-wrap:wrap;gap:0 20px;
+  color:var(--muted);font-size:13px}
+.health .facts b{font-weight:560;color:var(--ink)}
+.pulse{display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:#16a34a;margin-right:9px;vertical-align:2px}
+.pulse.a{background:var(--alert)}
+
+h2{font-size:12px;font-weight:620;text-transform:none;letter-spacing:.01em;
+  color:var(--muted);margin:0 0 10px}
+h2 em{font-style:normal;color:var(--faint);font-weight:400}
+
+.grid{display:grid;grid-template-columns:1fr 320px;gap:26px;align-items:start}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:15px 17px;margin-bottom:10px}
+
+/* alert */
+.alert{background:var(--panel);border:1px solid var(--alert-line);
+  border-radius:9px;padding:14px 16px;margin-bottom:10px}
+.alert .t{font-weight:600;font-size:13.5px;margin-bottom:7px;color:var(--alert)}
+.alert .d{color:var(--muted);font-size:12.5px;margin-bottom:8px}
+.crit{background:#fafaf9;border:1px solid var(--line);border-radius:6px;
+  padding:8px 10px;font-size:12px;color:var(--muted);margin:8px 0 10px;line-height:1.55}
+.crit b{color:var(--ink);font-weight:560}
+.btns{display:flex;gap:7px}
+.btn{padding:4.5px 11px;font-size:12.5px;border:1px solid var(--line2);border-radius:6px;
+  background:#fff;color:var(--ink);cursor:pointer}
+.btn.p{background:var(--ink);color:#fff;border-color:var(--ink)}
+.btn.d{border-color:#fca5a5;color:#b91c1c}
+
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-weight:560;font-size:11.5px;color:var(--faint);
+  padding:0 10px 7px 0;border-bottom:1px solid var(--line)}
+td{padding:8px 10px 8px 0;border-bottom:1px solid #f4f4f5;font-size:13px;vertical-align:top}
+tr:last-child td{border-bottom:none}
+.st{font-size:11.5px;font-weight:560}
+.st.ok{color:var(--muted)}
+.st.no{color:var(--ink)}
+.st.kill{color:var(--alert)}
+.dim{color:var(--faint)}
+.num{font-family:var(--mono);font-size:12.5px}
+
+.kv{display:flex;justify-content:space-between;padding:6px 0;font-size:13px;
+  border-bottom:1px solid #f4f4f5}
+.kv:last-child{border:none}
+.kv .k{color:var(--muted)}
+.kv .v{font-family:var(--mono);font-size:12.5px}
+.note{margin-top:10px;padding:9px 10px;background:#fafaf9;border-radius:6px;
+  font-size:11.5px;color:var(--muted);line-height:1.6}
+
+.empty{padding:26px 22px;text-align:left}
+.empty .big{font-size:15px;font-weight:600;margin-bottom:4px}
+
+/* task timeline */
+.tl{position:relative;padding-left:19px}
+.tl:before{content:"";position:absolute;left:4px;top:6px;bottom:6px;width:1px;background:var(--line)}
+.ev{position:relative;padding:7px 0}
+.ev:before{content:"";position:absolute;left:-19px;top:13px;width:9px;height:9px;
+  border-radius:50%;background:#fff;border:1.5px solid var(--line2)}
+.ev.f:before{border-color:var(--ink);background:var(--ink)}
+.ev.k:before{border-color:var(--alert);background:var(--alert)}
+.ev .h{font-size:13px}
+.ev .m{font-size:12px;color:var(--faint);margin-top:1px}
+
+.footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--faint)}
+
+@media (max-width:99999px){
+  .wrap{padding:0 14px 40px}
+  .grid{grid-template-columns:1fr;gap:20px}
+  .top{flex-direction:column;align-items:flex-start;gap:11px}
+  .nav{width:100%;overflow-x:auto}
+  .health h1{font-size:18px}
+  .health .facts{flex-direction:column;gap:3px}
+  /* 表格 → 卡片流（不把桌面布局压缩成移动布局） */
+  table,thead,tbody,th,td,tr{display:block}
+  thead{display:none}
+  tr{border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+    margin-bottom:8px;background:var(--panel)}
+  td{border:none;padding:2px 0;display:flex;justify-content:space-between;gap:14px}
+  td:before{content:attr(data-l);color:var(--faint);font-size:11.5px;flex:none}
+  .btn{padding:8px 14px}          /* 移动端误触成本更高，加大点击区 */
+  .btns{flex-direction:column}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head>
+<body style="width:390px;margin:0 auto;border-left:1px solid #e4e4e7;border-right:1px solid #e4e4e7;min-height:100vh"><div class="wrap">
+<div class="top">
+  <div class="brand">GrandeGPT<span>console.agentjoey.ai</span></div>
+  <nav class="nav">
+    <a href="#" class="">概览</a>
+    <a href="#" class="">任务</a>
+    <a href="#" class="">账本</a>
+    <a href="#" class="on">连接</a>
+  </nav>
+</div>
+
+<div class="health">
+  <h1>连接与授权</h1>
+  <div class="facts">
+    <span>OAuth client <b>3</b></span><span>有效 refresh <b>2</b> / 7</span>
+    <span>token epoch <b>1</b></span><span>access token 有效期 <b>8 小时</b></span>
+  </div>
+</div>
+
+<div class="grid">
+<div>
+  <h2>Refresh token 链 <em>· 轮换后旧的置为失效，复用会触发整链吊销</em></h2>
+  <table>
+    <thead><tr><th>handle</th><th>绑定端点</th><th>状态</th><th>签发</th></tr></thead>
+    <tbody>
+      <tr><td data-l="handle"><span class="mono">8463807c-ff09</span></td>
+        <td data-l="端点"><span class="mono">…/mcp</span></td>
+        <td data-l="状态"><span class="st no">有效</span></td>
+        <td data-l="签发"><span class="dim">07-31 14:11</span></td></tr>
+      <tr><td data-l="handle"><span class="mono">fffe5577-b7ac</span></td>
+        <td data-l="端点"><span class="mono">…/mcp</span></td>
+        <td data-l="状态"><span class="st no">有效</span></td>
+        <td data-l="签发"><span class="dim">07-29 17:28</span></td></tr>
+      <tr><td data-l="handle"><span class="mono dim">e105c580-5598</span></td>
+        <td data-l="端点"><span class="mono dim">…/mcp</span></td>
+        <td data-l="状态"><span class="dim">已失效</span></td>
+        <td data-l="签发"><span class="dim">07-30 18:06</span></td></tr>
+      <tr><td data-l="handle"><span class="mono dim">6898ecaf-55e8</span></td>
+        <td data-l="端点"><span class="mono">…/mcp/grande-gpt</span></td>
+        <td data-l="状态"><span class="dim">已失效</span></td>
+        <td data-l="签发"><span class="dim">07-28 23:18</span></td></tr>
+    </tbody>
+  </table>
+  <div class="note">最后一条绑在 <span class="mono">/mcp/&lt;repoId&gt;</span> 上——那是 D18 之前
+  每仓库一个端点的遗留。别名路由仍兼容，但新令牌一律绑单一 <span class="mono">/mcp</span>。</div>
+
+  <h2 style="margin-top:22px">已注册的 OAuth client <em>· 3</em></h2>
+  <table>
+    <thead><tr><th>clientId</th><th>redirect URI</th><th>注册于</th></tr></thead>
+    <tbody>
+      <tr><td data-l="clientId"><span class="mono">client_fade2e21-4c02</span></td>
+        <td data-l="redirect"><span class="mono">chatgpt.com/connector/oauth/52Oeu75jJiph</span></td>
+        <td data-l="注册"><span class="dim">07-29 02:21</span></td></tr>
+      <tr><td data-l="clientId"><span class="mono">client_d513c415-2cfa</span></td>
+        <td data-l="redirect"><span class="mono">chatgpt.com/connector/oauth/52Oeu75jJiph</span></td>
+        <td data-l="注册"><span class="dim">07-28 23:18</span></td></tr>
+      <tr><td data-l="clientId"><span class="mono">client_cd12ca5b-8b45</span></td>
+        <td data-l="redirect"><span class="mono">chatgpt.com/connector/oauth/probe</span></td>
+        <td data-l="注册"><span class="dim">07-28 23:08</span></td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div>
+  <h2>紧急切断</h2>
+  <div class="card">
+    <div class="kv"><span class="k">当前 epoch</span><span class="v">1</span></div>
+    <div class="kv"><span class="k">有效 refresh</span><span class="v">2</span></div>
+    <div style="margin:13px 0 0"><button class="btn d">彻底断开</button></div>
+    <div class="note"><b>两步合一</b>：递增 token epoch（所有在途 access token 当场失效）
+    <b>＋</b> 把全部 refresh token 置为失效。<br><br>
+    CLI 的 <span class="mono">grande revoke</span> 只做前一步——单做它的话，
+    客户端拿 refresh 一换就自动恢复了，<b>你以为断了其实没断</b>。<br><br>
+    断开后需要在 ChatGPT 里重新授权。该操作会二次确认。</div>
+  </div>
+</div>
+</div>
+<div class="footer">Mockup · S2.5 阶段② · 数据取自 2026-07-31 的真实控制平面</div>
+</div></body></html>

@@ -1,0 +1,205 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>GrandeGPT · overview</title><style>
+:root{
+  --bg:#fafafa; --panel:#fff; --ink:#18181b; --muted:#71717a; --faint:#a1a1aa;
+  --line:#e4e4e7; --line2:#d4d4d8;
+  --alert:#b45309; --alert-bg:#fffbeb; --alert-line:#fcd34d;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;
+  -webkit-font-smoothing:antialiased}
+.mono{font-family:var(--mono);font-size:12.5px;letter-spacing:-.01em}
+.wrap{max-width:390px;margin:0 auto;padding:0 24px 56px}
+
+/* top bar */
+.top{display:flex;align-items:baseline;justify-content:space-between;
+  padding:18px 0 16px;border-bottom:1px solid var(--line)}
+.brand{font-weight:640;letter-spacing:-.015em;font-size:15px}
+.brand span{color:var(--faint);font-weight:400;margin-left:10px}
+.nav{display:flex;gap:2px}
+.nav a{padding:5px 11px;border-radius:6px;color:var(--muted);text-decoration:none;font-size:13px}
+.nav a.on{background:var(--ink);color:#fff}
+
+/* SIGNATURE: health band — 全站唯一的大胆元素 */
+.health{margin:22px 0 26px;padding:20px 22px;background:var(--panel);
+  border:1px solid var(--line);border-radius:10px;
+  box-shadow:0 1px 2px rgba(0,0,0,.04)}
+.health.warn{border-color:var(--alert-line);background:var(--alert-bg)}
+.health h1{margin:0;font-size:21px;font-weight:640;letter-spacing:-.02em}
+.health .facts{margin-top:9px;display:flex;flex-wrap:wrap;gap:0 20px;
+  color:var(--muted);font-size:13px}
+.health .facts b{font-weight:560;color:var(--ink)}
+.pulse{display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:#16a34a;margin-right:9px;vertical-align:2px}
+.pulse.a{background:var(--alert)}
+
+h2{font-size:12px;font-weight:620;text-transform:none;letter-spacing:.01em;
+  color:var(--muted);margin:0 0 10px}
+h2 em{font-style:normal;color:var(--faint);font-weight:400}
+
+.grid{display:grid;grid-template-columns:1fr 320px;gap:26px;align-items:start}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:15px 17px;margin-bottom:10px}
+
+/* alert */
+.alert{background:var(--panel);border:1px solid var(--alert-line);
+  border-radius:9px;padding:14px 16px;margin-bottom:10px}
+.alert .t{font-weight:600;font-size:13.5px;margin-bottom:7px;color:var(--alert)}
+.alert .d{color:var(--muted);font-size:12.5px;margin-bottom:8px}
+.crit{background:#fafaf9;border:1px solid var(--line);border-radius:6px;
+  padding:8px 10px;font-size:12px;color:var(--muted);margin:8px 0 10px;line-height:1.55}
+.crit b{color:var(--ink);font-weight:560}
+.btns{display:flex;gap:7px}
+.btn{padding:4.5px 11px;font-size:12.5px;border:1px solid var(--line2);border-radius:6px;
+  background:#fff;color:var(--ink);cursor:pointer}
+.btn.p{background:var(--ink);color:#fff;border-color:var(--ink)}
+.btn.d{border-color:#fca5a5;color:#b91c1c}
+
+table{width:100%;border-collapse:collapse}
+th{text-align:left;font-weight:560;font-size:11.5px;color:var(--faint);
+  padding:0 10px 7px 0;border-bottom:1px solid var(--line)}
+td{padding:8px 10px 8px 0;border-bottom:1px solid #f4f4f5;font-size:13px;vertical-align:top}
+tr:last-child td{border-bottom:none}
+.st{font-size:11.5px;font-weight:560}
+.st.ok{color:var(--muted)}
+.st.no{color:var(--ink)}
+.st.kill{color:var(--alert)}
+.dim{color:var(--faint)}
+.num{font-family:var(--mono);font-size:12.5px}
+
+.kv{display:flex;justify-content:space-between;padding:6px 0;font-size:13px;
+  border-bottom:1px solid #f4f4f5}
+.kv:last-child{border:none}
+.kv .k{color:var(--muted)}
+.kv .v{font-family:var(--mono);font-size:12.5px}
+.note{margin-top:10px;padding:9px 10px;background:#fafaf9;border-radius:6px;
+  font-size:11.5px;color:var(--muted);line-height:1.6}
+
+.empty{padding:26px 22px;text-align:left}
+.empty .big{font-size:15px;font-weight:600;margin-bottom:4px}
+
+/* task timeline */
+.tl{position:relative;padding-left:19px}
+.tl:before{content:"";position:absolute;left:4px;top:6px;bottom:6px;width:1px;background:var(--line)}
+.ev{position:relative;padding:7px 0}
+.ev:before{content:"";position:absolute;left:-19px;top:13px;width:9px;height:9px;
+  border-radius:50%;background:#fff;border:1.5px solid var(--line2)}
+.ev.f:before{border-color:var(--ink);background:var(--ink)}
+.ev.k:before{border-color:var(--alert);background:var(--alert)}
+.ev .h{font-size:13px}
+.ev .m{font-size:12px;color:var(--faint);margin-top:1px}
+
+.footer{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);
+  font-size:11.5px;color:var(--faint)}
+
+@media (max-width:99999px){
+  .wrap{padding:0 14px 40px}
+  .grid{grid-template-columns:1fr;gap:20px}
+  .top{flex-direction:column;align-items:flex-start;gap:11px}
+  .nav{width:100%;overflow-x:auto}
+  .health h1{font-size:18px}
+  .health .facts{flex-direction:column;gap:3px}
+  /* 表格 → 卡片流（不把桌面布局压缩成移动布局） */
+  table,thead,tbody,th,td,tr{display:block}
+  thead{display:none}
+  tr{border:1px solid var(--line);border-radius:8px;padding:10px 12px;
+    margin-bottom:8px;background:var(--panel)}
+  td{border:none;padding:2px 0;display:flex;justify-content:space-between;gap:14px}
+  td:before{content:attr(data-l);color:var(--faint);font-size:11.5px;flex:none}
+  .btn{padding:8px 14px}          /* 移动端误触成本更高，加大点击区 */
+  .btns{flex-direction:column}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style></head>
+<body style="width:390px;margin:0 auto;border-left:1px solid #e4e4e7;border-right:1px solid #e4e4e7;min-height:100vh"><div class="wrap">
+<div class="top">
+  <div class="brand">GrandeGPT<span>console.agentjoey.ai</span></div>
+  <nav class="nav">
+    <a href="#" class="on">概览</a>
+    <a href="#" class="">任务</a>
+    <a href="#" class="">账本</a>
+    <a href="#" class="">连接</a>
+  </nav>
+</div>
+
+<div class="health warn">
+  <h1><span class="pulse a"></span>2 项需要你看一眼</h1>
+  <div class="facts">
+    <span>Gateway <b>在线</b> · 47 分钟</span><span>schema <b>v5</b></span>
+    <span>token epoch <b>1</b></span><span>活跃任务 <b>2</b></span><span>卷可用 <b>67 GiB</b></span>
+  </div>
+</div>
+
+<div class="grid">
+<div>
+  <h2>需要你看一眼 <em>· 判据明确的异常，不含阈值型指标</em></h2>
+
+  <div class="alert">
+    <div class="t">1 个审计操作卡在中间态</div>
+    <div class="d"><span class="mono">op_5e3ed471-8dd9</span> · grande_repo_edit ·
+      停在 <b>INTENT</b> · 07-30 18:07 · task-ub-probe-20260729-001</div>
+    <div class="crit"><b>判据</b>：审计状态机是
+      <span class="mono">PENDING→ALLOWED→EXECUTING→终态</span>。停在中间态说明工具执行中断，
+      且没有留下终态记录——不是阈值判断，不会误报。</div>
+    <div class="btns"><button class="btn p">查看操作</button><button class="btn">标记为已知</button></div>
+  </div>
+
+  <div class="alert">
+    <div class="t">1 个审计句柄推进失败</div>
+    <div class="d"><span class="mono">op_f815ee64-f35c</span> · grande_run ·
+      <span class="mono">decision=PENDING</span> 而 <span class="mono">state=FAILED</span></div>
+    <div class="crit"><b>判据</b>：decision 未到 <span class="mono">ALLOWED</span> 却已进入终态。
+      上游 reason：「审计句柄推进失败——Policy 未放行或已被他人使用」。<br>
+      <b>不做成告警的对照</b>：job 失败率 <b>不在</b>这里。unit-selfhost 31 失败 / 31 通过，
+      那是 TDD 的 RED-GREEN 节奏，不是故障。</div>
+    <div class="btns"><button class="btn p">查看操作</button><button class="btn">标记为已知</button></div>
+  </div>
+
+  <h2 style="margin-top:22px">活跃任务 <em>· 2</em></h2>
+  <table>
+    <thead><tr><th>任务</th><th>仓库 / 分支</th><th>改动</th><th>最近 job</th><th>开始</th></tr></thead>
+    <tbody>
+    <tr>
+      <td data-l="任务"><span class="mono">task-urbanbricks-seo-…001</span></td>
+      <td data-l="仓库"><span class="dim">urbanbricks</span><br><span class="mono">grande/container-content-seo-0001</span></td>
+      <td data-l="改动"><span class="num">—</span></td>
+      <td data-l="最近 job"><span class="dim">无</span></td>
+      <td data-l="开始"><span class="dim">07-30 18:11</span></td>
+    </tr>
+    <tr>
+      <td data-l="任务"><span class="mono">task-ub-probe-20260729-001</span></td>
+      <td data-l="仓库"><span class="dim">urbanbricks</span><br><span class="mono">grande/ub-probe-20260729-001--001</span></td>
+      <td data-l="改动"><span class="num">0 文件</span></td>
+      <td data-l="最近 job">probe-slow <span class="st ok">passed</span> <span class="dim">90s</span></td>
+      <td data-l="开始"><span class="dim">07-29 02:23</span></td>
+    </tr>
+    </tbody>
+  </table>
+</div>
+
+<div>
+  <h2>磁盘</h2>
+<div class="card">
+  <div class="kv"><span class="k">卷可用空间</span><span class="v">67 GiB / 228 GiB</span></div>
+  <div class="kv"><span class="k">worktree 自有内容</span><span class="v">36.1 MB<span class="dim"> · 2 个</span></span></div>
+  <div class="kv"><span class="k">共享依赖</span><span class="v">597 MB<span class="dim"> · 不占额外空间</span></span></div>
+  <div class="kv"><span class="k">checkpoints</span><span class="v">960 KB</span></div>
+  <div class="kv"><span class="k">artifacts</span><span class="v">1.1 MB</span></div>
+  <div class="note"><b>为什么不显示 <span class="mono">du</span> 的数字</b>：depDirs 用 APFS clonefile
+  克隆，共享物理块，而 <span class="mono">du</span> 给每份都完整计一遍。实测一份 597 MB 的
+  node_modules，克隆它时卷可用空间只掉 15 MB——<b>高估约 40 倍</b>。
+  照搬会让人为了腾出根本不存在的空间去删有用的 worktree。</div>
+</div>
+  <h2 style="margin-top:20px">签发率</h2>
+  <div class="card">
+    <div class="kv"><span class="k">commit</span><span class="v">3</span></div>
+    <div class="kv"><span class="k">其中带 attestation</span><span class="v">0</span></div>
+    <div class="note">S2 的 Verification Attestation 已合并，但<b>一次都没签发过</b>——
+    每次 commit 都报「当前工作区状态没有对应的通过验证记录」。
+    这不是告警（没有明确判据说它一定错），但是该被看见的事实。</div>
+  </div>
+</div>
+</div>
+<div class="footer">Mockup · S2.5 阶段② · 数据取自 2026-07-31 的真实控制平面</div>
+</div></body></html>
