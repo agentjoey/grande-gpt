@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { networkInterfaces } from "node:os";
+import { connect } from "node:net";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -426,5 +428,53 @@ describe("启动流程", () => {
       });
       expect(res.status).toBe(200);
     } finally { await gw.close(); db.close(); }
+  });
+});
+
+describe("网关只绑 loopback（纵深防御的前提）", () => {
+  /** 本机第一个非环回 IPv4。拿不到就跳过——CI/无网环境下这条无从验证。 */
+  function lanIp(): string | null {
+    const nets = networkInterfaces();
+    for (const list of Object.values(nets)) {
+      for (const n of list ?? []) {
+        if (n.family === "IPv4" && !n.internal) return n.address;
+      }
+    }
+    return null;
+  }
+
+  function reachable(host: string, port: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      const sock = connect({ host, port });
+      const done = (v: boolean) => { sock.destroy(); resolve(v); };
+      sock.setTimeout(1500);
+      sock.once("connect", () => done(true));
+      sock.once("timeout", () => done(false));
+      sock.once("error", () => done(false));
+    });
+  }
+
+  it("从本机 LAN IP 连不上，从 127.0.0.1 连得上", async () => {
+    const ip = lanIp();
+    // 防空转：拿不到 LAN IP 这条测试就没有意义，必须显式说出来而不是静默通过。
+    if (!ip) {
+      console.warn("[skip] 拿不到非环回 IPv4，本条无法验证");
+      return;
+    }
+    const port = 8791;
+    const savedPort = process.env.PORT;
+    process.env.PORT = String(port);   // startGateway 从 env 读端口
+    const cfg: AppConfig = { issuer: ISSUER, layout, db: openDb(layout),
+                             accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD } };
+    const gw = await startGateway(cfg);
+    try {
+      // 正向：loopback 必须连得上，否则下面那条「连不上」可能只是服务没起来
+      expect(await reachable("127.0.0.1", port)).toBe(true);
+      // 反向：这才是本条要守的东西
+      expect(await reachable(ip, port)).toBe(false);
+    } finally {
+      await gw.close();
+      if (savedPort === undefined) delete process.env.PORT; else process.env.PORT = savedPort;
+    }
   });
 });

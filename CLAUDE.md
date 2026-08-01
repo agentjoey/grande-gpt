@@ -235,6 +235,28 @@ GrandeGPT 自己跑不了 `pnpm install`（profile 是 argv 白名单），要�
 glob 是 Node 内置 `path.matchesGlob`，已实测：`a/**` 匹配 `a/x` 与 `a/n/x`；
 `**/x` 在仓库根也匹配；比对大小写不敏感（APFS）。
 
+### ⚠️ 网关曾绑在所有网卡上，而日志说它绑在 127.0.0.1（2026-08-02 实测修复）
+
+`serve({ fetch, port })` 不带 hostname 时 `@hono/node-server` 绑的是**所有网卡**。
+实测：同一 Wi-Fi 上用本机 LAN IP（`192.168.0.14:8787`）能直接连到网关。
+
+核心防线没破——`/mcp` 仍要 bearer（401）、`/authorize` 仍要 Access JWT（403）。
+**但「隧道 + Cloudflare Access 是唯一入口」这个纵深防御假设是假的**，
+而本文件与多份设计一直是那么写的。`/register`（DCR）更是完全没有门禁。
+
+**而 `main.ts` 里那行 `[gateway] listening on 127.0.0.1:${port}` 是硬编码的字符串**——
+它恰恰是「以为只绑了 loopback」这个错误认知的来源。现在打印实际值。
+
+已改为显式 `hostname: "127.0.0.1"`（`GRANDE_HOST` 可覆盖，留给测试）。
+`tests/server.test.ts` 有一条行为断言：从本机 LAN IP 连不上、从 loopback 连得上，
+带 load-bearing 证明（拆掉 hostname 即变红）。隧道不受影响——
+`~/.cloudflared/grande-gpt.yml` 指的是 `http://localhost:8787`。
+
+**这是「文案说一套、实现是另一套」在 grande-gpt 里的一例。** 同期在 console 里
+连续出现四次（告警判据、节奏条配色、图表状态集合、CSS 注释的覆盖范围）。
+教训：**凡是在注释/日志/文案里断言实现行为的地方，都要有一条测试钉住那句话**，
+否则它只是一句愿望。
+
 ### ⚠️ 测试替身会让整整一层变成 no-op（S3 宿主验收，2026-07-30）
 
 `grande_push` 从未真正推成功过一次，而 606 个测试全绿。原因不是漏改、不是空转测试，

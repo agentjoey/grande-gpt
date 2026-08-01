@@ -32,7 +32,9 @@ async function main(): Promise<void> {
 
   const gw = await startGateway({ issuer, layout, db, accessConfig });
   const port = Number(process.env.PORT || "8787");
-  console.log(`[gateway] listening on 127.0.0.1:${port}  issuer=${issuer}`);
+  // 打印【实际】绑定地址而不是硬编码的 127.0.0.1——上一版那行字是假的，
+    // 而它恰恰是「以为只绑了 loopback」这个错误认知的来源之一。
+    console.log(`[gateway] listening on ${process.env.GRANDE_HOST ?? "127.0.0.1"}:${port}  issuer=${issuer}`);
   console.log(`[gateway] workspace=${layout.workspaceRoot}`);
   console.log(`[gateway] control=${layout.controlRoot}`);
 

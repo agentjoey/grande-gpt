@@ -303,7 +303,25 @@ export async function startGateway(cfg: AppConfig): Promise<{ app: Hono; close: 
 
   const app = createApp(cfg);
   const port = Number(process.env.PORT || "8787");
-  const srv = serve({ fetch: app.fetch, port });
+
+  /**
+   * ⚠️ **hostname 必须显式给出。**
+   *
+   * `serve({ fetch, port })` 不带 hostname 时 `@hono/node-server` 绑的是**所有网卡**
+   * （`*:8787`），不是 loopback。2026-08-02 实测：同一 Wi-Fi 上用本机 LAN IP
+   * （`192.168.0.14:8787`）可以直接连到网关。
+   *
+   * 核心防线当时没破——`/mcp` 仍要 bearer（401）、`/authorize` 仍要 Access JWT（403）。
+   * **但「隧道 + Cloudflare Access 是唯一入口」这个纵深防御假设是假的**，
+   * 而设计文档与 CLAUDE.md 一直是那么写的。`/register`（DCR）更是完全没有门禁。
+   *
+   * Cloudflare 隧道不受影响：`~/.cloudflared/grande-gpt.yml` 指的是
+   * `http://localhost:8787`，cloudflared 是本机进程，走 loopback。
+   *
+   * `HOST` 环境变量留给测试用（要验证「非 loopback 连不上」就得先能绑上去）。
+   */
+  const hostname = process.env.GRANDE_HOST ?? "127.0.0.1";
+  const srv = serve({ fetch: app.fetch, port, hostname });
 
   return {
     app,
