@@ -9,7 +9,7 @@ import { SignJWT, exportJWK, generateKeyPair } from "jose";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Hono } from "hono";
 import { openDb } from "../src/db.ts";
-import { bumpEpoch } from "../src/tokenEpoch.ts";
+import { bumpEpoch, currentEpoch } from "../src/tokenEpoch.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createJob, getJob } from "../src/jobs.ts";
 import { createTask } from "../src/tasks.ts";
@@ -476,5 +476,81 @@ describe("网关只绑 loopback（纵深防御的前提）", () => {
       await gw.close();
       if (savedPort === undefined) delete process.env.PORT; else process.env.PORT = savedPort;
     }
+  });
+});
+
+describe("控制台写端点：aud 隔离（S2.5 方案 A）", () => {
+  const CONSOLE_AUD = "b".repeat(64);
+
+  function consoleCfg(): AppConfig {
+    return {
+      issuer: ISSUER, layout, db: openDb(layout),
+      accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },
+      consoleAccessConfig: { teamDomain: ACCESS_TEAM, aud: CONSOLE_AUD },
+    };
+  }
+
+  it("两个 aud 相同时【拒绝启动】——静默失效的隔离比没有隔离更糟", () => {
+    expect(() => createApp({
+      issuer: ISSUER, layout, db: openDb(layout),
+      accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },
+      consoleAccessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },  // 同一个
+    })).toThrow(/aud 相同/);
+  });
+
+  it("没给控制台配置时，写端点【整组不挂载】——不挂一组没门禁的路由", async () => {
+    const a = createApp({
+      issuer: ISSUER, layout, db: openDb(layout),
+      accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },
+    });
+    const res = await a.request("/console/revoke-all", { method: "POST" });
+    expect(res.status).toBe(404);
+  });
+
+  it("无 Access header → 403，且【不产生任何副作用】", async () => {
+    const a = createApp(consoleCfg());
+    const before = currentEpoch(openDb(layout));
+    const res = await a.request("/console/revoke-all", { method: "POST" });
+    expect(res.status).toBe(403);
+    expect(currentEpoch(openDb(layout))).toBe(before);   // epoch 没被动过
+  });
+
+  it("**拿 /mcp 的 Access 令牌调控制台写端点 → 403**（隔离的正向证明）", async () => {
+    const a = createApp(consoleCfg());
+    const mcpToken = await signAccessAssertion({ aud: ACCESS_AUD });   // /mcp 那个 aud
+    const res = await a.request("/console/revoke-all", {
+      method: "POST", headers: { "Cf-Access-Jwt-Assertion": mcpToken },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("**拿控制台的 Access 令牌调 /authorize → 403**（隔离的反向证明）", async () => {
+    const a = createApp(consoleCfg());
+    const consoleToken = await signAccessAssertion({ aud: CONSOLE_AUD });
+    const res = await a.request("/authorize?client_id=x&redirect_uri=https://chatgpt.com/connector/oauth/x&response_type=code&code_challenge=x&code_challenge_method=S256&resource=" + encodeURIComponent(`${ISSUER}/mcp`), {
+      headers: { "Cf-Access-Jwt-Assertion": consoleToken },
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("带正确的控制台令牌 → 真的执行，并且【进审计账本】", async () => {
+    const a = createApp(consoleCfg());
+    const token = await signAccessAssertion({ aud: CONSOLE_AUD });
+    const res = await a.request("/console/revoke-all", {
+      method: "POST", headers: { "Cf-Access-Jwt-Assertion": token },
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; data: { epochAfter: number } };
+    expect(body.ok).toBe(true);
+    expect(body.data.epochAfter).toBeGreaterThan(1);
+
+    // 走 Gateway 的全部意义就在这一条：控制台做的事必须留痕。
+    const db = openDb(layout);
+    const row = db.prepare(
+      "SELECT tool, decision, state FROM audit WHERE tool='console_revoke_all' ORDER BY at DESC LIMIT 1",
+    ).get() as { tool: string; decision: string; state: string } | undefined;
+    expect(row).toBeDefined();
+    expect(row!.decision).toBe("ALLOWED");
+    expect(row!.state).toBe("SUCCEEDED");
   });
 });

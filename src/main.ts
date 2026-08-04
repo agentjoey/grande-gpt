@@ -3,7 +3,8 @@ import { pathToFileURL } from "node:url";
 import { openDb } from "./db.ts";
 import { ensureLayout, loadLayout } from "./layout.ts";
 import { startGateway } from "./server.ts";
-import { loadAccessConfig } from "./accessGate.ts";
+import { loadAccessConfig, AccessConfigError, type AccessConfig } from "./accessGate.ts";
+import { loadConsoleAccessConfig } from "./consoleAuth.ts";
 import { awaitAllJobsSettled } from "./runner.ts";
 import { planGc, applyGc } from "./worktreeGc.ts";
 
@@ -28,9 +29,21 @@ async function main(): Promise<void> {
   // 在启动时读一次、校验一次——缺失或格式错误必须在这里响亮地拒绝启动，
   // 而不是留到第一个用户登录时才在请求路径里发现。
   const accessConfig = loadAccessConfig(layout);
+  // 控制台配置缺失不致命：没配就是没装控制台，写端点整组不挂载。
+  // 但**格式错误是致命的**——那说明有人试图配它却配错了，静默跳过会让人以为装上了。
+  let consoleAccessConfig: AccessConfig | undefined;
+  try {
+    consoleAccessConfig = loadConsoleAccessConfig(layout);
+  } catch (e) {
+    if (e instanceof AccessConfigError && e.code === "MISSING_CONFIG") {
+      console.log("[gateway] 未配置控制台 Access（access-console.yaml 不存在），写端点不挂载");
+    } else {
+      throw e;
+    }
+  }
   const db = openDb(layout);
 
-  const gw = await startGateway({ issuer, layout, db, accessConfig });
+  const gw = await startGateway({ issuer, layout, db, accessConfig, consoleAccessConfig });
   const port = Number(process.env.PORT || "8787");
   // 打印【实际】绑定地址而不是硬编码的 127.0.0.1——上一版那行字是假的，
     // 而它恰恰是「以为只绑了 loopback」这个错误认知的来源之一。

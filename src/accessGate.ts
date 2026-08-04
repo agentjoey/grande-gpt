@@ -91,11 +91,31 @@ export function createAccessGate(cfg: AccessConfig) {
           "直连或 Access 未配置时一律拒绝。",
       );
     }
-    const { payload } = await jwtVerify(assertion, jwks, {
-      issuer: cfg.teamDomain,
-      audience: cfg.aud,
-      algorithms: ["RS256"],
-    });
+    /**
+     * ⚠️ **jose 的校验失败必须包装成 `AccessDeniedError`。**
+     *
+     * 上一版直接 `await jwtVerify(...)` 不 catch，于是**签名错、issuer 错、
+     * aud 不匹配、令牌过期——全部漏成 500**，而调用方期待的是 403。
+     *
+     * 两层后果：① 客户端拿到 500 会当作服务端故障去重试，实际是它没权限；
+     * ② 500 在日志里长得像 bug，会把真正的越权尝试淹没在噪音里。
+     *
+     * 这条是写控制台写端点的 aud 隔离测试时撞出来的——**`/authorize` 一直有**，
+     * 只是此前没有测试打过「令牌本身合法、但 aud 是另一个应用」这条路径。
+     */
+    let payload: Awaited<ReturnType<typeof jwtVerify>>["payload"];
+    try {
+      ({ payload } = await jwtVerify(assertion, jwks, {
+        issuer: cfg.teamDomain,
+        audience: cfg.aud,
+        algorithms: ["RS256"],
+      }));
+    } catch (e) {
+      // 具体原因只留在服务端诊断里，不回给调用方——否则就成了一个探测 aud 的预言机。
+      throw new AccessDeniedError(
+        `Cf-Access-Jwt-Assertion 校验失败：${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
     return { email: String(payload.email ?? ""), sub: String(payload.sub ?? "") };
   };
 }

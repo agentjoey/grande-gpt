@@ -11,6 +11,8 @@ import { registeredIds } from "./registry.ts";
 import { reconcileRunningJobs } from "./jobs.ts";
 import { buildTools, type ToolDef } from "./tools.ts";
 import { createAccessGate, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
+import { assertDistinctAudience } from "./consoleAuth.ts";
+import { mountConsoleRoutes } from "./consoleRoutes.ts";
 
 export interface AppConfig {
   issuer: string;
@@ -19,6 +21,11 @@ export interface AppConfig {
   /** Cloudflare Access 门禁配置（规格 §7.0⓪）。由调用方在启动时用 loadAccessConfig() 读取——
    *  配置本身缺失/格式错误必须在那一步就拒绝启动，这里只接收已校验好的值，不在每次请求时重读。 */
   accessConfig: AccessConfig;
+  /**
+   * 控制台的 Access 配置（`access-console.yaml`）。**可选**：不给就不挂写端点，
+   * 而不是挂一组没有门禁的路由——缺配置的含义是「门禁没装」，不是「不需要门禁」。
+   */
+  consoleAccessConfig?: AccessConfig;
 }
 
 const VALID_REPO_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -80,6 +87,12 @@ export function createApp(cfg: AppConfig): Hono {
   // 只建一次（进程启动时），不在每次请求里重建——JWKS 拉取器有自己的缓存，
   // 重建等于每次请求都可能重新走一遍网络。
   const assertApproved = createAccessGate(accessConfig);
+
+  // 控制台写端点（S2.5 方案 A）。两个 aud 必须不同，否则拒绝启动——
+  // 相同的话隔离静默失效，而一切看起来都正常工作（见 consoleAuth.ts）。
+  if (cfg.consoleAccessConfig) {
+    assertDistinctAudience(accessConfig, cfg.consoleAccessConfig);
+  }
 
   const oauthCfg: OAuthConfig = {
     issuer,
@@ -280,6 +293,10 @@ export function createApp(cfg: AppConfig): Hono {
     await mcpServer.connect(transport);
     const response = await transport.handleRequest(c.req.raw);
     return response;
+  }
+
+  if (cfg.consoleAccessConfig) {
+    mountConsoleRoutes(app, { db, consoleAccess: cfg.consoleAccessConfig });
   }
 
   app.all("/mcp", (c) => handleMcp(c, undefined));
