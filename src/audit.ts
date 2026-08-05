@@ -10,8 +10,9 @@ import { assertValidId } from "./paths.ts";
  * （fail-open）的地方。没有选 `DENIED` 当默认值：那同样是编造一个 Policy 从未
  * 做出的结论，只是方向相反。`PENDING` 不编造，只陈述「还不知道」这个事实。
  */
-export type AuditDecision = "PENDING" | "ALLOWED" | "DENIED";
-export type AuditState = "INTENT" | "EXECUTING" | "SUCCEEDED" | "FAILED";
+// 单一真相源在 contract.ts；控制台读同一份。
+export type { AuditDecision, AuditState } from "./contract.ts";
+import type { AuditDecision, AuditState } from "./contract.ts";
 
 export interface AuditRow {
   opId: string;

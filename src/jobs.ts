@@ -1,7 +1,12 @@
 import type { DatabaseSync } from "node:sqlite";
 import { StateError } from "./errors.ts";
+import type { JobState as ContractJobState } from "./contract.ts";
 
-export type JobState = "running" | "passed" | "failed" | "timeout" | "killed" | "cancelled";
+/**
+ * 单一真相源在 `contract.ts`。**控制台的图表按同一份枚举分类**——
+ * 上一版两边各写一遍，结果控制台只认三个值，墙钟超时的 job 在图上没有名字。
+ */
+export type JobState = ContractJobState;
 
 export interface JobRow {
   jobId: string;

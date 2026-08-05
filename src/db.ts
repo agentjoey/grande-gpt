@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Layout } from "./layout.ts";
+import { SCHEMA_VERSION as CONTRACT_VERSION } from "./contract.ts";
 
 /**
  * 当前代码认识的 schema 版本，落在 SQLite 内置的 `PRAGMA user_version`（一个
@@ -24,7 +25,8 @@ import type { Layout } from "./layout.ts";
  * 导出是为了让测试断言跟着它走。**不要在测试里写死版本号**——那只会让每次升版
  * 多一道手改杂活，而真正的门禁是运行时那道（版本不符直接拒绝打开，线上表现为 502）。
  */
-export const SCHEMA_VERSION = 6;
+/** 单一真相源在 `contract.ts`——控制台也读那一份，改一处两边一起动。 */
+export const SCHEMA_VERSION = CONTRACT_VERSION;
 
 /** 打开状态库并保证 schema 就位；已有库版本必须与当前代码完全一致。 */
 export function openDb(layout: Layout): DatabaseSync {
