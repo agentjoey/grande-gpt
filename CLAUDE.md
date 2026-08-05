@@ -29,7 +29,8 @@
 
 ## 当前状态：S0 → S3 全部完成；S1 / S1.5 / S2 / S3 由 ChatGPT 自举实现
 
-**S0-A/B/C/D、S0.5、S1、S1.5、S2、S3 均已合并到 `main`。** 622 测试通过，typecheck 干净。
+**S0-A/B/C/D、S0.5、S1、S1.5、S2、S3 均已合并到 `main`。** 629 测试通过，typecheck 干净。
+**S2.5 控制台已上线**（`console.agentjoey.ai`，独立仓库 `GPT_Workspace/grande-console`，20 测试）。
 
 ⚠️ **S3 的宿主验收（2026-07-30）查出 `grande_push` 从未真正推成功过一次**——
 `http.extraHeader` 用了 `Bearer`，而 GitHub 的 git 端点只接受 `Basic`
@@ -142,7 +143,7 @@
 | ~~11~~ | ~~**`unit-selfhost` 排除的 5 个文件，其不变量在自举时完全失去保护**~~ **已加 `grande outer-test`（2026-07-30）** | S2 实测撞上：工具计数从 11 变 13，`tools.test.ts` 的计数不变量红了而实现者看不见。这次后果轻，下次可能是安全断言。**建议加一个 `grande outer-test` CLI 子命令**，让「该跑外层了」有机制提醒，而不是靠人记得 |
 | ~~12~~ | ~~**`readOnlyPaths` 一条规则都没配**，实测 `grande_repo_edit` 能写 `.github/workflows/**`~~ **已配（2026-07-30）** | 全局规则写在 `~/.grande-control/config/deny.yaml` 的 `readOnlyPaths`（该文件此前只有 `prefixes`）。判定原则：**内容会在沙箱之外被执行或被信任的路径一律只读**。12 条双向探针实测（8 拒 + 4 放行无误伤）。存档副本 [`docs/reference/control-plane-config/deny.yaml`](docs/reference/control-plane-config/deny.yaml)。⚠️ 有意保留的缺口：`package.json` 的 `postinstall`/`prepare` 同样在沙箱外执行，但设成只读会让绝大多数正常任务做不了 |
 | 13 | **schema 校验失败折叠成 `INTERNAL`。** 把 `ops` 写成 `edits` 得到的是「Gateway 内部错误。详情见服务端日志。」 | **模型看不到服务端日志，撞上这个错完全无从下手。** 应返回 `INVALID_INPUT` 并点名字段 |
-| 14 | **没有「连 refresh token 一起吊销」的命令。** `grande revoke` 只切 access token；refresh 仍能换新的 | 单用户下影响有限（refresh 也在你自己机器上），但「彻底断开」目前仍要手改 `oauth_refresh`。`revoke` 的输出已明说这一点，不假装断干净了 |
+| ~~14~~ | ~~**没有「连 refresh token 一起吊销」的命令。**~~ **已做（2026-08-05）**：控制台 `/connections` 的「彻底断开」= epoch + 清 refresh 两步合一，经 Gateway 执行并进审计账本。CLI 的 `grande revoke` 仍只做前一步 | `grande revoke` 只切 access token；refresh 仍能换新的 | 单用户下影响有限（refresh 也在你自己机器上），但「彻底断开」目前仍要手改 `oauth_refresh`。`revoke` 的输出已明说这一点，不假装断干净了 |
 | 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
 

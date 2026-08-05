@@ -17,11 +17,14 @@ import type { Layout } from "./layout.ts";
  * 无状态 access token（此前只能等 8 小时过期）。见 `src/tokenEpoch.ts`。
  * ⚠️ 升级到 5 之后**所有已签发的 access token 立即失效**（缺 epoch claim 一律拒绝），
  * 客户端需要重新授权一次——这是有意的，见 tokenEpoch.ts 里的取舍说明。
+ * `5 → 6`：告警确认。新增 `audit_ack` 表——控制台的「标记为已知」**只追加确认记录，
+ * 绝不修改 audit 原行**（账本不可篡改）。没有它，判据明确的异常会永远挂在首屏，
+ * 两天后人就开始无视整个告警区，而那正是设计要避免的。
  *
  * 导出是为了让测试断言跟着它走。**不要在测试里写死版本号**——那只会让每次升版
  * 多一道手改杂活，而真正的门禁是运行时那道（版本不符直接拒绝打开，线上表现为 502）。
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /** 打开状态库并保证 schema 就位；已有库版本必须与当前代码完全一致。 */
 export function openDb(layout: Layout): DatabaseSync {
@@ -131,6 +134,15 @@ export function openDb(layout: Layout): DatabaseSync {
     CREATE TABLE IF NOT EXISTS oauth_epoch (
       k TEXT PRIMARY KEY,
       v INTEGER NOT NULL
+    );
+
+    -- 告警确认。**只追加，不修改 audit 原行**——账本不可篡改是铁律。
+    -- 「标记为已知」的语义是「我看过了，知道这回事」，不是「这条不存在」：
+    -- 原行仍在账本里，只是不再占用首屏的告警位。
+    CREATE TABLE IF NOT EXISTS audit_ack (
+      opId    TEXT PRIMARY KEY,
+      ackedAt INTEGER NOT NULL,
+      note    TEXT
     );
   `);
 
