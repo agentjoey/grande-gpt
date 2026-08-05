@@ -144,6 +144,36 @@ function digest(input: unknown): string {
  * `decision='DENIED'` 与非空 `pathsTouched` 因此不可能共存于同一行——不是
  * 靠调用方自律，是这组 CAS 谓词的交集为空。
  */
+/**
+ * ## ⚠️ 两种调用模式，**不要混用**
+ *
+ * 系统里有两种推进审计句柄的方式，各自完整，但**混起来会中止正常的操作**：
+ *
+ * ```
+ * 模式 A（内联）—— 工具层自己走完
+ *   const h = beginAudit(...); h.allowed();
+ *   if (!h.executing()) return 失败;
+ *   ...干活...
+ *   h.succeeded(paths);
+ *
+ * 模式 B（穿透）—— 把句柄交给领域函数，由它推进
+ *   const h = beginAudit(...); h.allowed();
+ *   const r = repoEdit(worktree, ops, rules, h);   // ← executing/succeeded 在里面
+ * ```
+ *
+ * **模式 B 的调用点看起来像「漏了 executing() 守卫」**，很容易被顺手补上。
+ * 补上之后会发生什么（已实测）：
+ *
+ * 1. 工具层 `executing()` → `true`，state 推到 EXECUTING
+ * 2. 领域函数内部再调 `executing()` → **`false`**（CAS 谓词要求 `state='INTENT'`）
+ * 3. 领域函数据此抛 `POLICY_DENIED：审计句柄推进失败——Policy 未放行或已被他人使用`
+ *
+ * **一个本来正常的操作被中止，而错误消息指向完全错误的方向。**
+ * 账本本身不会被污染（每一步都有 CAS），但用户会看到一个查不出原因的失败。
+ *
+ * 现用模式 B 的地方：`grande_repo_edit`（→ `repoFile.ts`）、`grande_run`（→ `runner.ts`）。
+ * `tests/auditPattern.test.ts` 有一条结构性检查扫描全部调用点，混用会红。
+ */
 export function beginAudit(
   db: DatabaseSync,
   a: { taskId: string | null; tool: string; input: unknown },
