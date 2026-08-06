@@ -1,3 +1,4 @@
+import { ArgError } from "./argCheck.ts";
 import { PathSecurityError } from "./paths.ts";
 import { PolicyError } from "./policy.ts";
 import { ProfileError } from "./profiles.ts";
@@ -62,6 +63,7 @@ const MAP: Record<string, { code: ToolErrorCode; retryable: boolean }> = {
  * 冒充一次可信的策略或状态决定。
  */
 const KNOWN = [
+  ArgError,
   PathSecurityError, PolicyError, ProfileError, EditError,
   SearchError, MapError, RunnerError, GitError,
   SbplError, SandboxError, StateError,

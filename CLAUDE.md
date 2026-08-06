@@ -142,7 +142,7 @@
 | 10 | **PAT 配置已确认正确**（截图核对）：Repository access 只有 `agentjoey/urbanbricks-poc`、无 user permissions、Repository permissions 是 metadata:R + code/commit statuses/deployments/PR:RW，2026-10-28 过期 | ⚠️ **`deployments` 与 `commit statuses` 写权限本切片用不到**，可以收掉（低优先）。另：`GET /user/repos` **不能**用来验证 fine-grained 授权范围——公开仓库对任何已认证 token 都可读（实测该 token 能读 `torvalds/linux`），该端点会把「公开可读」和「已授权」混在一起。**权限授予只能在设置页看** |
 | ~~11~~ | ~~**`unit-selfhost` 排除的 5 个文件，其不变量在自举时完全失去保护**~~ **已加 `grande outer-test`（2026-07-30）** | S2 实测撞上：工具计数从 11 变 13，`tools.test.ts` 的计数不变量红了而实现者看不见。这次后果轻，下次可能是安全断言。**建议加一个 `grande outer-test` CLI 子命令**，让「该跑外层了」有机制提醒，而不是靠人记得 |
 | ~~12~~ | ~~**`readOnlyPaths` 一条规则都没配**，实测 `grande_repo_edit` 能写 `.github/workflows/**`~~ **已配（2026-07-30）** | 全局规则写在 `~/.grande-control/config/deny.yaml` 的 `readOnlyPaths`（该文件此前只有 `prefixes`）。判定原则：**内容会在沙箱之外被执行或被信任的路径一律只读**。12 条双向探针实测（8 拒 + 4 放行无误伤）。存档副本 [`docs/reference/control-plane-config/deny.yaml`](docs/reference/control-plane-config/deny.yaml)。⚠️ 有意保留的缺口：`package.json` 的 `postinstall`/`prepare` 同样在沙箱外执行，但设成只读会让绝大多数正常任务做不了 |
-| 13 | **schema 校验失败折叠成 `INTERNAL`。** 把 `ops` 写成 `edits` 得到的是「Gateway 内部错误。详情见服务端日志。」 | **模型看不到服务端日志，撞上这个错完全无从下手。** 应返回 `INVALID_INPUT` 并点名字段 |
+| ~~13~~ | ~~**schema 校验失败折叠成 `INTERNAL`。**~~ **已修（2026-08-06）**：新增 `src/argCheck.ts`，在 `tools.ts` 的**唯一出口**给每个 handler 前置校验。`{taskId, edits: []}` 现在返回 `INVALID_INPUT`：「缺少必填参数：ops；不认识这些参数：edits。（名字写错了？）该工具接受的参数是：ops、taskId。」 | **三类问题必须一起报**——只说「缺少 ops」的话，传了数组却被告知「缺数组」的人只会以为格式不对，看不出真正的问题是名字写错了。`INTERNAL` 兜底本身未削弱（`tests/errors.test.ts` 直接钉住），只是不再被参数错误触发 |
 | ~~14~~ | ~~**没有「连 refresh token 一起吊销」的命令。**~~ **已做（2026-08-05）**：控制台 `/connections` 的「彻底断开」= epoch + 清 refresh 两步合一，经 Gateway 执行并进审计账本。CLI 的 `grande revoke` 仍只做前一步 | `grande revoke` 只切 access token；refresh 仍能换新的 | 单用户下影响有限（refresh 也在你自己机器上），但「彻底断开」目前仍要手改 `oauth_refresh`。`revoke` 的输出已明说这一点，不假装断干净了 |
 | 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
@@ -257,6 +257,10 @@ glob 是 Node 内置 `path.matchesGlob`，已实测：`a/**` 匹配 `a/x` 与 `a
 连续出现四次（告警判据、节奏条配色、图表状态集合、CSS 注释的覆盖范围）。
 教训：**凡是在注释/日志/文案里断言实现行为的地方，都要有一条测试钉住那句话**，
 否则它只是一句愿望。
+
+⚠️ **第 7 次（2026-08-06，`argCheck.ts`）**：我在注释里写「『缺少 ops』和『不认识
+edits』要一起说」，紧接着的实现却在第一条命中就 `throw` 了。**先写的测试逮住了它**
+——这是这条教训第一次真的起了作用，而不是事后才被发现。
 
 ### ⚠️ 测试替身会让整整一层变成 no-op（S3 宿主验收，2026-07-30）
 

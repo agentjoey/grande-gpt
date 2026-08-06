@@ -313,10 +313,21 @@ describe("响应信封", () => {
     expect(r.error.code).toBe("POLICY_DENIED");
   });
 
-  it("未知异常降级为 INTERNAL 而不是让整个调用失败", async () => {
+  it("必填参数漏传时降级成【点名字段的 INVALID_INPUT】，而不是让整个调用失败", async () => {
+    // 这条原先断言的是 INTERNAL——因为「必填参数传 undefined」当时确实会一路
+    // 炸到一个非 KNOWN 的异常上。**那正是遗留表 #13**：模型收到「Gateway 内部
+    // 错误。详情见服务端日志。」而它看不到服务端日志，完全无从下手。
+    //
+    // `src/argCheck.ts` 现在在 handler 之前挡住这一类，所以这条构造不再可能到达
+    // INTERNAL。**INTERNAL 兜底本身没有被削弱**，只是不再被参数错误触发；
+    // 它的行为（含「不泄漏原始 message」）由 tests/errors.test.ts 直接钉住。
+    //
+    // 保留在这里的仍是原来的意图：错误以【信封】形式返回，而不是让整个工具调用抛出。
     const r = JSON.parse(await callToolThatThrowsRaw());
     expect(r.ok).toBe(false);
-    expect(r.error.code).toBe("INTERNAL");
+    expect(r.error.code).toBe("INVALID_INPUT");
+    expect(r.error.message).toContain("path");          // 点名了漏掉的字段
+    expect(r.error.message).not.toContain("详情见服务端日志");
   });
 
   it("错误消息里不含 layout.workspaceRoot 这个绝对路径前缀", async () => {

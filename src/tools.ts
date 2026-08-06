@@ -1,3 +1,4 @@
+import { checkArgs } from "./argCheck.ts";
 import { err } from "./envelope.ts";
 import { toToolError, redact } from "./errors.ts";
 import { loadGuidance } from "./guidance.ts";
@@ -58,5 +59,46 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     };
   }
 
-  return addLocalLoopTools(deps, tools);
+  return withArgCheck(deps, addLocalLoopTools(deps, tools));
+}
+
+/**
+ * 给**每一个**工具的 handler 前置一道入参校验（遗留表 #13）。
+ *
+ * ## 为什么接在这里
+ *
+ * 这是生产工具列表的**唯一出口**——`server.ts` 从这里拿，测试也从这里拿。
+ * 接在 `server.ts` 的注册循环里会漏掉 `addLocalLoopTools` 之外的调用方，
+ * 而「接了但没接全」正是本项目已出现 5 次的 P-A 形状。
+ *
+ * 注意顺序：必须在 `addLocalLoopTools` **之后**包，否则它新加的工具没有校验。
+ *
+ * ## 为什么不是靠 SDK 的 zod
+ *
+ * `server.ts` 的 `toZodSchema` 确实建出了带 `required` 的 zod schema，但那道
+ * 校验只在 MCP over HTTP 这一条路径上，**且它的失败是 JSON-RPC 层的错误**，
+ * 不是我们的 `ok/error` 信封——模型拿到的东西形状都不一样。这里统一成信封。
+ */
+function withArgCheck(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
+  for (const tool of tools) {
+    const inner = tool.handler;
+    tool.handler = async (args) => {
+      try {
+        checkArgs(tool, args);
+      } catch (e) {
+        const te = toToolError(e);
+        te.message = redact(te.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+        // taskId 尽量带上：模型靠它把错误对回是哪个任务。参数本身可能就是错的，
+        // 所以只在它确实是字符串时才用。
+        return {
+          structuredContent: err({
+            ...te,
+            taskId: typeof args.taskId === "string" ? args.taskId : null,
+          }),
+        };
+      }
+      return inner(args);
+    };
+  }
+  return tools;
 }
