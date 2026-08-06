@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname } from "node:path";
+import { dirname } from "node:path";
 import type { AuditHandle } from "./audit.ts";
 import { createCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
 import { truncateText } from "./envelope.ts";
-import { loadLayout } from "./layout.ts";
+import type { Layout } from "./layout.ts";
 import { resolveInRepo } from "./paths.ts";
 import { assertWritable, assertWritableResolved, type DenyRules } from "./policy.ts";
 import { moveToTrash } from "./trash.ts";
@@ -139,13 +139,39 @@ function pathsOf(op: EditOp): string[] {
 }
 
 /**
+ * `repoEdit` 建 checkpoint / 移入 Trash 所需的控制平面上下文。
+ *
+ * 遗留 #6/#7：这两样原先是**在函数内部自己拿的**——`layout` 来自
+ * `loadLayout()`（读全局环境变量的模块级配置），`taskId` 来自 `basename(root)`。
+ *
+ * 后者引入了一条**签名上完全看不见的前置条件**：「root 的最后一段必须是一个
+ * 合法 taskId」。安全上没有洞（root 来自库里的 `task.worktreePath`，且
+ * `createCheckpoint` / `moveToTrash` 内部都会再 `assertTaskId`），但它意味着
+ * 任何人想复用 repoEdit 都得先知道这条不成文的约定，而编译器不会提醒他。
+ *
+ * 前者则让一个「只依赖入参」的函数变成了读全局配置的函数——测试要构造它必须
+ * 先摆好环境变量，复用它必须接受它去读你没打算给它的那份布局。
+ */
+export interface EditContext {
+  layout: Layout;
+  /** 这批编辑归属的任务。**显式传，不再从 root 的最后一段猜。** */
+  taskId: string;
+}
+
+/**
  * 批量修改仓库文件。支持 create、modify、move 与可恢复的 delete。
  *
  * 先全量校验，再为本批涉及的路径建立 checkpoint，最后逐个落盘。写阶段任一步
  * 抛错都会先尝试恢复 checkpoint，再把导致失败的原始错误重新抛出；回滚自己的
  * 错误只记日志，不能掩盖调用方真正需要处理的那一个错误。
  */
-export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules, audit: AuditHandle): EditResult {
+export function repoEdit(
+  root: string,
+  ops: readonly EditOp[],
+  rules: DenyRules,
+  audit: AuditHandle,
+  ctx: EditContext,
+): EditResult {
   if (ops.length === 0) throw new EditError("INVALID_INPUT", "ops 不能为空");
 
   try {
@@ -218,11 +244,7 @@ export function repoEdit(root: string, ops: readonly EditOp[], rules: DenyRules,
       throw new EditError("POLICY_DENIED", "审计句柄推进失败——Policy 未放行或已被他人使用。");
     }
 
-    const layout = loadLayout();
-    // grande_repo_edit 只接受 taskId，并总是把对应 task.worktreePath 作为 root；worktree
-    // 目录的最后一段就是 taskId。保留 repoEdit 的四参数公共形状，避免把布局依赖
-    // 扩散到所有既有调用点，同时由 createCheckpoint 内部再次 assertTaskId。
-    const taskId = basename(root);
+    const { layout, taskId } = ctx;
     const affectedPaths = resolved.flatMap((r) => pathsOf(r.op));
     const checkpointId = createCheckpoint(layout, taskId, root, affectedPaths);
 

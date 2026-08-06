@@ -5,7 +5,7 @@ import { PathSecurityError, resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
 import { getTask, listActiveTasks, createTask, updateTaskState } from "./tasks.ts";
 import { loadProfiles } from "./profiles.ts";
-import { getJob, listJobs } from "./jobs.ts";
+import { getJob, listJobs, TERMINAL } from "./jobs.ts";
 import { jobReport, jobStateToError, startJob } from "./runner.ts";
 import { repoRead } from "./repoFile.ts";
 import { repoEdit, type EditOp } from "./repoFile.ts";
@@ -561,7 +561,10 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             const rules = loadEffectiveDenyRules(layout, t.worktreePath);
             const h = beginAudit(db, { taskId, tool: "grande_repo_edit", input: { ops } });
             h.allowed();
-            const r = repoEdit(t.worktreePath, ops, rules, h);
+            // 遗留 #6/#7：layout 与 taskId 显式传入。此前 repoEdit 自己 loadLayout()
+              // 并 basename(root)——后者是一条签名上看不见的前置条件，
+              // 而这两个值在这里本来就都在手边。
+              const r = repoEdit(t.worktreePath, ops, rules, h, { layout, taskId });
             const paths = r.applied.map((a) => a.path);
             return ok({
               taskId,
@@ -680,7 +683,10 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             return ok({
               taskId,
               data: r,
-              hint: r.state === "running"
+              // 遗留 #1（同源）：非终态一律说「仍在运行中」。写成 `=== "running"`
+              // 的话，新增的非终态会掉进下面那条分支，模型读到「状态：<非终态>」
+              // 会当作已结束——**而 P-1 的自主轮询正是靠这句 hint 决定要不要再取一次**。
+              hint: !TERMINAL.has(r.state)
                 ? `Job ${jobId} 仍在运行中`
                 : `Job ${jobId} 状态：${r.state}${r.exitCode !== null ? `，exitCode: ${r.exitCode}` : ""}${r.networkDenied ? "（疑似网络被拒——启发式判定，非沙箱权威信号）" : ""}`,
               truncated: r.truncated,
@@ -714,7 +720,11 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
                 taskContext: makeTaskContext(db, layout, taskId),
               });
             }
-            const running = listJobs(db, taskId).filter((j) => j.state === "running");
+            // 遗留 #1：用 jobs.ts 的 TERMINAL 集合取补，不写 `state === "running"`。
+            // 今天两者等价（六个 JobState 里终态占五个），但加一个非终态就会漏，
+            // 而这个守卫漏了意味着 worktree 会在 job 还活着时被删——
+            // 那正是本项目已出现两次的「同源漏改」形状。
+            const running = listJobs(db, taskId).filter((j) => !TERMINAL.has(j.state));
             if (running.length > 0) {
               throw new StateError(
                 "JOB_RUNNING",

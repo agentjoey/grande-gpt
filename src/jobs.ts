@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { StateError } from "./errors.ts";
-import type { JobState as ContractJobState } from "./contract.ts";
+import { TERMINAL_JOB_STATES, type JobState as ContractJobState } from "./contract.ts";
 
 /**
  * 单一真相源在 `contract.ts`。**控制台的图表按同一份枚举分类**——
@@ -22,7 +22,16 @@ export interface JobRow {
   summary: Record<string, unknown> | null;
 }
 
-const TERMINAL: ReadonlySet<JobState> = new Set(["passed", "failed", "timeout", "killed", "cancelled"]);
+/**
+ * 已结束的 job。**从 `contract.ts` 推导，不再手写第二份名单**——
+ * 上一版这里硬编码了五个值，与 `contract.ts` 的 `JOB_STATES` 各自维护，
+ * 而那正是 `contract.ts` 存在的理由（遗留表 #1）。将来加一个 JobState，
+ * 这个集合自动跟上，不需要有人记得回来改。
+ *
+ * 导出给 `toolsCore.ts` 的 `grande_task_close` 守卫用——那里原先写的是
+ * `j.state === "running"`，今天行为等价（六个值里终态占五个），加状态就漏。
+ */
+export const TERMINAL: ReadonlySet<JobState> = new Set(TERMINAL_JOB_STATES);
 
 function toRow(r: Record<string, unknown>): JobRow {
   return {

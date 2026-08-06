@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import type { DatabaseSync } from "node:sqlite";
 import { AccessDeniedError, createAccessGate, type AccessConfig } from "./accessGate.ts";
 import { beginAudit } from "./audit.ts";
-import { getJob, finishJob } from "./jobs.ts";
+import { getJob, finishJob, TERMINAL } from "./jobs.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
 
 /**
@@ -74,9 +74,12 @@ export function mountConsoleRoutes(app: Hono, deps: ConsoleDeps): void {
       const f = fail("not_found", `job ${jobId} 不存在。`, 404);
       return c.json(f.body, f.status);
     }
-    if (job.state !== "running") {
+    // 遗留 #1（同源）：判据是「已进终态」，不是「不等于 running」。
+    // 这里说反了的后果比别处重——一个非终态的新状态会被当成「已经结束了」
+    // 而拒绝杀，于是控制台上那颗「杀掉」按钮对它永远不生效。
+    if (TERMINAL.has(job.state)) {
       // 幂等的失败：已经结束了就说清楚，不假装成功也不当作错误重试。
-      const f = fail("not_running", `job ${jobId} 当前是 ${job.state}，不是 running，无需杀。`, 409);
+      const f = fail("not_running", `job ${jobId} 当前是 ${job.state}，已经结束，无需杀。`, 409);
       return c.json(f.body, f.status);
     }
     if (job.pgid === null || job.pgid === undefined) {

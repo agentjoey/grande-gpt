@@ -4,7 +4,7 @@ import { join, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { truncateText } from "./envelope.ts";
 import type { Layout } from "./layout.ts";
-import { createJob, finishJob, getJob, type JobState } from "./jobs.ts";
+import { createJob, finishJob, getJob, TERMINAL, type JobState } from "./jobs.ts";
 import { assertTaskId, resolveRepoPath } from "./paths.ts";
 import { getProfile } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
@@ -318,9 +318,13 @@ export function jobReport(db: DatabaseSync, jobId: string): JobReport {
 
   const s = j.summary;
 
-  if (j.state === "running") {
+  // 遗留 #1（同源）：判据是「还没进终态」，不是「等于 running」。
+  // 下面那些字段（exitCode / durationMs / artifactPath）全是 null 的理由是
+  // job 还没结束——**加一个非终态时，落进下面的终态分支读出的会是脏值**，
+  // 而不是这里诚实的 null。`state` 回填 j.state，不写死 "running"。
+  if (!TERMINAL.has(j.state)) {
     return {
-      truncated: false, state: "running", exitCode: null, outputTruncated: false,
+      truncated: false, state: j.state, exitCode: null, outputTruncated: false,
       killedBy: null, durationMs: null, peakRssMb: null, artifactPath: null,
       summary: "仍在运行中。", networkDenied: false,
     };

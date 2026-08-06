@@ -132,11 +132,11 @@
 
 | # | 问题 | 状态 |
 |---|---|---|
-| 1 | `task_close` 的守卫写 `j.state === "running"` 而非用 `jobs.ts` 的 `TERMINAL` 集合 | 今天行为等价（`JobState` 6 值、`TERMINAL` 占 5），将来加状态会漏。**同源漏改**形状 |
+| ~~1~~ | ~~`task_close` 的守卫写 `j.state === "running"`~~ **已修（2026-08-06）**。`jobs.ts` 的 `TERMINAL` 改为从 `contract.ts` 推导并导出 | 机械扫描找出的**不止那一处**：`toolsCore.ts` 的 task_close 守卫与 run_result 的 hint、`runner.ts` 的 jobReport、`consoleRoutes.ts` 的 kill 路由，共 4 处。其中 kill 路由的 `!== "running"` 方向是反的——新增非终态会被当成「已结束」而拒绝杀。`tests/jobStatePattern.test.ts` 扫 `src/` 钉住这条 |
 | 2 | GC 方向 A 只认「完全没有 task 行」。`CLOSED` 但目录残留（`removeWorktree` 在 `branch -D` 抛错）两个方向都看不见 | 由 w1 在 s05-3 报告里主动提出，规格合规，候选第三种情形 |
 | 3 | `grande_repo_search` 的 `truncated` 信号被模型忽略过一次（未跟进 `nextCursor`） | 观察项，**单次样本**，不足以定性 |
-| 6 | `repoEdit` 里 `const taskId = basename(root)` | 引入「`root` 最后一段必须是合法 taskId」这个**签名上看不见的前置条件**。安全上无洞（`root` 来自库里的 `task.worktreePath`，且 `createCheckpoint`/`moveToTrash` 都会再 `assertTaskId`），但脆。应改为显式传 `taskId` |
-| 7 | `repoEdit` 里调 `loadLayout()` | 原本只依赖入参的函数现在读全局配置，测试与复用都变难 |
+| ~~6~~ | ~~`repoEdit` 里 `const taskId = basename(root)`~~ **已修（2026-08-06）**：新增必填的第五个形参 `ctx: EditContext`（`{layout, taskId}`）| 生产调用点只有一个（`toolsCore.ts`），原注释说的「避免扩散到所有既有调用点」指的其实是 28 处测试。行为证据：故意让 `basename(root)` 与 `ctx.taskId` 不一致，checkpoint 跟着 ctx 走 |
+| ~~7~~ | ~~`repoEdit` 里调 `loadLayout()`~~ **已修（2026-08-06）**，与 #6 同一个 `ctx` 参数 | `repoFile.ts` 现在只 `import type { Layout }`，不再读全局配置 |
 | 8 | 历史 S0 文档仍写着 `repo_edit` 不支持 delete | 已被 S1 规格取代；实现者主动标注过，未做全仓历史文档改写 |
 | 9 | **备份（Backlog，不着急）** —— 目标：本地 NAS。两件独立的事，优先级相反：① **控制平面 `~/.grande-control/`（26M）不在任何 git 仓库、无版本控制**，其中审计账本按定义不可重建；⚠️ `secrets/` 绝不能进备份仓库，需要排除方案。② `grande-gpt` 代码无 remote——注意**设计文档也在这个仓库里**，机器挂了一起丢 | Human Owner 已定：放 backlog，走本地 NAS |
 | 10 | **PAT 配置已确认正确**（截图核对）：Repository access 只有 `agentjoey/urbanbricks-poc`、无 user permissions、Repository permissions 是 metadata:R + code/commit statuses/deployments/PR:RW，2026-10-28 过期 | ⚠️ **`deployments` 与 `commit statuses` 写权限本切片用不到**，可以收掉（低优先）。另：`GET /user/repos` **不能**用来验证 fine-grained 授权范围——公开仓库对任何已认证 token 都可读（实测该 token 能读 `torvalds/linux`），该端点会把「公开可读」和「已授权」混在一起。**权限授予只能在设置页看** |
@@ -261,6 +261,17 @@ glob 是 Node 内置 `path.matchesGlob`，已实测：`a/**` 匹配 `a/x` 与 `a
 ⚠️ **第 7 次（2026-08-06，`argCheck.ts`）**：我在注释里写「『缺少 ops』和『不认识
 edits』要一起说」，紧接着的实现却在第一条命中就 `throw` 了。**先写的测试逮住了它**
 ——这是这条教训第一次真的起了作用，而不是事后才被发现。
+
+⚠️ **第 8 次（2026-08-06，`repoFile.test.ts`）**：我写了一条测试断言
+`repoEdit.length === 5`，注释说它「同时钉住了五个参数和五个都必填」。
+**后半句是假的**：`Function.length` 只对 `x = 默认值` 敏感，对 TS 的 `x?: T`
+不敏感——类型层的 `?` 在 strip-types 之后被整个抹掉。实测把签名改成
+`ctx?: EditContext` 之后 `.length` 仍是 5，那个文件 37 条测试全绿。
+
+**是 load-bearing 证明抓住的**，不是审查。教训因此要加一句：
+**写完「这条测试钉住了 X」之后，必须真的把 X 破坏一次看它红不红**——
+否则你钉住的可能只是你以为的那件事。这条对形状/结构类断言尤其重要，
+它们最容易在「看起来对」和「真的对」之间滑过去。
 
 ### ⚠️ 测试替身会让整整一层变成 no-op（S3 宿主验收，2026-07-30）
 
