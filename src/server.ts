@@ -115,6 +115,58 @@ export function createApp(cfg: AppConfig): Hono {
     return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
   };
 
+  /**
+   * JSON-RPC 方法级日志（遗留 #4 上半）。
+   *
+   * ## 为什么需要
+   *
+   * 在此之前 `/mcp` 上只有两种痕迹：`[gw] POST /mcp → 200`（不区分方法）与
+   * `[tool] <名字>`（只在工具**被调用**时才有）。中间整整缺一层：
+   * **客户端取过几次工具表、每次拿走了几个工具，完全看不见。**
+   *
+   * 2026-07-29 那次故障正卡在这里——模型能列出写工具却调不动，而服务端日志里
+   * 连一条请求都没有。当时为了拿到「服务端视角的工具表」，只能临时用库里的
+   * 签名密钥自签一枚 token 手查。那不该是排查时才现想的招（下半见
+   * `grande selfcheck`）。
+   *
+   * ## 为什么在这一层、且要重建 Request
+   *
+   * `tools/list` 由 MCP SDK 内部应答，`registerTool` 的回调只在 `tools/call`
+   * 时触发，所以工具级日志天然看不到它。唯一能看到方法名的地方是进 transport
+   * 之前的原始 body——**而 body 只能读一次**，读完必须用同样的内容重建一个
+   * Request 交下去，否则 transport 拿到的是空的。
+   *
+   * 只记方法名与 id，**不记参数**：`tools/call` 的参数已经由 `[tool]` 那行
+   * 记了（并且那里是解析过的），在这里再记一遍等于把同一份内容（可能含文件
+   * 内容）写进日志两次。
+   *
+   * 响应侧（客户端到底拿走了多大一份工具表）**有意不在这里做**：
+   * StreamableHTTP 的响应可能是 SSE 流，clone 出来读完会把流缓冲住甚至阻塞。
+   * 那个问题归 `grande selfcheck`——它是我们自己的客户端，可以安全地读完整响应。
+   */
+  async function logRpc(raw: Request, toolCount: number): Promise<Request> {
+    if (raw.method !== "POST") return raw;
+    let body: string;
+    try {
+      body = await raw.text();
+    } catch {
+      return raw;   // 读不出来就别耽误正事，日志不是关键路径
+    }
+    try {
+      const msg = JSON.parse(body) as { method?: unknown; id?: unknown };
+      if (typeof msg.method === "string") {
+        // 只有 tools/list 附带工具数——它是这条日志存在的理由。
+        const extra = msg.method === "tools/list" ? ` (${toolCount} 个工具)` : "";
+        const id = msg.id === undefined ? "notif" : `#${String(msg.id)}`;
+        console.log(`[rpc] ${ts()} ${msg.method} ${id}${extra}`);
+      }
+    } catch {
+      console.log(`[rpc] ${ts()} <body 不是合法 JSON，${body.length} 字节>`);
+    }
+    // headers 原样带上；body 换成刚读出来的字符串（content-length 不变）。
+    return new Request(raw.url, { method: raw.method, headers: raw.headers, body });
+  }
+
   // 请求日志。spike 版有、本实现漏了——结果是「ChatGPT 报连接失败」时我们只能猜，
   // 因为分不清请求根本没到、还是到了但被某一步拒了。诊断信息只进服务端日志，不回给调用方。
   //
@@ -291,7 +343,7 @@ export function createApp(cfg: AppConfig): Hono {
     }
 
     await mcpServer.connect(transport);
-    const response = await transport.handleRequest(c.req.raw);
+    const response = await transport.handleRequest(await logRpc(c.req.raw, tools.length));
     return response;
   }
 

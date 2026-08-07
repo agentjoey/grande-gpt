@@ -12,6 +12,23 @@ import { createTask } from "../src/tasks.ts";
 import { saveRegistry } from "../src/registry.ts";
 import { runCli } from "../src/cli.ts";
 
+/**
+ * `runCli` 现在的返回类型是 `number | Promise<number>`——只有 `selfcheck`
+ * 返回 Promise（它要向正在运行的网关起真实 HTTP 请求）。
+ *
+ * 这个包装把「其余命令必须【仍然是同步的】」钉成一条真正的断言，而不是
+ * 把测试里的类型放宽成联合类型糊过去。同步是有意义的性质：这些命令都只读
+ * SQLite，一旦谁把某条改成 async，说明它开始做 I/O 了，那件事应当被看见。
+ */
+function syncCli(argv: string[], out: (l: string) => void): number {
+  const r = runCli(argv, out);
+  if (typeof r !== "number") {
+    throw new Error(`grande ${argv[0]} 应当同步返回退出码，实际拿到的是 Promise`);
+  }
+  return r;
+}
+
+
 let ws: string;
 let ctrl: string;
 let lines: string[];
@@ -53,7 +70,7 @@ afterEach(() => {
 
 describe("grande status", () => {
   it("列出活跃 task 的分支与最近 job", () => {
-    expect(runCli(["status"], out)).toBe(0);
+    expect(syncCli(["status"], out)).toBe(0);
     expect(text()).toContain("task_abc");
     expect(text()).toContain("grande/fix-abc");
     expect(text()).toContain("failed");
@@ -62,14 +79,14 @@ describe("grande status", () => {
   it("没有活跃任务时给出明确提示，而不是空白输出", () => {
     rmSync(join(ctrl, "state"), { recursive: true, force: true });
     lines = [];
-    expect(runCli(["status"], out)).toBe(0);
+    expect(syncCli(["status"], out)).toBe(0);
     expect(text()).toMatch(/没有活跃任务|no active/i);
   });
 });
 
 describe("grande jobs", () => {
   it("列出 job 的 profile、状态与退出码", () => {
-    expect(runCli(["jobs"], out)).toBe(0);
+    expect(syncCli(["jobs"], out)).toBe(0);
     expect(text()).toContain("job_1");
     expect(text()).toContain("unit");
   });
@@ -88,20 +105,20 @@ describe("grande jobs", () => {
     createJob(db, { jobId: "job_other", taskId: "task_other", profile: "lint", argv: [], pgid: null });
     db.close();
 
-    expect(runCli(["jobs", "--task", "task_abc"], out)).toBe(0);
+    expect(syncCli(["jobs", "--task", "task_abc"], out)).toBe(0);
     expect(text()).toContain("job_1");
     expect(text()).not.toContain("job_other");
   });
 
   it("--task 指向不存在的任务时给出提示且退出码非零", () => {
-    expect(runCli(["jobs", "--task", "nope"], out)).not.toBe(0);
+    expect(syncCli(["jobs", "--task", "nope"], out)).not.toBe(0);
   });
 
   it("--task 后面没有值时是用法错误，而不是静默当作「无过滤」", () => {
     // 悬空的 --task（后面没有值）曾经被 rest[taskIdx+1]===undefined 静默等同于
     // 「没传 --task」，于是列出全部 job——job_1 恰好也在无过滤结果里，看起来
     // 像是正常工作。真正的用法错误应该在到达 listJobs 之前就被挡下。
-    expect(runCli(["jobs", "--task"], out)).not.toBe(0);
+    expect(syncCli(["jobs", "--task"], out)).not.toBe(0);
     expect(text()).not.toContain("job_1");
     expect(text()).toContain("--task");
   });
@@ -114,7 +131,7 @@ describe("grande jobs", () => {
     // 不是子串断言来验证这一点：out() 每调用一次对应一行，被拒绝时 runCli
     // 只应该调用一次 out()，且这一次的内容以「用法错误」开头。
     const forged = "task_1\nforged-line";
-    expect(runCli(["jobs", "--task", forged], out)).not.toBe(0);
+    expect(syncCli(["jobs", "--task", forged], out)).not.toBe(0);
     expect(lines.length).toBe(1);
     expect(lines[0]).toMatch(/^用法错误：/);
     expect(lines).not.toContain("forged-line");
@@ -123,7 +140,7 @@ describe("grande jobs", () => {
 
 describe("grande audit", () => {
   it("列出审计流水：opId、工具、决策、状态", () => {
-    expect(runCli(["audit"], out)).toBe(0);
+    expect(syncCli(["audit"], out)).toBe(0);
     expect(text()).toContain("grande_repo_edit");
     expect(text()).toContain("ALLOWED");
     expect(text()).toContain("SUCCEEDED");
@@ -133,7 +150,7 @@ describe("grande audit", () => {
     // grande jobs --task <bad-id> 一直能正确报错（先调用 getTask），但 cmdAudit
     // 从不做这个存在性检查，直接把「查无此任务」和「这个任务真的没有审计记录」
     // 渲染成同一句话——对着一个打错的 task id，人会误以为一切正常。
-    expect(runCli(["audit", "--task", "nope"], out)).toBe(1);
+    expect(syncCli(["audit", "--task", "nope"], out)).toBe(1);
     expect(text()).toContain("任务不存在：nope");
     expect(text()).not.toContain("没有审计记录");
   });
@@ -151,7 +168,7 @@ describe("grande audit", () => {
     db.close();
 
     lines = [];
-    expect(runCli(["audit", "--task", "task_orphan"], out)).toBe(0);
+    expect(syncCli(["audit", "--task", "task_orphan"], out)).toBe(0);
     const t = text();
     expect(t).not.toContain("任务不存在");
     expect(t).toContain("grande_repo_edit");
@@ -159,7 +176,7 @@ describe("grande audit", () => {
   });
 
   it("--task 后面没有值时是用法错误，而不是静默当作「无过滤」", () => {
-    expect(runCli(["audit", "--task"], out)).not.toBe(0);
+    expect(syncCli(["audit", "--task"], out)).not.toBe(0);
     expect(text()).not.toContain("grande_repo_edit");
     expect(text()).toContain("--task");
   });
@@ -171,7 +188,7 @@ describe("grande audit", () => {
     // 错误消息这一整行里（诊断信息，不是问题）；真正要防的是它单独成一行、
     // 看起来像一条真实的 doctor 确认输出——用逐行断言验证这一点没有发生。
     const forged = "task_1\n✓ 审计完整性 — 无未完成记录";
-    expect(runCli(["audit", "--task", forged], out)).not.toBe(0);
+    expect(syncCli(["audit", "--task", forged], out)).not.toBe(0);
     expect(lines.length).toBe(1);
     expect(lines[0]).toMatch(/^用法错误：/);
     expect(lines).not.toContain("✓ 审计完整性 — 无未完成记录");
@@ -186,7 +203,7 @@ describe("grande audit", () => {
     db.close();
 
     lines = [];
-    expect(runCli(["audit"], out)).toBe(0);
+    expect(syncCli(["audit"], out)).toBe(0);
     const t = text();
     expect(t).toContain("DENIED");
     expect(t).toContain("原因：");
@@ -206,7 +223,7 @@ describe("停在 INTENT/EXECUTING 的审计记录（崩溃或中断的痕迹）"
     db.close();
 
     lines = [];
-    expect(runCli(["audit"], out)).toBe(0);
+    expect(syncCli(["audit"], out)).toBe(0);
     const t = text();
     expect(t).toContain("⚠️");
     expect(t).toContain("停在 INTENT/EXECUTING");
@@ -222,7 +239,7 @@ describe("停在 INTENT/EXECUTING 的审计记录（崩溃或中断的痕迹）"
     db.close();
 
     lines = [];
-    expect(runCli(["doctor"], out)).not.toBe(0);
+    expect(syncCli(["doctor"], out)).not.toBe(0);
     const t = text();
     expect(t).toContain("✗ 审计完整性");
     expect(t).toContain("停在 INTENT/EXECUTING");
@@ -231,7 +248,7 @@ describe("停在 INTENT/EXECUTING 的审计记录（崩溃或中断的痕迹）"
 
 describe("grande doctor", () => {
   it("检查 sandbox-exec、工作区、控制平面与注册表，逐项给出结论", () => {
-    expect(runCli(["doctor"], out)).toBe(0);
+    expect(syncCli(["doctor"], out)).toBe(0);
     const t = text();
     expect(t).toContain("sandbox-exec");
     expect(t).toContain("GRANDE_WORKSPACE");
@@ -241,7 +258,7 @@ describe("grande doctor", () => {
   it("注册了但目录不存在时报出问题并以非零码退出", () => {
     rmSync(join(ws, "demo"), { recursive: true, force: true });
     lines = [];
-    expect(runCli(["doctor"], out)).not.toBe(0);
+    expect(syncCli(["doctor"], out)).not.toBe(0);
     expect(text()).toMatch(/demo/);
   });
 });
@@ -257,7 +274,7 @@ describe("GRANDE_WORKSPACE 缺失时干净失败（而不是抛出裸异常）",
     delete process.env.GRANDE_WORKSPACE;
     let code!: number;
     expect(() => {
-      code = runCli(["status"], out);
+      code = syncCli(["status"], out);
     }).not.toThrow();
     expect(code).not.toBe(0);
     expect(text()).toContain("GRANDE_WORKSPACE");
@@ -268,7 +285,7 @@ describe("GRANDE_WORKSPACE 缺失时干净失败（而不是抛出裸异常）",
     delete process.env.GRANDE_WORKSPACE;
     let code!: number;
     expect(() => {
-      code = runCli(["jobs"], out);
+      code = syncCli(["jobs"], out);
     }).not.toThrow();
     expect(code).not.toBe(0);
     expect(text()).toContain("GRANDE_WORKSPACE");
@@ -279,7 +296,7 @@ describe("GRANDE_WORKSPACE 缺失时干净失败（而不是抛出裸异常）",
     delete process.env.GRANDE_WORKSPACE;
     let code!: number;
     expect(() => {
-      code = runCli(["audit"], out);
+      code = syncCli(["audit"], out);
     }).not.toThrow();
     expect(code).not.toBe(0);
     expect(text()).toContain("GRANDE_WORKSPACE");
@@ -289,34 +306,34 @@ describe("GRANDE_WORKSPACE 缺失时干净失败（而不是抛出裸异常）",
 
 describe("命令行本身", () => {
   it("未知命令给出用法且退出码非零", () => {
-    expect(runCli(["nonsense"], out)).not.toBe(0);
+    expect(syncCli(["nonsense"], out)).not.toBe(0);
     expect(text()).toContain("status");
   });
 
   it("无参数时打印用法", () => {
-    expect(runCli([], out)).not.toBe(0);
+    expect(syncCli([], out)).not.toBe(0);
     expect(text()).toContain("doctor");
   });
 
   it("USAGE 不提供除 gc --apply 外的变更命令", () => {
-    runCli([], out);
+    syncCli([], out);
     for (const verb of ["create", "delete", "remove", "run", "edit", "register"]) {
       expect(text().toLowerCase()).not.toContain(`grande ${verb}`);
     }
   });
 });
 
-describe("进程入口守卫（真实子进程，覆盖 runCli() 单元测试永远碰不到的 import.meta.url 判定）", () => {
+describe("进程入口守卫（真实子进程，覆盖 syncCli() 单元测试永远碰不到的 import.meta.url 判定）", () => {
   // 这里的问题只存在于「Node 把这个模块当成主模块直接跑起来」这条路径——本文件
   // 其它所有测试都通过 `import { runCli } from "../src/cli.ts"` 在同一个 vitest
-  // 进程里调用 runCli()，永远不会触发文件末尾 `isMainModule()` 那一段判断逻辑
+  // 进程里调用 syncCli()，永远不会触发文件末尾 `isMainModule()` 那一段判断逻辑
   // （vitest 自己才是这个进程的 argv[1]/main module）。要证明「经符号链接调用时
   // 不再静默 exit 0、不再空输出」，唯一办法是真的 spawn 一个独立的 node 子进程，
   // 用真实的 argv 触发这段判断。
   //
   // 用 `status` 而不是无参数：beforeEach 已经在共享的 ws/ctrl 下写好了 task_abc
   // 及其 job/audit fixture，子进程复用同一对临时目录（通过 env 传入），断言的是
-  // 这个 fixture 特有的字符串——一个仍然卡在旧判定逻辑里、根本没跑 runCli() 的
+  // 这个 fixture 特有的字符串——一个仍然卡在旧判定逻辑里、根本没跑 syncCli() 的
   // 坏实现只会 exit 0 且 stdout 为空，断言必然失败，不是靠巧合通过。
   const realCli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 

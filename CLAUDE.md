@@ -67,7 +67,7 @@
 `tests/tools.test.ts` 里有一条精确名单断言（不是「全 false」也不是「至少一个 false」），
 新增任何触网工具都必须在 `SPEC` 表里显式声明 `openWorld: true`，否则变红。
 
-**七个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`、`outer-test`、`revoke`。
+**八个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`、`outer-test`、`revoke`、`selfcheck`。
 `gc` / `outer-test` / `revoke` 默认只列出或预演，加 `--apply` / `--run` / `--yes` 才执行。
 
 **`grande revoke --yes` 是唯一的紧急切断手段**——递增 token epoch，所有在途 access token
@@ -144,7 +144,7 @@
 | ~~12~~ | ~~**`readOnlyPaths` 一条规则都没配**，实测 `grande_repo_edit` 能写 `.github/workflows/**`~~ **已配（2026-07-30）** | 全局规则写在 `~/.grande-control/config/deny.yaml` 的 `readOnlyPaths`（该文件此前只有 `prefixes`）。判定原则：**内容会在沙箱之外被执行或被信任的路径一律只读**。12 条双向探针实测（8 拒 + 4 放行无误伤）。存档副本 [`docs/reference/control-plane-config/deny.yaml`](docs/reference/control-plane-config/deny.yaml)。⚠️ 有意保留的缺口：`package.json` 的 `postinstall`/`prepare` 同样在沙箱外执行，但设成只读会让绝大多数正常任务做不了 |
 | ~~13~~ | ~~**schema 校验失败折叠成 `INTERNAL`。**~~ **已修（2026-08-06）**：新增 `src/argCheck.ts`，在 `tools.ts` 的**唯一出口**给每个 handler 前置校验。`{taskId, edits: []}` 现在返回 `INVALID_INPUT`：「缺少必填参数：ops；不认识这些参数：edits。（名字写错了？）该工具接受的参数是：ops、taskId。」 | **三类问题必须一起报**——只说「缺少 ops」的话，传了数组却被告知「缺数组」的人只会以为格式不对，看不出真正的问题是名字写错了。`INTERNAL` 兜底本身未削弱（`tests/errors.test.ts` 直接钉住），只是不再被参数错误触发 |
 | ~~14~~ | ~~**没有「连 refresh token 一起吊销」的命令。**~~ **已做（2026-08-05）**：控制台 `/connections` 的「彻底断开」= epoch + 清 refresh 两步合一，经 Gateway 执行并进审计账本。CLI 的 `grande revoke` 仍只做前一步 | `grande revoke` 只切 access token；refresh 仍能换新的 | 单用户下影响有限（refresh 也在你自己机器上），但「彻底断开」目前仍要手改 `oauth_refresh`。`revoke` 的输出已明说这一点，不假装断干净了 |
-| 4 | **`tools/list` 未进日志**；且没有「客户端视角」自检手段 | 见下方「ChatGPT 权限档」一节。2026-07-29 那次故障全靠自签 token 手查才定位 |
+| ~~4~~ | ~~**`tools/list` 未进日志**；且没有「客户端视角」自检手段~~ **已做（2026-08-07）**：① `[rpc]` 方法级日志（方法名 + id，tools/list 另带工具数）；② `grande selfcheck` —— 自签一枚 60 秒 token，向【正在运行的】网关问一次 tools/list，按 `readOnlyHint` 分组打印全表 | `tools/list` 由 SDK 内部应答，`registerTool` 的回调只在 `tools/call` 触发，所以 `[tool]` 那行天然看不到它。日志**不记参数**（`[tool]` 已记过，再记一遍等于把文件内容写两次）。selfcheck 必须走真实 HTTP：中间隔着 bearer 校验、epoch 检查、MCP 序列化，分叉恰恰是要找的东西 |
 | 5 | `GET /.well-known/openid-configuration → 404` | ChatGPT 会探这个路径。我们提供的是 RFC 8414 的 `/.well-known/oauth-authorization-server`，OAuth 流程正常完成，**不影响功能**。记下以防将来某客户端真的需要 |
 
 ### ⚠️ ChatGPT 权限档会「列出」但「拒绝调用」写工具（2026-07-29 实测）
@@ -190,12 +190,29 @@ POST http://127.0.0.1:8787/mcp  {"jsonrpc":"2.0","id":1,"method":"tools/list"}
 **漏掉了第三种可能——工具在客户端的表里、但调用路由不到**。
 判别办法：让模型直接列出它能看见的全部工具名。
 
-#### 由此暴露的两个待办
+#### 由此暴露的两个待办 —— **已补（2026-08-07，遗留 #4）**
 
-| # | 缺口 |
-|---|---|
-| 1 | **`tools/list` 没有进日志。** 现在只有 `POST /mcp → 200`，看不出客户端取过几次工具表、拿走了什么。这次全靠自签 token 手查才拿到服务端视角 |
-| 2 | **没有「客户端视角」的自检手段。** 目前唯一办法是让模型自己报它看得见什么——这不该是排查时才临时想起来的招 |
+| # | 缺口 | 现在 |
+|---|---|---|
+| 1 | **`tools/list` 没有进日志。** 只有 `POST /mcp → 200`，看不出客户端取过几次工具表、拿走了什么 | `[rpc]` 一行记方法名 + id，`tools/list` 另带工具数 |
+| 2 | **没有「客户端视角」的自检手段。** 唯一办法是让模型自己报它看得见什么——这不该是排查时才临时想起来的招 | `grande selfcheck` |
+
+**`grande selfcheck` 就是当年那一步的固化。** 它自签一枚 60 秒 token（签名密钥本来就在
+`~/.grande-control/secrets/`，能跑 `grande` 的人一直做得到，这不打开新的门），向**正在
+运行的**网关问一次 `tools/list`，然后按 `readOnlyHint` 分两组打印——那正是当年把三个
+假设收敛到一个变量的那张表。首次实测输出：
+
+```
+HTTP 200 · 11326 字节 · 15 个工具：6 只读 / 9 写
+触网工具  grande_push、grande_pr_open
+破坏性工具 grande_task_close
+```
+
+11,326 远低于 POC 实测的 ~73,896 字节上限——**「响应被静默截断」那个假设一条命令就否掉了**。
+⚠️ 它**必须**连真实运行的网关，连不上就说连不上：直接 `buildTools()` 打印一遍是「我们以为
+客户端看到什么」，而中间隔着 bearer 校验、epoch 检查、MCP 序列化，分叉恰恰是要找的东西。
+⚠️ 那枚 token **绝不打印、绝不写盘**——一枚有效 bearer 落进终端回滚区，等于把「只有本机
+能做」变成「谁看过这块屏幕都能做」。
 
 ### Token epoch：让「吊销」名副其实（2026-07-30，schema v5）
 

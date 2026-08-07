@@ -459,6 +459,38 @@ export function createOAuth(cfg: OAuthConfig) {
     return { sub: String(payload.sub ?? "") };
   }
 
+  /**
+   * 签一枚**只给本机自检用**的 access token（遗留 #4 下半，`grande selfcheck`）。
+   *
+   * ## 这不增加任何权限
+   *
+   * 签名密钥就在 `~/.grande-control/secrets/oauth-key`——能跑 `grande` 的人
+   * 本来就读得到它，自签一枚 token 一直是可能的（2026-07-29 那次排查干的正是
+   * 这件事，只是当时靠手写脚本）。这个函数不打开新的门，只是把一件已经可行、
+   * 但每次都要现搓的事做对：issuer / audience / epoch 与真实签发路径完全一致，
+   * 否则自检看到的就不是客户端看到的。
+   *
+   * ## 两条有意的收紧
+   *
+   * - **60 秒过期**，不是 8 小时。自检是一次性的，令牌活得越久越像个隐患。
+   * - **调用方绝不打印它**。一枚有效 bearer 落进终端回滚区/日志，等于把
+   *   「只有本机能做」变成「谁看过这块屏幕都能做」。`cli.ts` 里只在进程内
+   *   传给 fetch，不 out()、不写盘。
+   *
+   * epoch 照常写入并取当前值——`grande revoke --yes` 之后自检应当同样被拒，
+   * 那才是真实客户端的行为。
+   */
+  async function mintSelfCheckToken(): Promise<string> {
+    return await new SignJWT({ scope: SCOPE, jti: randomUUID(), epoch: currentEpoch(db) })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuer(cfg.issuer)
+      .setAudience(cfg.endpointFor())
+      .setSubject("selfcheck")
+      .setIssuedAt()
+      .setExpirationTime("60s")
+      .sign(KEY);
+  }
+
   return {
     register,
     authorize,
@@ -466,5 +498,6 @@ export function createOAuth(cfg: OAuthConfig) {
     protectedResourceMetadata,
     authServerMetadata,
     verifyBearer,
+    mintSelfCheckToken,
   };
 }

@@ -12,6 +12,7 @@ import { applyGc, planGc } from "./worktreeGc.ts";
 import { spawnSync } from "node:child_process";
 import { planOuterTest } from "./outerTest.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
+import { renderSelfCheck, selfCheck } from "./selfcheck.ts";
 
 const USAGE = `grande —— GrandeGPT 控制平面运维工具
 
@@ -22,6 +23,7 @@ const USAGE = `grande —— GrandeGPT 控制平面运维工具
   grande gc [--apply]           worktree 与 task 对账（默认 dry-run）
   grande outer-test [--run]     跑自举时跑不了的那些测试（默认只列出）
   grande revoke [--yes]         吊销：所有在途 access token 当场失效（默认只预演）
+  grande selfcheck              客户端视角：向【正在运行的】网关问一次 tools/list
 
 除 gc --apply、outer-test --run 与 revoke --yes 外均为只读。
 outer-test 必须在【沙箱外】跑——它跑的正是沙箱里结构上跑不通的那些文件。`;
@@ -310,6 +312,59 @@ function cmdRevoke(out: (l: string) => void, yes: boolean): number {
   });
 }
 
+/**
+ * 客户端视角自检（遗留 #4 下半）。逻辑在 `src/selfcheck.ts`，这里只负责取配置
+ * 与把失败翻译成人能照做的下一步。
+ *
+ * **必须有一个正在跑的网关。** 这是有意的：直接 `buildTools()` 打印一遍是
+ * 「我们以为客户端看到什么」，中间隔着 bearer 校验、epoch 检查、MCP 序列化，
+ * 任何一层分叉恰恰是我们要找的东西。连不上就说连不上，绝不退化成本地推断——
+ * 那会把「连不上」伪装成「一切正常」，而那正是 2026-07-29 那次故障的形态
+ * （服务端全绿、用户侧完全不可用）。
+ */
+async function cmdSelfCheck(out: (l: string) => void): Promise<number> {
+  const issuer = process.env.GRANDE_ISSUER;
+  if (!issuer) {
+    out("GRANDE_ISSUER 未设置——它决定令牌的 aud，必须与网关启动时用的值完全一致。");
+    out("例如：GRANDE_ISSUER=https://grande.agentjoey.ai grande selfcheck");
+    return 1;
+  }
+  // ⚠️ 这里【不能】用 withDb：它在 finally 里 close，而 fn 是同步的，
+  // 我们需要连接在整个 await 期间都活着（epoch 是在请求路径上读的）。
+  // 拿 withDb 包一个 `() => db` 会返回一个已经关掉的连接。
+  let layout: Layout;
+  try {
+    layout = loadLayout();
+  } catch (e) {
+    out(e instanceof Error ? e.message : String(e));
+    return 1;
+  }
+  ensureLayout(layout);
+  const db = openDb(layout);
+
+  // 连本机的实际监听地址，不连 issuer——issuer 走隧道出去再回来，
+  // 那测的是 Cloudflare 而不是网关。aud 仍按 issuer 签，两者不冲突。
+  const port = process.env.PORT || "8787";
+  const host = process.env.GRANDE_HOST ?? "127.0.0.1";
+  const baseUrl = `http://${host}:${port}`;
+
+  try {
+    const result = await selfCheck({ issuer, db, keyPath: join(layout.controlRoot, "secrets", "oauth-key"), baseUrl });
+    for (const line of renderSelfCheck(result)) out(line);
+    return result.httpStatus === 200 ? 0 : 1;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    out(`连不上网关：${msg}`);
+    out("");
+    out(`试的是 ${baseUrl}/mcp。自检需要网关【正在运行】——它走的是真实的 HTTP`);
+    out("路径（bearer 校验、epoch 检查、MCP 序列化都算数），本地推断没有意义。");
+    out("先 `pnpm start` 或检查 PORT / GRANDE_HOST 是否与网关一致。");
+    return 1;
+  } finally {
+    db.close();
+  }
+}
+
 function cmdGc(out: (l: string) => void, apply: boolean): number {
   return withDbExitCode(out, (db, layout) => {
     const plan = planGc(db, layout);
@@ -363,7 +418,7 @@ function cmdGc(out: (l: string) => void, apply: boolean): number {
 }
 
 /** @returns 进程退出码 */
-export function runCli(argv: string[], out: (line: string) => void): number {
+export function runCli(argv: string[], out: (line: string) => void): number | Promise<number> {
   const [cmd, ...rest] = argv;
   const taskIdx = rest.indexOf("--task");
   // taskIdx>=0 且后面没有下一个元素：`--task` 是 argv 的最后一个token，是悬空
@@ -413,6 +468,8 @@ export function runCli(argv: string[], out: (line: string) => void): number {
       return cmdOuterTest(out, rest.includes("--run"));
     case "revoke":
       return cmdRevoke(out, rest.includes("--yes"));
+    case "selfcheck":
+      return cmdSelfCheck(out);
     default:
       if (cmd !== undefined) out(`未知命令：${cmd}`);
       out(USAGE);
@@ -463,5 +520,8 @@ function isMainModule(): boolean {
 }
 
 if (isMainModule()) {
-  process.exit(runCli(process.argv.slice(2), (l) => console.log(l)));
+  // runCli 对 selfcheck 返回 Promise（它要起真实 HTTP 请求），其余命令仍是同步的。
+  // Promise.resolve 把两者统一，不必让每个同步命令都改成 async。
+  Promise.resolve(runCli(process.argv.slice(2), (l) => console.log(l)))
+    .then((code) => process.exit(code));
 }

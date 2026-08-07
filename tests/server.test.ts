@@ -431,6 +431,82 @@ describe("启动流程", () => {
   });
 });
 
+describe("遗留 #4：JSON-RPC 方法级日志", () => {
+  /** 捕获 console.log，返回 [取文本, 还原]。 */
+  function captureLog(): [() => string, () => void] {
+    const lines: string[] = [];
+    const orig = console.log;
+    console.log = (...a: unknown[]) => { lines.push(a.map(String).join(" ")); };
+    return [() => lines.join("\n"), () => { console.log = orig; }];
+  }
+
+  it("tools/list 进日志，并带上工具数——此前这一层完全没有痕迹", async () => {
+    // 2026-07-29：模型能列出写工具却调不动，而服务端只有 `POST /mcp → 200`。
+    // tools/list 由 MCP SDK 内部应答，registerTool 的回调只在 tools/call 时触发，
+    // 所以 [tool] 那行天然看不到它。这条日志是唯一能回答
+    // 「客户端取过几次工具表、每次拿走几个工具」的地方。
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    try {
+      const res = await app.request("/mcp", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" }),
+      });
+      // ① 日志确实出现了，且带方法名、id 与工具数
+      expect(text()).toMatch(/\[rpc\].*tools\/list #7 \(\d+ 个工具\)/);
+      // ② 【关键】body 被读过一次又重建，请求本身必须毫发无损。
+      //    只断言日志的话，一个把 body 吃掉的实现照样"通过"。
+      expect(res.status).toBe(200);
+      const body = await res.text();
+      // ③ 顺带钉住一个实测事实：SDK 在 accept 里同时给 json 与 SSE 时，
+      //    回的是 **SSE**（`event: message` + `data: {...}`），不是裸 JSON。
+      //    `src/selfcheck.ts` 的 extractJsonRpc 因此必须认这两种——只认 JSON 的话，
+      //    自检会报「没有工具」，那比没有自检更糟。
+      expect(body).toContain("event: message");
+      const data = body.split("\n").filter((l) => l.startsWith("data:"))
+        .map((l) => l.slice(5).trim()).join("");
+      const parsed = JSON.parse(data) as { result?: { tools?: unknown[] } };
+      expect((parsed.result?.tools ?? []).length).toBeGreaterThan(0);
+    } finally { restore(); }
+  });
+
+  it("日志【不记参数】——tools/call 的参数已由 [tool] 那行记过", async () => {
+    // 在这里再记一遍等于把同一份内容（可能含整个文件的内容）写进日志两次。
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    try {
+      await app.request("/mcp", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 8, method: "tools/call",
+          params: { name: "grande_repo_read", arguments: { path: "SECRET_MARKER_ONLY_IN_PARAMS" } },
+        }),
+      });
+      const rpcLines = text().split("\n").filter((l) => l.includes("[rpc]"));
+      expect(rpcLines.join("\n")).toContain("tools/call #8");
+      expect(rpcLines.join("\n")).not.toContain("SECRET_MARKER_ONLY_IN_PARAMS");
+      // tools/list 之外的方法不带工具数——那个数字只对 tools/list 有意义
+      expect(rpcLines.join("\n")).not.toMatch(/tools\/call #8 \(/);
+    } finally { restore(); }
+  });
+
+  it("通知（无 id）标成 notif，不渲染成 #undefined", async () => {
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    try {
+      await app.request("/mcp", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+      });
+      expect(text()).toContain("notifications/initialized notif");
+      expect(text()).not.toContain("#undefined");
+    } finally { restore(); }
+  });
+});
+
 describe("网关只绑 loopback（纵深防御的前提）", () => {
   /** 本机第一个非环回 IPv4。拿不到就跳过——CI/无网环境下这条无从验证。 */
   function lanIp(): string | null {

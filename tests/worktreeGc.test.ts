@@ -11,6 +11,23 @@ import { saveRegistry } from "../src/registry.ts";
 import { runCli } from "../src/cli.ts";
 import { planGc, applyGc, type GcPlan } from "../src/worktreeGc.ts";
 
+/**
+ * `runCli` 现在的返回类型是 `number | Promise<number>`——只有 `selfcheck`
+ * 返回 Promise（它要向正在运行的网关起真实 HTTP 请求）。
+ *
+ * 这个包装把「其余命令必须【仍然是同步的】」钉成一条真正的断言，而不是
+ * 把测试里的类型放宽成联合类型糊过去。同步是有意义的性质：这些命令都只读
+ * SQLite，一旦谁把某条改成 async，说明它开始做 I/O 了，那件事应当被看见。
+ */
+function syncCli(argv: string[], out: (l: string) => void): number {
+  const r = runCli(argv, out);
+  if (typeof r !== "number") {
+    throw new Error(`grande ${argv[0]} 应当同步返回退出码，实际拿到的是 Promise`);
+  }
+  return r;
+}
+
+
 let ws: string, ctrl: string, layout: Layout, repo: string;
 let savedWs: string | undefined, savedCtrl: string | undefined;
 
@@ -301,7 +318,7 @@ describe("CLI: grande gc", () => {
     // 确认分支存在
     expect(() => git(repo, "show-ref", "--verify", `refs/heads/${oldBranch}`)).not.toThrow();
 
-    const code = runCli(["gc"], cliOut);
+    const code = syncCli(["gc"], cliOut);
     expect(code).toBe(0);
 
     const t = cliText();
@@ -324,7 +341,7 @@ describe("CLI: grande gc", () => {
 
     expect(existsSync(info.worktreePath)).toBe(true);
 
-    const code = runCli(["gc", "--apply"], cliOut);
+    const code = syncCli(["gc", "--apply"], cliOut);
     expect(code).toBe(0);
 
     const t = cliText();
@@ -358,7 +375,7 @@ describe("CLI: grande gc", () => {
     });
     db.close();
 
-    const code = runCli(["gc"], cliOut);
+    const code = syncCli(["gc"], cliOut);
     expect(code).toBe(0);
 
     const t = cliText();
