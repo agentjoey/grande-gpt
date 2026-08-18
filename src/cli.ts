@@ -6,6 +6,7 @@ import { openDb } from "./db.ts";
 import { runGatewayCli } from "./gatewayCli.ts";
 import { listJobs } from "./jobs.ts";
 import { ensureLayout, loadLayout, type Layout } from "./layout.ts";
+import { applyRepoOnboarding, inspectRepoOnboarding } from "./onboarding.ts";
 import { assertValidId } from "./paths.ts";
 import { getTask, listActiveTasks } from "./tasks.ts";
 import { discoverRepos, loadRegistry } from "./registry.ts";
@@ -21,13 +22,15 @@ const USAGE = `grande —— GrandeGPT 控制平面运维工具
   grande jobs [--task <id>]     job 列表：profile、状态、耗时、退出码
   grande audit [--task <id>]    审计流水：opId、工具、决策、触及路径
   grande doctor                 环境自检
+  grande repo add <id> [--apply]  新 repo onboarding（默认 proposal；--apply 才写控制平面）
   grande gateway <action>       macOS LaunchAgent：install/start/stop/restart/status/uninstall
   grande gc [--apply]           worktree 与 task 对账（默认 dry-run）
   grande outer-test [--task <id>] [--run]  跑自举时跑不了的测试；--task 验收待合并 worktree
   grande revoke [--yes]         吊销：所有在途 access token 当场失效（默认只预演）
   grande selfcheck              客户端视角：向【正在运行的】网关问一次 tools/list
 
-除 gateway 的变更动作、gc --apply、outer-test --run 与 revoke --yes 外均为只读。
+repo add 默认只读；只有 Human Owner 显式传 --apply 才写可信控制平面。
+除 gateway 的变更动作、repo add --apply、gc --apply、outer-test --run 与 revoke --yes 外均为只读。
 outer-test 必须在【沙箱外】跑——它跑的正是沙箱里结构上跑不通的那些文件。`;
 
 function fmtTime(ms: number): string {
@@ -162,7 +165,7 @@ function cmdDoctor(out: (l: string) => void): number {
     fail(
       "已注册仓库",
       candidates.length > 0
-        ? `无。工作区下发现候选：${candidates.join(", ")} —— 需在 ${layout.reposConfig} 中标记 registered: true`
+        ? `无。工作区下发现候选：${candidates.join(", ")} —— 可先 grande repo add <repoId> 检查，再由 Human --apply`
         : `无，且工作区下没有发现任何 git 仓库`,
     );
   } else {
@@ -184,6 +187,52 @@ function cmdDoctor(out: (l: string) => void): number {
   }
 
   return bad === 0 ? 0 : 1;
+}
+
+function cmdRepo(out: (l: string) => void, args: string[]): number {
+  const [action, repoId, ...flags] = args;
+  if (action !== "add" || repoId === undefined) {
+    out("用法错误：grande repo add <repoId> [--apply]");
+    return 1;
+  }
+  try {
+    assertValidId(repoId, "repoId");
+  } catch (e) {
+    out(`用法错误：${e instanceof Error ? e.message : String(e)}`);
+    return 1;
+  }
+
+  let layout: Layout;
+  try {
+    layout = loadLayout();
+    ensureLayout(layout);
+    const proposal = inspectRepoOnboarding(layout, repoId);
+    out(`Onboarding proposal: ${proposal.repoId}`);
+    out(`  Package manager  ${proposal.packageManager ?? "未检测到"}`);
+    for (const name of ["test", "typecheck", "lint", "build"] as const) {
+      const profile = proposal.profiles.find((item) => item.name === name);
+      out(`  ${name.padEnd(15)} ${profile ? `✓ ${profile.argv.join(" ")}` : "✗ 未检测到 script"}`);
+    }
+    out(`  Git remote       ${proposal.remoteConfigured ? "✓ 已配置" : "✗ 未配置"}`);
+    out(`  GitHub           ${proposal.githubRepo ? `✓ ${proposal.githubRepo}` : "✗ 非可用 github.com HTTPS origin"}`);
+    out(`  CI               ${proposal.ciConfigured ? "✓ .github/workflows" : "✗ 未检测到"}`);
+    out(`  Deploy           ${proposal.deployConfigured ? "✓ .grande/deploy.yaml" : "✗ 未配置"}`);
+    out(`  Dependencies     ${proposal.cloneNodeModules ? "✓ 复用 canonical node_modules" : "— 无 node_modules 克隆需求"}`);
+    out(`  Registered       ${proposal.alreadyRegistered ? "✓ 已注册" : "✗ 尚未授权"}`);
+
+    if (!flags.includes("--apply")) {
+      out("");
+      out("以上仅为 proposal，没有写任何配置。Human Owner 确认后加 --apply 写入可信控制平面。");
+      return 0;
+    }
+    applyRepoOnboarding(layout, proposal);
+    out("");
+    out("已写入可信控制平面：repo registration + 不存在的常见 run profiles。repo/secrets 未被修改。");
+    return 0;
+  } catch (e) {
+    out(e instanceof Error ? e.message : String(e));
+    return 1;
+  }
 }
 
 function cmdOuterTest(out: (l: string) => void, run: boolean, taskId?: string): number {
@@ -371,6 +420,8 @@ export function runCli(argv: string[], out: (line: string) => void): number | Pr
       return cmdAudit(out, taskId);
     case "doctor":
       return cmdDoctor(out);
+    case "repo":
+      return cmdRepo(out, rest);
     case "gateway":
       return runGatewayCli(rest, out);
     case "gc":
