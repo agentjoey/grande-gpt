@@ -1,6 +1,7 @@
 # GrandeGPT Phase 4 · S4–S7 最小完整开发闭环
 
 **日期** 2026-08-18  
+**状态** Completed · merged to `main` · production verified  
 **定位** 个人开发者、小团队、中小型/轻量项目  
 **前置** S1 Safe filesystem → S2 Local loop → S3 GitHub push/PR
 
@@ -272,3 +273,33 @@ Phase 4 的 load-bearing 重点包括：
 6. deploy spec 变化后旧 receipt 不能 verify；
 7. verify failure 不能产生 DONE；
 8. Bug/New Request 只建立新 Task，重新进入同一 S4→S7 路径。
+
+---
+
+## 7. Completion / Production Verification
+
+**Phase 4 于 2026-08-18 完成并收口。** 主实现及两个 production 验收过程中发现的兼容性缺陷均已修复并合并：
+
+| PR | 内容 | 结果 |
+|---|---|---|
+| **#1** | S4–S7 主实现 + fine-grained PAT 下 Checks 403 → Actions fallback | merged；head `c4c4e7c`；attestation 有效 |
+| **#2** | Node 24 原生 TypeScript strip-only production runtime 兼容 | merged；head `9ed740c`；新增真实 Node import 回归测试 |
+| **#3** | macOS LaunchAgent production Gateway 常驻 | merged；head `b0cb326`；登录自启 + KeepAlive + CLI 运维入口 |
+
+最终代码级门禁：
+
+- `unit-selfhost`：**53 files / 566 tests passed**；
+- `typecheck`：`tsc --noEmit` exit 0；
+- host `outer-test`：**5 files / 132 tests passed**；
+- Node v24.14.0 默认 strip-only：无需 `--experimental-transform-types` 即可加载 production module graph。
+
+最终 production 实机验证：
+
+- canonical `main` 已包含 PR #1/#2/#3；
+- Gateway 由 `ai.agentjoey.grande-gateway` 用户级 LaunchAgent 管理，`state=running`；
+- `127.0.0.1:8787` 有真实 Node listener；
+- `grande selfcheck`：**HTTP 200 / 23 tools（9 read-only / 14 write）**；
+- ChatGPT 连接器通过 production Gateway 调用 `grande_pr_status` 成功读取真实 GitHub PR，Checks 403 不再阻断 S6；
+- PR #2/#3 均由 GrandeGPT 自己完成 `pr_status → pr_merge`，证明 S6 merge 门禁在 production 路径工作。
+
+完整收口摘要见 [`docs/research/2026-08-18-phase4-closeout.md`](../../research/2026-08-18-phase4-closeout.md)。

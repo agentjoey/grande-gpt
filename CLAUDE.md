@@ -1,9 +1,16 @@
 # GrandeGPT — 项目说明
 
-让用户在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行平台。
-**S0 / S0.5 / S1 / S1.5 均已完成。S1 是第一个由 ChatGPT 经 GrandeGPT 自身实现的切片**（详见下方「当前状态」）。
+让用户在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行层，定位于个人开发者、小团队和中小型/轻量项目。
 
-权威文档：[`docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md)
+**当前状态（2026-08-18）：S0 → S3 与 Phase 4（S4–S7）均已完成并合并到 `main`，完整开发闭环已通过真实 GitHub 与 production Gateway 实机验收。**
+
+当前权威入口：
+
+- [`README.md`](README.md) —— 当前产品定位、能力与 production 运维入口；
+- [`docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md`](docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md) —— S4–S7 当前规格；
+- [`docs/research/2026-08-18-phase4-closeout.md`](docs/research/2026-08-18-phase4-closeout.md) —— Phase 4 最终验收与收口证据。
+
+早期 [`docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md) 与本文件后半的 dated observations 保留为历史决策/事故上下文；其中旧 roadmap、工具数量、Draft PR 等描述不是当前产品状态。
 
 ---
 
@@ -14,79 +21,97 @@
 | # | 决定 | 理由 |
 |---|---|---|
 | D1 | **Runner 只用 macOS Seatbelt（`sandbox-exec`），不引入容器/VM** | 用户明确选择。代价（无资源限制、无镜像 digest 可复现）已知并接受 |
-| D2 | **单用户**，不做多租户 / RBAC / 配额 | 省掉 12–18 人日。将来开放需重做身份层，已接受返工 |
+| D2 | **单用户**，不做多租户 / RBAC / 配额 | GrandeGPT 定位于个人开发者/小团队，不扩成企业平台 |
 | D3 | **代码工作区在 `GPT_Workspace/`，控制平面状态在 `~/.grande-control/`** | 被审计者不能拥有审计记录的写权限 |
 | D4 | **原地模型**：`GPT_Workspace/<project>/` 就是 canonical，不做 bare mirror | 用户要能正常用编辑器干活 |
-| ~~D5~~ | ~~每 repo 一个 MCP 端点 `/mcp/<repoId>`~~ | **已被 D18 取代（2026-07-29）**——实测代价不可接受：N 个仓库 = N 个 ChatGPT 连接器 |
-| D18 | **单一端点 `/mcp` + 任务绑定隔离**，`/mcp/<repoId>` 保留为兼容旧连接器的别名 | 写/跑路径从 `taskId`→`task.repoId` 推导，模型无法自由指定写到哪个仓库；只有 `grande_task_open` 与无任务浏览需要显式 `repoId`。残留风险：提示注入可诱导模型在另一个已注册仓库 `task_open`（该动作走审计、可见，但不阻止），缓解手段留待 S1 |
+| ~~D5~~ | ~~每 repo 一个 MCP 端点 `/mcp/<repoId>`~~ | **已被 D18 取代（2026-07-29）** |
+| D18 | **单一端点 `/mcp` + 任务绑定隔离**，`/mcp/<repoId>` 保留兼容别名 | 写/跑路径从 `taskId → task.repoId` 推导；只有 `grande_task_open` 与无任务浏览显式指定 `repoId` |
 | D6 | **实现语言 TypeScript**，隧道用 Cloudflare Tunnel | MCP 官方 TS SDK 是参考实现 |
 | D7 | **不涉及 Codex**，不读写 `~/.codex`，不上架插件目录 | 用户明确约束 |
-| D8 | **S0 不做**：删除文件 / commit / push / GitHub / Checkpoint / Lease / 网络 | 保证 S0 快速拿到 ChatGPT 交互反馈 |
-| D11 | **POC 先行，未通过不启动 S0** | 55–85 人日押在一个 1–2 天可验证的假设上（模型能否自主轮询）。见规格 §13 |
-| D12 | **必须确认 ChatGPT 账号的训练数据设置** | Plus/Free 消费者账号**默认**用你的内容改进模型；私有代码会流经对话 |
-| D16 | **S0 接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | D13/D15 已作废：OpenAI Secure MCP Tunnel 需要 Platform API key（另一套计费），与「用 chat 额度」的初衷冲突 |
-| D17 | **Production 命名**：隧道 `grande-gpt` → `grande.agentjoey.ai` → `127.0.0.1:8787`，端点 `https://grande.agentjoey.ai/mcp`（D18 之后；`/mcp/<repoId>` 保留为兼容别名） | 已实测跑通 |
+| D16 | **接入方式 = Cloudflare Tunnel + Server URL + OAuth 2.1(PKCE)** | 不依赖 OpenAI Platform API key |
+| D17 | **Production 命名**：`grande.agentjoey.ai` → `127.0.0.1:8787`，主端点 `https://grande.agentjoey.ai/mcp` | 已实测跑通 |
 
-## 当前状态：S0 → S3 全部完成；S1 / S1.5 / S2 / S3 由 ChatGPT 自举实现
+## 当前状态：Phase 4 已完成
 
-**S0-A/B/C/D、S0.5、S1、S1.5、S2、S3 均已合并到 `main`。** 629 测试通过，typecheck 干净。
-**S2.5 控制台已上线**（`console.agentjoey.ai`，独立仓库 `GPT_Workspace/grande-console`，20 测试）。
+Golden Path：
 
-⚠️ **S3 的宿主验收（2026-07-30）查出 `grande_push` 从未真正推成功过一次**——
-`http.extraHeader` 用了 `Bearer`，而 GitHub 的 git 端点只接受 `Basic`
-（REST API 接受 Bearer，两者不是同一套）。已修并对真实 GitHub 跑通完整闭环。
-详见 [`docs/research/2026-07-30-s3-host-verification.md`](docs/research/2026-07-30-s3-host-verification.md)。
+```text
+Request
+→ inspect repo
+→ TaskBrief / acceptance criteria
+→ code + local verify
+→ commit + push
+→ ready PR
+→ CI status / diagnosis
+→ expected-SHA merge
+→ approved deploy
+→ verify
+→ DONE
+```
 
-**S1 是第一个由 ChatGPT 经 GrandeGPT 自身完成的切片**——9 个任务、17 个文件、外加 review 后一轮修复。记录见
-[`docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md`](docs/superpowers/plans/2026-07-29-s1-safe-write-layer.md)。
-**GrandeGPT 可以给任意已注册 repo 用了。**
+Bug、新需求、Issue 与新的 PR feedback 重新创建 Task，继续走同一条闭环；不建设独立 Requirement Management、Release、Incident 或 Deployment Platform。
 
-### 已实现的能力
+### 当前工具面
 
-**十五个 MCP 工具**（`src/tools.ts`；仓库始终由 `taskId` 单向推导，D18）：
+**23 个 MCP tools：9 read-only / 14 write。** Task 始终是核心执行对象，仓库由 `taskId` 单向推导。
 
-| 工具 | 类型 | 作用 |
-|---|---|---|
-| `grande_task_status` | 只读 | 任务状态/分支/改动/最近 job；**无参调用列出所有仓库与活跃任务**（跨会话恢复靠它） |
-| `grande_repo_map` | 只读 | 目录树 + 关键文件 |
-| `grande_repo_search` | 只读 | 文本/正则/glob 搜索，支持 `nextCursor` 续读 |
-| `grande_repo_read` | 只读 | 读文件，返回 `sha256` |
-| `grande_diff` | 只读 | worktree vs base，按文件分页 |
-| `grande_run_result` | 只读 | 轮询 job + 摘要日志 |
-| `grande_task_open` | 写 | 建分支与 worktree（**唯一**由模型显式指定 `repoId` 之处），克隆 `depDirs` |
-| `grande_repo_edit` | 写 | 一次调用改多文件：create / modify / move / **delete**（S1；后两者需 `expectedSha256`）。**事务性**：任一步失败自动回滚整批，成功返回 `checkpointId` |
-| `grande_run` | 写 | 在 Seatbelt 沙箱里跑白名单 profile，立即返回 `jobId` |
-| `grande_task_close` | **破坏性** | 删 worktree 与分支回收磁盘（**全表唯一** `destructiveHint: true`，ChatGPT 会弹确认框） |
-| `grande_rollback` | 写 | 把 worktree 回滚到某个 checkpoint（S1；被覆盖的内容进 Trash，故 `destructiveHint: false`） |
-| `grande_commit` | 写 | 提交任务 worktree 的全部改动到任务分支（S2）。**所有 git 调用带 `-c core.hooksPath=/dev/null`**，见下方安全说明 |
-| `grande_sync_base` | 写 | 把 base 同步到 canonical 当前分支（S2）。用 merge 不用 rebase；冲突一律拒绝并 `merge --abort` |
-| `grande_push` | 写 · **触网** | 把任务分支推到 remote（S3）。三道判据：`grande/*` 白名单、`=== task.branch`、`≠ remote 默认分支` |
-| `grande_pr_open` | 写 · **触网** | 开一个 **Draft** PR（S3）。`draft` 在类型层是字面量 `true`；幂等；body 尾注不可伪造 |
+核心开发工具：
 
-⚠️ **`grande_push` / `grande_pr_open` 是全系统唯一两个 `openWorldHint: true` 的工具。**
-`tests/tools.test.ts` 里有一条精确名单断言（不是「全 false」也不是「至少一个 false」），
-新增任何触网工具都必须在 `SPEC` 表里显式声明 `openWorld: true`，否则变红。
+- `grande_task_status` / `grande_repo_map` / `grande_repo_search` / `grande_repo_read`
+- `grande_task_open` / `grande_repo_edit` / `grande_rollback` / `grande_diff`
+- `grande_run` / `grande_run_result`
+- `grande_commit` / `grande_sync_base` / `grande_push`
+- `grande_pr_open` / `grande_pr_status` / `grande_pr_merge`
+- `grande_deploy` / `grande_deploy_verify` / `grande_deploy_rollback`
+- `grande_capability_list` / `grande_capability_inspect` / `grande_capability_invoke`
+- `grande_task_close`
 
-**八个 CLI 子命令**（`grande <cmd>`）：`status`、`jobs`、`audit`、`gc`、`doctor`、`outer-test`、`revoke`、`selfcheck`。
-`gc` / `outer-test` / `revoke` 默认只列出或预演，加 `--apply` / `--run` / `--yes` 才执行。
+Phase 4 的关键更新：
 
-**`grande revoke --yes` 是唯一的紧急切断手段**——递增 token epoch，所有在途 access token
-当场失效。在它之前，同样的效果需要三步手工操作（停网关 → 删签名密钥 → 手改 SQLite），
-而且很容易只做前两步，那样客户端拿 refresh token 一换就自动恢复了。见 `src/tokenEpoch.ts`。
+- S4：`grande_task_open` 可附带 TaskBrief（source/findings/plan/acceptance criteria），不新增 Requirement 对象；
+- S5：提供薄 capability `list / inspect / invoke`，production/destructive 必须显式放行；
+- S6：新 PR 固定 **ready (`draft:false`)**；CI/attestation 绑定当前 head SHA；Checks API 403 时回退同一 `head_sha` 的 Actions workflow runs；merge 携带 expected head SHA；
+- S7：deploy/verify 只调用 repo 声明且控制平面批准的 profile/capability，只有 deploy + verify 成功才 DONE；
+- production Gateway：macOS 用户级 LaunchAgent `ai.agentjoey.grande-gateway`，登录自启 + KeepAlive，仍只监听 `127.0.0.1:8787`。
 
-⚠️ **合并任何自举产出之前必须跑 `grande outer-test --run`**（在沙箱外）。
-它跑的是 `unit-selfhost` 排除掉的 5 个文件——那些文件保护的不变量在自举期间完全失效，
-已经连续三次造成实际后果（见遗留表）。**清单从 profile 的 `--exclude` 反推，不是硬编码**，
-所以往 profile 加排除项时它自动跟上。
+`openWorldHint=true` 的当前精确名单：
+`grande_push`、`grande_pr_open`、`grande_pr_status`、`grande_pr_merge`、`grande_deploy`、`grande_deploy_verify`、`grande_deploy_rollback`、`grande_capability_list`、`grande_capability_inspect`、`grande_capability_invoke`。
 
-**基础设施**：
-- OAuth 2.1 + PKCE(S256) + DCR + refresh 轮换（含复用检测），单一 `/mcp` 端点，
-  `aud` 恒从服务端配置推导；client 与 refresh token 跨重启持久化
-- Cloudflare Access 门禁挡在 `/authorize` 第一行，配置缺失 fail-closed
-- macOS Seatbelt 沙箱：`deny default` + `deny network*`，写只放行本任务 worktree，
-  沙箱内 `git` / `pnpm` / `vitest` / `tsc` 可用
-- 审计账本（PENDING→ALLOWED→EXECUTING→终态，CAS 推进），启动时 job + worktree 双向对账
-- 优雅关停等在途 job 收尾（30s 上限）
+`destructiveHint=true` 的当前精确名单：
+`grande_task_close`、`grande_pr_merge`、`grande_deploy`、`grande_deploy_rollback`、`grande_capability_invoke`。
+
+### 当前 CLI
+
+**9 个顶层 CLI 子命令**：`status`、`jobs`、`audit`、`doctor`、`gateway`、`gc`、`outer-test`、`revoke`、`selfcheck`。
+
+`gateway` 下提供 `install / start / stop / restart / status / uninstall`，用于管理 production LaunchAgent。
+
+### 验证纪律与最终证据
+
+自举开发继续使用 `unit-selfhost + typecheck`，合并前必须在宿主执行 `grande outer-test --run`。
+Phase 4 closeout 的最终证据：
+
+- `unit-selfhost`：**53 files / 566 tests passed**；
+- `typecheck`：passed；
+- host `outer-test`：**5 files / 132 tests passed**；
+- Node v24.14.0 默认 strip-only production runtime regression：passed；
+- production `selfcheck`：**HTTP 200 / 23 tools**；
+- LaunchAgent：`state=running`，真实 Node listener 位于 `127.0.0.1:8787`；
+- PR #1/#2/#3 全部 merged，#2/#3 由 GrandeGPT 自己完成 `pr_status → pr_merge`。
+
+### 基础设施
+
+- OAuth 2.1 + PKCE(S256) + DCR + refresh 轮换（含复用检测），单一 `/mcp` 端点；
+- Cloudflare Access 门禁挡在 `/authorize` 第一行，配置缺失 fail-closed；
+- macOS Seatbelt：`deny default` + `deny network*`，写只放行本任务 worktree；
+- 审计账本（PENDING→ALLOWED→EXECUTING→终态，CAS 推进），启动时 job + worktree 双向对账；
+- production Gateway 由 launchd 常驻，日志写入 `~/.grande-control/logs/`。
+
+---
+
+## 历史观察与事故复盘
+
+**以下内容按原日期保留。数字、工具数量、roadmap 和策略描述是当时快照；与当前状态冲突时，以本文件顶部、README、Phase 4 规格和 closeout 为准。**
 
 **已在真实 ChatGPT 普通对话里验证通过的三件事**：
 
@@ -409,7 +434,7 @@ GPT_Workspace/                    ← 代码工作区根 = 可注册域
     └── tmp/<job-id>/
 
 ~/.grande-control/                ← 沙箱完全不可见
-└── state/grande.db · config/ · artifacts/ · checkpoints/ · secrets/
+└── state/grande.db · config/ · artifacts/ · checkpoints/ · secrets/ · logs/
 ```
 
 ## 前端工作

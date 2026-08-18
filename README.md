@@ -5,7 +5,7 @@
 ChatGPT 负责理解需求、调研仓库和组织步骤；Gateway 负责授权与执行；Git worktree 隔离任务；
 macOS Seatbelt 沙箱执行受控 profile；Git/GitHub 与项目已有部署机制完成代码上线闭环。
 
-> **当前状态**：S0 → S3 已完成，Phase 4（S4–S7）已进入实现验证。
+> **当前状态（2026-08-18）**：S0 → S3 与 Phase 4（S4–S7）均已完成并合并到 `main`，完整开发闭环已通过真实 GitHub 与 production Gateway 实机验收。
 > 当前 Golden Path：`Request → inspect → plan → code → test → commit → push → PR → CI → merge → deploy → verify → DONE`。
 > Bug / 新需求不会进入另一套维护平台，而是创建新 Task，再次走同一条闭环。
 
@@ -42,11 +42,34 @@ Gateway      127.0.0.1 · Policy + 审计 · 唯一执行权威
 |---|---|
 | **S4** | 自然语言 / Issue / Markdown / Bug / PR feedback → repo 调研 → TaskBrief（plan + acceptance criteria）→ 现有 Task 开发循环 |
 | **S5** | capability `list / inspect / invoke`；native 复用现有工具；MCP/plugin 复用标准 tools；skill 激活控制平面可信指令；production/destructive fail-closed |
-| **S6** | ready PR → 当前 head 的 checks/statuses → 失败诊断 → 修复/重新 push → CI green/none + 当前 SHA attestation → expected-SHA merge |
+| **S6** | ready PR → 当前 head 的 checks/statuses → 失败诊断 → 修复/重新 push → CI green/none + 当前 SHA attestation → expected-SHA merge；Checks 403 时按当前 SHA 回退 Actions |
 | **S7** | merge 后读取 repo 的 `.grande/deploy.yaml`，调用已批准 profile 或 S5 capability → verify → DONE；rollback 只调用项目/平台已经声明的机制 |
 
-Phase 4 配置和运行约定见
-[`docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md`](docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md)。
+Phase 4 最终为 **23 tools：9 read-only / 14 write**。配置、运行约定和门禁见
+[`docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md`](docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md)；
+最终收口与 production 验证证据见
+[`docs/research/2026-08-18-phase4-closeout.md`](docs/research/2026-08-18-phase4-closeout.md)。
+
+## Production Gateway
+
+production Gateway 通过 macOS 用户级 LaunchAgent 常驻：登录后自动启动，异常退出由 `launchd` 拉起，
+仍只监听 `127.0.0.1:8787`，由现有 Cloudflare Tunnel 暴露 `https://grande.agentjoey.ai/mcp`。
+
+```bash
+# 状态 / 重启 / 停止 / 启动
+node --disable-warning=ExperimentalWarning src/cli.ts gateway status
+node --disable-warning=ExperimentalWarning src/cli.ts gateway restart
+node --disable-warning=ExperimentalWarning src/cli.ts gateway stop
+node --disable-warning=ExperimentalWarning src/cli.ts gateway start
+```
+
+安装/更新 LaunchAgent 时需要显式提供 production 环境：
+
+```bash
+GRANDE_WORKSPACE=/absolute/path/to/GPT_Workspace \
+GRANDE_ISSUER=https://grande.agentjoey.ai \
+node --disable-warning=ExperimentalWarning src/cli.ts gateway install
+```
 
 ## 目录约定
 
@@ -57,7 +80,7 @@ GPT_Workspace/                    ← 代码工作区根 = 可注册域
 └── .grande-work/                 ← 派生数据（worktrees / fixtures / tmp）
 
 ~/.grande-control/                ← 控制平面（沙箱完全不可见）
-└── state/ · config/ · artifacts/ · checkpoints/ · secrets/ · skills/
+└── state/ · config/ · artifacts/ · checkpoints/ · secrets/ · skills/ · logs/
 ```
 
 控制平面状态刻意放在工作区之外：**被审计者不能拥有审计记录或凭据的写权限。**
@@ -68,7 +91,13 @@ GPT_Workspace/                    ← 代码工作区根 = 可注册域
 外层测试；合并自举产出前仍必须在宿主执行 `grande outer-test --run`，不能把 selfhost 的绿灯误当成
 全部安全不变量已经覆盖。
 
+Phase 4 最终 closeout 的已记录验证为：`unit-selfhost` **53 files / 566 tests**、`typecheck` 通过、
+host `outer-test` **5 files / 132 tests**、production `selfcheck` **HTTP 200 / 23 tools**、LaunchAgent
+`state=running`。
+
 ## 历史文档
+
+以下文档保留历史决策上下文；其中早期 roadmap、工具数量和 PR 策略可能已被 Phase 4 取代。
 
 | 文档 | 内容 |
 |---|---|
