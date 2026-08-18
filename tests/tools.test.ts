@@ -41,10 +41,6 @@ beforeEach(() => {
   const repo = join(layout.workspaceRoot, "demo");
   initRepo(repo, "a.ts", "v1\nexport const x = 1;\n");
 
-  // D18：第二个已注册仓库——真实 git 仓库，不是伪造的注册表条目（见任务简报
-  // 「Create a real git repo in the fixture workspace rather than faking the
-  // registry」）。用来证明 grande_repo_edit 从 taskId 推导仓库这条路径是
-  // behavioural 的：两个任务分别落在两个不同仓库的 worktree 里，互不可见。
   const other = join(layout.workspaceRoot, "other");
   initRepo(other, "b.ts", "w1\nexport const y = 1;\n");
 
@@ -107,29 +103,39 @@ async function callToolThatThrowsRaw(): Promise<string> {
 const READ_ONLY = [
   "grande_task_status", "grande_repo_map", "grande_repo_search",
   "grande_repo_read", "grande_diff", "grande_run_result",
+  "grande_capability_list", "grande_capability_inspect", "grande_pr_status",
+] as const;
+
+const OPEN_WORLD = [
+  "grande_push", "grande_pr_open",
+  "grande_capability_list", "grande_capability_inspect", "grande_capability_invoke",
+  "grande_pr_status", "grande_pr_merge",
+  "grande_deploy", "grande_deploy_verify", "grande_deploy_rollback",
+] as const;
+
+const DESTRUCTIVE = [
+  "grande_task_close",
+  "grande_capability_invoke",
+  "grande_pr_merge",
+  "grande_deploy",
+  "grande_deploy_rollback",
 ] as const;
 
 describe("工具注解", () => {
-  it("恰好注册六个只读工具与九个写工具，且名字与规格一致", () => {
+  it("Phase 4 恰好注册 23 个工具：9 只读 + 14 写，且新增能力是最小闭环所需的 8 个", () => {
     const names = buildTools(deps).map((t) => t.name).sort();
     expect(names.filter((n) => READ_ONLY.includes(n as typeof READ_ONLY[number]))).toEqual([...READ_ONLY].sort());
-    expect(names).toContain("grande_repo_edit");
-    expect(names).toContain("grande_rollback");
-    expect(names).toContain("grande_run");
-    expect(names).toContain("grande_task_open");
-    expect(names).toContain("grande_task_close");
-    expect(names).toContain("grande_commit");
-    expect(names).toContain("grande_sync_base");
-    // 这个数字是【有意的不变量】：意外多注册一个工具必须让它变红。
-    // S2 把写工具从 5 个加到 7 个（commit、sync_base）。
-    expect(names).toContain("grande_push");
-    expect(names).toContain("grande_pr_open");
-    // 这个数字是【有意的不变量】：意外多注册一个工具必须让它变红。
-    // S3 把写工具从 7 加到 9（push、pr_open）。
-    expect(names).toHaveLength(READ_ONLY.length + 9);
+    for (const name of [
+      "grande_repo_edit", "grande_rollback", "grande_run", "grande_task_open", "grande_task_close",
+      "grande_commit", "grande_sync_base", "grande_push", "grande_pr_open",
+      "grande_capability_invoke", "grande_pr_merge",
+      "grande_deploy", "grande_deploy_verify", "grande_deploy_rollback",
+    ]) expect(names).toContain(name);
+    expect(names).toHaveLength(23);
+    expect(names.length - READ_ONLY.length).toBe(14);
   });
 
-  it("六个只读工具全部 readOnlyHint: true", () => {
+  it("九个只读工具全部 readOnlyHint: true", () => {
     const tools = buildTools(deps).filter((t) => READ_ONLY.includes(t.name as typeof READ_ONLY[number]));
     expect(tools).toHaveLength(READ_ONLY.length);
     for (const t of tools) {
@@ -137,33 +143,21 @@ describe("工具注解", () => {
     }
   });
 
-  it("写工具 readOnlyHint: false，但除 task_close 外 destructiveHint 必须是 false", () => {
-    // task_close 删 worktree 与分支，真正不可逆，destructiveHint 标 true 是规格要求（§5.2）。
-    const writeNames = ["grande_repo_edit", "grande_rollback", "grande_run", "grande_task_open"];
-    for (const name of writeNames) {
-      const t = buildTools(deps).find((tool) => tool.name === name);
-      expect(t, name).toBeDefined();
-      expect(t!.annotations.readOnlyHint, `${name} readOnlyHint`).toBe(false);
-      expect(t!.annotations.destructiveHint, `${name} destructiveHint`).toBe(false);
-    }
-    const tc = buildTools(deps).find((tool) => tool.name === "grande_task_close");
-    expect(tc, "grande_task_close").toBeDefined();
-    expect(tc!.annotations.readOnlyHint, "grande_task_close readOnlyHint").toBe(false);
-    expect(tc!.annotations.destructiveHint, "grande_task_close destructiveHint").toBe(true);
+  it("destructiveHint=true 的工具必须严格等于五个高风险动作，不能悄悄扩散", () => {
+    const actual = buildTools(deps)
+      .filter((tool) => tool.annotations.destructiveHint)
+      .map((tool) => tool.name)
+      .sort();
+    expect(actual).toEqual([...DESTRUCTIVE].sort());
   });
 
-  it("只有 grande_push / grande_pr_open 是 openWorldHint: true，其余全部 false", () => {
-    // S0–S2 时这条断言是「所有工具 openWorldHint: false（全禁网）」。S3 有意打破它——
-    // push 与 pr_open 确实触网。但**不能把断言删掉或放松成「至少有一个 false」**：
-    // 那样就失去了「新工具不会悄悄变成触网的」这道保护。改成精确的两者名单。
-    const OPEN_WORLD = ["grande_push", "grande_pr_open"];
+  it("openWorldHint=true 的工具必须严格等于 Phase 4 的十个触网/外部能力工具", () => {
     const tools = buildTools(deps);
     expect(tools.length).toBeGreaterThan(0);
     for (const t of tools) {
       expect(t.annotations.openWorldHint, `${t.name}.openWorldHint`)
-        .toBe(OPEN_WORLD.includes(t.name));
+        .toBe(OPEN_WORLD.includes(t.name as typeof OPEN_WORLD[number]));
     }
-    // 名单里的两个必须真的存在——否则这条断言会因为「一个都没匹配上」而空转
     for (const n of OPEN_WORLD) expect(tools.map((t) => t.name)).toContain(n);
   });
 
@@ -172,7 +166,6 @@ describe("工具注解", () => {
     const tool = buildTools(deps).find((t) => t.name === "grande_run")!;
     const profileProp = tool.inputSchema.properties.profile as { description?: string } | undefined;
     const haystack = tool.description + " " + (profileProp?.description ?? "");
-    // fixture 在 beforeEach 里注册了 ok/slow/curl-probe/fail 四个 profile
     expect(haystack).toMatch(/\bok\b|\bslow\b|curl-probe|\bfail\b/);
   });
 
@@ -284,13 +277,11 @@ describe("D18：两个任务落在两个不同仓库时互不可见（测试要�
     }));
     expect(editOther.ok).toBe(true);
 
-    // demo 任务写的文件只出现在 demo 的 worktree
     expect(existsSync(join(demoWt, "only-in-demo.ts"))).toBe(true);
     expect(existsSync(join(otherWt, "only-in-demo.ts"))).toBe(false);
     expect(existsSync(join(demoCanonical, "only-in-demo.ts"))).toBe(false);
     expect(existsSync(join(otherCanonical, "only-in-demo.ts"))).toBe(false);
 
-    // other 任务写的文件只出现在 other 的 worktree
     expect(existsSync(join(otherWt, "only-in-other.ts"))).toBe(true);
     expect(existsSync(join(demoWt, "only-in-other.ts"))).toBe(false);
     expect(existsSync(join(demoCanonical, "only-in-other.ts"))).toBe(false);
@@ -314,19 +305,10 @@ describe("响应信封", () => {
   });
 
   it("必填参数漏传时降级成【点名字段的 INVALID_INPUT】，而不是让整个调用失败", async () => {
-    // 这条原先断言的是 INTERNAL——因为「必填参数传 undefined」当时确实会一路
-    // 炸到一个非 KNOWN 的异常上。**那正是遗留表 #13**：模型收到「Gateway 内部
-    // 错误。详情见服务端日志。」而它看不到服务端日志，完全无从下手。
-    //
-    // `src/argCheck.ts` 现在在 handler 之前挡住这一类，所以这条构造不再可能到达
-    // INTERNAL。**INTERNAL 兜底本身没有被削弱**，只是不再被参数错误触发；
-    // 它的行为（含「不泄漏原始 message」）由 tests/errors.test.ts 直接钉住。
-    //
-    // 保留在这里的仍是原来的意图：错误以【信封】形式返回，而不是让整个工具调用抛出。
     const r = JSON.parse(await callToolThatThrowsRaw());
     expect(r.ok).toBe(false);
     expect(r.error.code).toBe("INVALID_INPUT");
-    expect(r.error.message).toContain("path");          // 点名了漏掉的字段
+    expect(r.error.message).toContain("path");
     expect(r.error.message).not.toContain("详情见服务端日志");
   });
 
@@ -336,8 +318,6 @@ describe("响应信封", () => {
   });
 
   it("写工具用的是控制平面里的拒绝表，不是空表（AC-14 第二条断言）", async () => {
-    // BUG 1 修复后 grande_repo_edit 必须带 taskId、写入 worktree —— 拒绝表照样要挡住，
-    // 不管写入目标是 canonical 还是 worktree，两边都不能出现被拒的文件。
     const canonical = join(layout.workspaceRoot, "demo");
     const worktree = join(layout.worktreesRoot, "demo", "task_abcd");
     const r = JSON.parse(await callTool("grande_repo_edit", {
@@ -360,11 +340,8 @@ describe("grande_repo_edit 写入隔离（BUG 1：此前无条件写 canonical�
       ops: [{ op: "create", path: "greet.ts", content: "export const greet = () => 'hi';\n" }],
     }));
     expect(r.ok).toBe(true);
-    // 落在 worktree 里
     expect(existsSync(join(worktree, "greet.ts"))).toBe(true);
     expect(readFileSync(join(worktree, "greet.ts"), "utf8")).toContain("greet");
-    // canonical（用户正在用编辑器干活的那份 checkout）完全没有这个文件——
-    // 这正是 D4 原地模型的核心承诺，写错根会直接破坏它。
     expect(existsSync(join(canonical, "greet.ts"))).toBe(false);
   });
 
@@ -398,7 +375,7 @@ describe("只读工具的 taskId/repoId 参数（BUG 1 关联决定 + D18 扩展
 
     const withoutTask = JSON.parse(await callTool("grande_repo_read", { path: "wt-only.ts" }));
     expect(withoutTask.ok).toBe(false);
-    expect(withoutTask.error.code).toBe("INVALID_INPUT"); // FILE_NOT_FOUND 映射到 INVALID_INPUT，见 errors.ts
+    expect(withoutTask.error.code).toBe("INVALID_INPUT");
   });
 
   it("grande_repo_map/grande_repo_search 带未知 taskId 时返回 TASK_NOT_FOUND", async () => {
@@ -490,35 +467,31 @@ describe("grande_run / grande_run_result", () => {
   });
 }, 15_000);
 
-describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
-  /**
-   * 规格 §5.2 明确规定了每个工具的 readOnlyHint 与 destructiveHint。
-   *
-   * 这一条不是形式主义：ChatGPT 的 per-app 权限档【就是按注解放行的】。
-   * 写工具曾被实现成 destructiveHint: true，结果在 `Allow low-risk actions`
-   * 档下全部被客户端拦掉——ChatGPT 只说「被禁用」，服务端日志里连请求都看不到，
-   * 审计账本零记录。整整两轮真实测试才定位到。
-   */
+describe("工具注解必须逐字匹配 Phase 4 规格", () => {
   const SPEC: Record<string, { readOnly: boolean; destructive: boolean; openWorld?: true }> = {
-    grande_task_open:   { readOnly: false, destructive: false },
-    grande_task_status: { readOnly: true,  destructive: false },
-    grande_repo_map:    { readOnly: true,  destructive: false },
-    grande_repo_search: { readOnly: true,  destructive: false },
-    grande_repo_read:   { readOnly: true,  destructive: false },
-    grande_repo_edit:   { readOnly: false, destructive: false },
-    grande_rollback:    { readOnly: false, destructive: false },
-    grande_diff:        { readOnly: true,  destructive: false },
-    grande_run:         { readOnly: false, destructive: false },
-    grande_run_result:  { readOnly: true,  destructive: false },
-    grande_task_close:  { readOnly: false, destructive: true  },
-    // S2：本地开发闭环。两者都不是 destructive——commit 只往任务分支追加，
-    // sync_base 冲突时整体 merge --abort 回到操作前。真正不可逆的仍只有 task_close。
-    grande_commit:      { readOnly: false, destructive: false },
-    grande_sync_base:   { readOnly: false, destructive: false },
-    // S3：两个触网工具。destructive 仍为 false——push 只追加任务分支，
-    // pr_open 只开 draft PR，两者都不覆盖也不删除任何东西。
-    grande_push:        { readOnly: false, destructive: false, openWorld: true },
-    grande_pr_open:     { readOnly: false, destructive: false, openWorld: true },
+    grande_task_open:         { readOnly: false, destructive: false },
+    grande_task_status:       { readOnly: true,  destructive: false },
+    grande_repo_map:          { readOnly: true,  destructive: false },
+    grande_repo_search:       { readOnly: true,  destructive: false },
+    grande_repo_read:         { readOnly: true,  destructive: false },
+    grande_repo_edit:         { readOnly: false, destructive: false },
+    grande_rollback:          { readOnly: false, destructive: false },
+    grande_diff:              { readOnly: true,  destructive: false },
+    grande_run:               { readOnly: false, destructive: false },
+    grande_run_result:        { readOnly: true,  destructive: false },
+    grande_task_close:        { readOnly: false, destructive: true  },
+    grande_commit:            { readOnly: false, destructive: false },
+    grande_sync_base:         { readOnly: false, destructive: false },
+    grande_push:              { readOnly: false, destructive: false, openWorld: true },
+    grande_pr_open:           { readOnly: false, destructive: false, openWorld: true },
+    grande_capability_list:   { readOnly: true,  destructive: false, openWorld: true },
+    grande_capability_inspect:{ readOnly: true,  destructive: false, openWorld: true },
+    grande_capability_invoke: { readOnly: false, destructive: true,  openWorld: true },
+    grande_pr_status:         { readOnly: true,  destructive: false, openWorld: true },
+    grande_pr_merge:          { readOnly: false, destructive: true,  openWorld: true },
+    grande_deploy:            { readOnly: false, destructive: true,  openWorld: true },
+    grande_deploy_verify:     { readOnly: false, destructive: false, openWorld: true },
+    grande_deploy_rollback:   { readOnly: false, destructive: true,  openWorld: true },
   };
 
   it("每个工具的注解与规格逐项一致，且工具总数与规格表严格相等", () => {
@@ -529,17 +502,16 @@ describe("工具注解必须逐字匹配规格 §5.2 那张表", () => {
       expect(want, `${t.name} 不在规格表里`).toBeDefined();
       expect(t.annotations.readOnlyHint, `${t.name}.readOnlyHint`).toBe(want!.readOnly);
       expect(t.annotations.destructiveHint, `${t.name}.destructiveHint`).toBe(want!.destructive);
-      // 不再硬编码 false：S3 之后触网不再是「不可能」，而是「必须在 SPEC 表里显式声明」。
-      // 新工具默认 openWorld 未声明 → 期望 false，所以悄悄加一个触网工具仍会变红。
       expect(t.annotations.openWorldHint, `${t.name}.openWorldHint`).toBe(want!.openWorld === true);
     }
   });
 
-  it("仅 grande_task_close 标 destructiveHint: true（删 worktree 与分支不可逆），其余工具全部为 false", () => {
-    const bad = buildTools(deps).filter((t) => t.annotations.destructiveHint && t.name !== "grande_task_close");
-    expect(bad.map((t) => t.name)).toEqual([]);
-    const tc = buildTools(deps).find((t) => t.name === "grande_task_close");
-    expect(tc!.annotations.destructiveHint).toBe(true);
+  it("destructiveHint=true 的精确名单与高风险动作一致", () => {
+    const actual = buildTools(deps)
+      .filter((t) => t.annotations.destructiveHint)
+      .map((t) => t.name)
+      .sort();
+    expect(actual).toEqual([...DESTRUCTIVE].sort());
   });
 });
 
@@ -585,17 +557,14 @@ describe("grande_task_close", () => {
 
     const r2 = JSON.parse(await callTool("grande_task_close", { taskId: "task_abcd" }));
     expect(r2.ok).toBe(true);
-    // 幂等调用的 hint 应表明「此前已关闭」
     expect(r2.hint).toContain("此前已关闭");
   });
 
   it("有 job 在跑时拒绝，抛出 JOB_RUNNING，且 worktree 仍在磁盘上（拒绝必须无副作用）", async () => {
-    // 先开一个新任务跑 job（不能用 task_abcd，因为它随后要 close）
     const openR = JSON.parse(await callTool("grande_task_open", {
       taskId: "task_close_slow", slug: "close-slow", repoId: "demo",
     }));
     expect(openR.ok).toBe(true);
-    started.push(openR.data.taskId); // 仅用于确保最后 worktree 能被 afterEach 清理
 
     const runR = JSON.parse(await callTool("grande_run", {
       taskId: "task_close_slow", profile: "slow",
@@ -605,10 +574,9 @@ describe("grande_task_close", () => {
     const worktree = join(layout.worktreesRoot, "demo", "task_close_slow");
     expect(existsSync(worktree)).toBe(true);
 
-    // 在有正在运行的 job 时尝试 close
     const closeR = JSON.parse(await callTool("grande_task_close", { taskId: "task_close_slow" }));
     expect(closeR.ok).toBe(false);
-    expect(closeR.error.code).toBe("INVALID_INPUT"); // JOB_RUNNING 映射到 INVALID_INPUT
+    expect(closeR.error.code).toBe("INVALID_INPUT");
     expect(closeR.error.message).toMatch(/在跑|job/);
     expect(existsSync(worktree)).toBe(true);
   }, 15_000);
@@ -632,7 +600,7 @@ describe("grande_task_close", () => {
     expect(a.pathsTouched.length).toBeGreaterThan(0);
   });
 
-  it("task_close 注解：destructiveHint === true，其余四个写工具仍然是 false", () => {
+  it("task_close 注解保持 destructiveHint=true；常规本地写工具仍保持 false", () => {
     const tools = buildTools(deps);
     const tc = tools.find((t) => t.name === "grande_task_close")!;
     expect(tc.annotations.destructiveHint).toBe(true);

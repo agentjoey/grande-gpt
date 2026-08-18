@@ -121,19 +121,19 @@ async function callPr(
   });
   return (await tool.handler({
     taskId: options.id ?? taskId,
-    title: "Draft change",
+    title: "Change",
     body: options.body ?? "Please review this change.",
     ...options.extraArgs,
   })).structuredContent as Record<string, any>;
 }
 
 describe("grande_pr_open", () => {
-  it("AC-S3-9：即使调用方偷偷传 draft=false，createPullRequest 收到的 draft 仍恒为 true", async () => {
+  it("S6：新 PR 恒为 ready（draft=false）；调用方偷偷传 draft=true 也不能制造人工断点", async () => {
     const api = fakeApi();
-    const result = await callPr(api, { extraArgs: { draft: false } });
+    const result = await callPr(api, { extraArgs: { draft: true } });
     expect(result.ok).toBe(true);
     expect(api.created).toHaveLength(1);
-    expect(api.created[0]?.draft).toBe(true);
+    expect(api.created[0]?.draft).toBe(false);
   });
 
   it("AC-S3-10：剥掉模型伪造尾注，再追加唯一可信尾注", async () => {
@@ -208,11 +208,22 @@ describe("grande_pr_open", () => {
     expect(row?.pathsTouched).toContain(worktree);
   });
 
-  it("AC-S3-12：两个 GitHub 工具 openWorldHint=true，原有 13 个仍为 false", () => {
+  it("S7：所有网络工具显式 openWorldHint=true，仍有 13 个本地工具保持 false", () => {
     const tools = buildTools(deps);
     expect(
       tools.filter((tool) => tool.annotations.openWorldHint).map((tool) => tool.name).sort(),
-    ).toEqual(["grande_pr_open", "grande_push"]);
+    ).toEqual([
+      "grande_capability_inspect",
+      "grande_capability_invoke",
+      "grande_capability_list",
+      "grande_deploy",
+      "grande_deploy_rollback",
+      "grande_deploy_verify",
+      "grande_pr_merge",
+      "grande_pr_open",
+      "grande_pr_status",
+      "grande_push",
+    ]);
     expect(tools.filter((tool) => !tool.annotations.openWorldHint)).toHaveLength(13);
     expect(tools.find((tool) => tool.name === "grande_pr_open")?.annotations).toEqual({
       readOnlyHint: false,

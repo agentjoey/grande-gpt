@@ -2,9 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import type { Layout } from "../src/layout.ts";
-import { planOuterTest } from "../src/outerTest.ts";
+import { planOuterTest, resolveOuterTestCwd } from "../src/outerTest.ts";
+import { createTask } from "../src/tasks.ts";
 
 let ws: string, ctrl: string, layout: Layout;
 let savedWs: string | undefined, savedCtrl: string | undefined;
@@ -38,29 +40,27 @@ describe("planOuterTest()", () => {
   it("清单从 profile 的 --exclude 反推——改 profile 就自动跟上，这是本命令的全部价值", () => {
     writeProfiles(
       "repos:\n  demo:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/a.test.ts","--exclude","tests/b.test.ts"], timeoutSeconds: 600 }\n',
+      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts","--exclude","tests/runner.test.ts"], timeoutSeconds: 600 }\n',
     );
-    expect(planOuterTest(layout, "demo").files).toEqual(["tests/a.test.ts", "tests/b.test.ts"]);
+    expect(planOuterTest(layout, "demo").files).toEqual(["tests/sandbox.test.ts", "tests/runner.test.ts"]);
 
-    // 往 profile 里再加一个排除项 —— 无需改任何代码，本命令必须自动覆盖它。
-    // 【这条就是「同源」的证明】：如果清单在 src/outerTest.ts 里硬编码，
-    // 这个断言会红，而真实后果是那个文件既不在自举里跑、也不在外层里跑。
+    // 往 profile 里再加一个已登记理由的排除项 —— 无需改任何反推逻辑，本命令必须自动覆盖它。
     writeProfiles(
       "repos:\n  demo:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/a.test.ts","--exclude","tests/b.test.ts","--exclude","tests/c.test.ts"], timeoutSeconds: 600 }\n',
+      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts","--exclude","tests/runner.test.ts","--exclude","tests/server.test.ts"], timeoutSeconds: 600 }\n',
     );
     expect(planOuterTest(layout, "demo").files).toEqual([
-      "tests/a.test.ts", "tests/b.test.ts", "tests/c.test.ts",
+      "tests/sandbox.test.ts", "tests/runner.test.ts", "tests/server.test.ts",
     ]);
   });
 
   it("只取 tests/ 下的排除项——vitest 的默认排除（node_modules/dist）不是「沙箱跑不了」", () => {
     writeProfiles(
       "repos:\n  demo:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","**/node_modules/**","--exclude","**/dist/**","--exclude","tests/a.test.ts"], timeoutSeconds: 600 }\n',
+      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","**/node_modules/**","--exclude","**/dist/**","--exclude","tests/sandbox.test.ts"], timeoutSeconds: 600 }\n',
     );
     const plan = planOuterTest(layout, "demo");
-    expect(plan.files).toEqual(["tests/a.test.ts"]);
+    expect(plan.files).toEqual(["tests/sandbox.test.ts"]);
     // 混进来会让命令去跑不存在的东西
     expect(plan.files.some((f) => f.includes("node_modules"))).toBe(false);
     expect(plan.files.some((f) => f.includes("dist"))).toBe(false);
@@ -80,37 +80,53 @@ describe("planOuterTest()", () => {
     expect(() => planOuterTest(layout, "demo")).toThrow();
   });
 
-  it("每个文件都带排除理由；未登记的理由是 undefined 而不是编一个", () => {
+  it("新增未登记 WHY 的 tests/ 排除项时响亮拒绝——生产 profile 漂移不能静默通过", () => {
     writeProfiles(
       "repos:\n  demo:\n" +
       '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts","--exclude","tests/unknown.test.ts"], timeoutSeconds: 600 }\n',
     );
+    expect(() => planOuterTest(layout, "demo")).toThrow(/unknown\.test\.ts.*WHY|WHY.*unknown\.test\.ts/);
+  });
+
+  it("每个已登记的排除文件都返回人类可读理由", () => {
+    writeProfiles(
+      "repos:\n  demo:\n" +
+      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts","--exclude","tests/runner.test.ts","--exclude","tests/server.test.ts","--exclude","tests/tools.test.ts","--exclude","tests/e2e.test.ts"], timeoutSeconds: 600 }\n',
+    );
     const plan = planOuterTest(layout, "demo");
-    expect(plan.reasons.get("tests/sandbox.test.ts")).toContain("sandbox-exec");
-    expect(plan.reasons.get("tests/unknown.test.ts")).toBeUndefined();
+    expect(plan.files.length).toBe(5);
+    for (const f of plan.files) {
+      expect(plan.reasons.get(f), `${f} 缺排除理由`).toBeDefined();
+    }
   });
 });
 
-describe("与生产 profile 的一致性", () => {
-  it("生产 grande-gpt 的排除清单里每一项都在 WHY 表里登记了理由", () => {
-    // 这条读【真实控制平面】，不是夹具。它守的是：有人往 profile 加了排除项却没在
-    // src/outerTest.ts 的 WHY 表里登记理由——那会让 `grande outer-test` 输出
-    // 「（排除理由未记录）」，一个人看不懂为什么那个文件被排除。
-    //
-    // **显式指向真实控制平面**，不依赖 env 残留。
-    // planOuterTest 只读 `<controlRoot>/config/profiles.yaml`，与 workspaceRoot 无关，
-    // 所以这里删掉 GRANDE_CONTROL 让它回落到 ~/.grande-control（真实的），
-    // GRANDE_WORKSPACE 保持 beforeEach 设的临时值即可。
-    //
-    // ⚠️ 这里【不要】写 `if (savedWs === undefined) return`——vitest 跑时该变量本来
-    // 就常常没设，那个 guard 会让整条测试静默空转。我第一次清理这段代码时就这么
-    // 干了，结果注入孤项后测试照样绿。
-    delete process.env.GRANDE_CONTROL;
+describe("resolveOuterTestCwd()", () => {
+  it("不传 taskId 时保持旧行为：验收 canonical repo", () => {
+    const db = openDb(layout);
+    expect(resolveOuterTestCwd(db, layout, "grande-gpt")).toBe(join(ws, "grande-gpt"));
+    db.close();
+  });
 
-    const plan = planOuterTest(loadLayout(), "grande-gpt");
-    expect(plan.files.length).toBeGreaterThan(0);    // 防空转
-    for (const f of plan.files) {
-      expect(plan.reasons.get(f), `${f} 被 profile 排除，但 WHY 表里没有理由`).toBeDefined();
-    }
+  it("传 taskId 时验收该 task 的 worktree，而不是 canonical repo", () => {
+    const db = openDb(layout);
+    const worktreePath = join(ws, ".grande-work", "worktrees", "grande-gpt", "task_phase4");
+    createTask(db, {
+      taskId: "task_phase4", repoId: "grande-gpt", branch: "grande/phase4",
+      baseCommit: "abc123", worktreePath, state: "READY",
+    });
+    expect(resolveOuterTestCwd(db, layout, "grande-gpt", "task_phase4")).toBe(worktreePath);
+    db.close();
+  });
+
+  it("task 不存在或属于别的 repo 时 fail closed", () => {
+    const db = openDb(layout);
+    expect(() => resolveOuterTestCwd(db, layout, "grande-gpt", "task_missing")).toThrow(/TASK_NOT_FOUND|不存在/);
+    createTask(db, {
+      taskId: "task_other", repoId: "other", branch: "grande/other",
+      baseCommit: "abc123", worktreePath: join(ws, "other-worktree"), state: "READY",
+    });
+    expect(() => resolveOuterTestCwd(db, layout, "grande-gpt", "task_other")).toThrow(/仓库|repo/i);
+    db.close();
   });
 });
