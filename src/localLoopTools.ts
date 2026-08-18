@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { AuditHandle } from "./audit.ts";
 import { beginAudit } from "./audit.ts";
 import {
@@ -17,8 +18,10 @@ import { redact, StateError, toToolError } from "./errors.ts";
 import { listJobs } from "./jobs.ts";
 import { createPrOpenTool } from "./prOpen.ts";
 import { createPushTool } from "./push.ts";
+import { registeredIds } from "./registry.ts";
 import { syncBase } from "./syncBase.ts";
-import { getTask } from "./tasks.ts";
+import { compactTaskProgress, projectTaskProgress, type TaskProgress } from "./taskProgress.ts";
+import { getTask, listActiveTasks, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 import { listChangedFiles } from "./worktree.ts";
 
@@ -202,28 +205,130 @@ function wrapRunWithVerificationContext(deps: ToolDeps, tools: ToolDef[]): void 
   };
 }
 
+function safeProgress(deps: ToolDeps, task: TaskRow): TaskProgress | { error: string } {
+  try {
+    return projectTaskProgress(deps.db, task);
+  } catch (error) {
+    return {
+      error: redact(error instanceof Error ? error.message : String(error), [deps.layout.workspaceRoot, deps.layout.controlRoot]),
+    };
+  }
+}
+
+function safeFilesChanged(task: TaskRow): number | null {
+  try {
+    return listChangedFiles(task.worktreePath, task.baseCommit).length;
+  } catch {
+    return null;
+  }
+}
+
+function ghostDetail(deps: ToolDeps, task: TaskRow): { structuredContent: unknown } {
+  const jobs = listJobs(deps.db, task.taskId);
+  const progress = safeProgress(deps, task);
+  return {
+    structuredContent: ok({
+      taskId: task.taskId,
+      data: {
+        taskId: task.taskId,
+        repoId: task.repoId,
+        branch: task.branch,
+        state: task.state,
+        baseCommit: task.baseCommit,
+        filesChanged: null,
+        recentJobs: jobs.slice(0, 5).map((job) => ({
+          jobId: job.jobId,
+          state: job.state,
+          profile: job.profile,
+          exitCode: job.exitCode,
+        })),
+        base: { error: "task worktree 不存在；这是 stale/ghost task，运行 grande gc 查看对账" },
+        attestations: getAttestations(deps.db, task.taskId),
+        progress,
+      },
+      hint: `任务 ${task.taskId} 的 worktree 已不存在；状态记录仍可读。运行 grande gc 查看 stale task，对账后再决定清理。`,
+      taskContext: null,
+    }),
+  };
+}
+
+function ghostOverview(deps: ToolDeps): { structuredContent: unknown } {
+  const registered = [...registeredIds(deps.layout)].sort();
+  const active = listActiveTasks(deps.db).map((task) => ({
+    taskId: task.taskId,
+    repoId: task.repoId,
+    branch: task.branch,
+    state: task.state,
+    filesChanged: safeFilesChanged(task),
+    worktreeMissing: !existsSync(task.worktreePath),
+    progress: safeProgress(deps, task),
+  }));
+  return {
+    structuredContent: ok({
+      taskId: null,
+      data: { registeredRepos: registered, activeTasks: active },
+      hint: `已注册仓库：${registered.join("、") || "（无）"}；活跃任务 ${active.length} 个。` +
+        `其中 ${active.filter((task) => task.worktreeMissing).length} 个 worktree 缺失，可用 grande gc 对账。`,
+    }),
+  };
+}
+
 function wrapTaskStatusWithBase(deps: ToolDeps, tools: ToolDef[]): void {
   const status = tools.find((tool) => tool.name === "grande_task_status");
   if (!status) return;
   const coreHandler = status.handler;
   status.handler = async (args) => {
-    const response = await coreHandler(args);
     const taskId = args.taskId as string | undefined;
-    if (!taskId) return response;
+    if (taskId) {
+      const task = getTask(deps.db, taskId);
+      if (task && !existsSync(task.worktreePath)) return ghostDetail(deps, task);
+    } else if (listActiveTasks(deps.db).some((task) => !existsSync(task.worktreePath))) {
+      return ghostOverview(deps);
+    }
+
+    const response = await coreHandler(args);
     const envelope = response.structuredContent as {
       ok?: unknown;
       data?: Record<string, unknown>;
+      hint?: string;
     };
     if (envelope.ok !== true || !envelope.data) return response;
+
+    if (!taskId) {
+      const active = envelope.data.activeTasks;
+      if (Array.isArray(active)) {
+        for (const item of active) {
+          if (!item || typeof item !== "object" || typeof (item as { taskId?: unknown }).taskId !== "string") continue;
+          const task = getTask(deps.db, (item as { taskId: string }).taskId);
+          if (task) (item as Record<string, unknown>).progress = safeProgress(deps, task);
+        }
+      }
+      return response;
+    }
+
     const task = getTask(deps.db, taskId);
     if (!task) return response;
+    const progress = safeProgress(deps, task);
+    envelope.data.progress = progress;
+    if (!("error" in progress)) {
+      envelope.hint = `${envelope.hint ?? ""}；${compactTaskProgress(progress)}；下一步：${progress.nextAction}`;
+    }
     try {
       envelope.data.base = inspectBaseStatus(deps.layout, task);
-      envelope.data.attestations = getAttestations(deps.db, taskId);
-      return response;
     } catch (error) {
-      return failedEnvelope(deps, taskId, error);
+      envelope.data.base = {
+        error: redact(error instanceof Error ? error.message : String(error), [deps.layout.workspaceRoot, deps.layout.controlRoot]),
+      };
+      envelope.hint = `${envelope.hint ?? ""}；base inspection 失败，但 task/progress 仍可用。`;
     }
+    try {
+      envelope.data.attestations = getAttestations(deps.db, taskId);
+    } catch (error) {
+      envelope.data.attestations = [];
+      envelope.hint = `${envelope.hint ?? ""}；attestation 读取失败：` +
+        redact(error instanceof Error ? error.message : String(error), [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+    }
+    return response;
   };
 }
 

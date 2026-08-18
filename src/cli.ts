@@ -16,10 +16,11 @@ import { spawnSync } from "node:child_process";
 import { planOuterTest, resolveOuterTestCwd } from "./outerTest.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
 import { renderSelfCheck, selfCheck } from "./selfcheck.ts";
+import { compactTaskProgress, projectTaskProgress } from "./taskProgress.ts";
 
 const USAGE = `grande —— GrandeGPT 控制平面运维工具
 
-  grande status                 活跃任务：分支、worktree、状态、最近 job
+  grande status                 活跃任务：Golden Path progress、阻塞、cleanup 与下一步
   grande jobs [--task <id>]     job 列表：profile、状态、耗时、退出码
   grande audit [--task <id>]    审计流水：opId、工具、决策、触及路径
   grande doctor [--repo <id>]   环境自检；--repo 做 Golden Path readiness
@@ -81,6 +82,18 @@ function cmdStatus(out: (l: string) => void): number {
       out(`  分支      ${t.branch}`);
       out(`  worktree  ${t.worktreePath}`);
       out(`  最近 job  ${last ? `${last.jobId} ${last.profile} → ${last.state}` : "（无）"}`);
+      try {
+        const progress = projectTaskProgress(db, t);
+        out(`  progress  ${compactTaskProgress(progress)}`);
+        if (progress.cleanupRequired) {
+          out("  cleanup   ⚠ 闭环证据已完成，但 task/worktree 尚未 close；仍需 Human 显式 grande_task_close");
+        }
+        if (progress.blocker) out(`  阻塞      ${progress.blocker}`);
+        out(`  下一步    ${progress.nextAction}`);
+      } catch (error) {
+        out(`  progress  ✗ 无法投影：${error instanceof Error ? error.message : String(error)}`);
+        out("  下一步    grande gc / grande audit 检查 task 与 worktree 状态");
+      }
       out("");
     }
     return 0;
