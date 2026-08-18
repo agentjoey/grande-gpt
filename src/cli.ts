@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { listAudit, listUnfinishedAudit } from "./audit.ts";
 import { openDb } from "./db.ts";
+import { runGatewayCli } from "./gatewayCli.ts";
 import { listJobs } from "./jobs.ts";
 import { ensureLayout, loadLayout, type Layout } from "./layout.ts";
 import { assertValidId } from "./paths.ts";
@@ -20,12 +21,13 @@ const USAGE = `grande —— GrandeGPT 控制平面运维工具
   grande jobs [--task <id>]     job 列表：profile、状态、耗时、退出码
   grande audit [--task <id>]    审计流水：opId、工具、决策、触及路径
   grande doctor                 环境自检
+  grande gateway <action>       macOS LaunchAgent：install/start/stop/restart/status/uninstall
   grande gc [--apply]           worktree 与 task 对账（默认 dry-run）
   grande outer-test [--task <id>] [--run]  跑自举时跑不了的测试；--task 验收待合并 worktree
   grande revoke [--yes]         吊销：所有在途 access token 当场失效（默认只预演）
   grande selfcheck              客户端视角：向【正在运行的】网关问一次 tools/list
 
-除 gc --apply、outer-test --run 与 revoke --yes 外均为只读。
+除 gateway 的变更动作、gc --apply、outer-test --run 与 revoke --yes 外均为只读。
 outer-test 必须在【沙箱外】跑——它跑的正是沙箱里结构上跑不通的那些文件。`;
 
 function fmtTime(ms: number): string {
@@ -369,6 +371,8 @@ export function runCli(argv: string[], out: (line: string) => void): number | Pr
       return cmdAudit(out, taskId);
     case "doctor":
       return cmdDoctor(out);
+    case "gateway":
+      return runGatewayCli(rest, out);
     case "gc":
       return cmdGc(out, rest.includes("--apply"));
     case "outer-test":
