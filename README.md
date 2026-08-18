@@ -5,7 +5,7 @@
 ChatGPT 负责理解需求、调研仓库和组织步骤；Gateway 负责授权与执行；Git worktree 隔离任务；
 macOS Seatbelt 沙箱执行受控 profile；Git/GitHub 与项目已有部署机制完成代码上线闭环。
 
-> **当前状态（2026-08-18）**：S0 → S3 与 Phase 4（S4–S7）均已完成并合并到 `main`，完整开发闭环已通过真实 GitHub 与 production Gateway 实机验收。
+> **当前状态（2026-08-18）**：S0 → S3、Phase 4（S4–S7）与 Phase 5（S8–S10）均已完成，完整开发闭环已通过真实 GitHub / production Gateway 与轻量项目 dogfood 验收。
 > 当前 Golden Path：`Request → inspect → plan → code → test → commit → push → PR → CI → merge → deploy → verify → DONE`。
 > Bug / 新需求不会进入另一套维护平台，而是创建新 Task，再次走同一条闭环。
 
@@ -50,6 +50,35 @@ Phase 4 最终为 **23 tools：9 read-only / 14 write**。配置、运行约定�
 最终收口与 production 验证证据见
 [`docs/research/2026-08-18-phase4-closeout.md`](docs/research/2026-08-18-phase4-closeout.md)。
 
+## Phase 5：可靠接入与日常使用
+
+Phase 5 不增加新的生命周期平台，重点是把 Phase 4 Golden Path 在真实轻量项目里用顺。
+
+- **S8 · Real-world Loop Hardening**：Checks API 403 回退 GitHub Actions 时，失败 workflow 可继续下钻到有限数量的 failed job / failed step，并只读取 bounded log excerpt；signed log URL 不携带 GitHub PAT。诊断增强失败会退回 workflow-level failure，不会把已知失败误报成 CI=none。
+- **S9 · Project Onboarding**：`grande repo add <repoId>` 默认只生成 proposal；只有 Human Owner 显式加 `--apply` 才把 registration 与缺失的常用 run profiles 写入可信控制平面。repo 内容不能借 onboarding 扩大执行权限。
+- **S9 · Readiness Doctor**：`grande doctor --repo <repoId>` 按 `Development / PR/CI / Deploy / Gateway` 展示 Golden Path readiness，并实际 probe GitHub credential/access 与 Gateway tools/list，而不是只看配置文件是否存在。
+- **S10 · Daily Operations**：`grande status` 与 `grande_task_status` 从既有 Task / jobs / attestation / PR audit / deployment receipt 投影 `Code / Tests / PR / CI / Merged / Deploy / Verify`，显示 blocker、下一步和 completed-but-not-cleaned-up。不会因此新增十几个持久状态，也不会自动 destructive close。
+
+常用本机入口：
+
+```bash
+# 新 repo：先看 proposal；确认后才写可信控制平面
+node --disable-warning=ExperimentalWarning src/cli.ts repo add my-repo
+node --disable-warning=ExperimentalWarning src/cli.ts repo add my-repo --apply
+
+# 单 repo Golden Path readiness
+GRANDE_ISSUER=https://grande.agentjoey.ai \
+node --disable-warning=ExperimentalWarning src/cli.ts doctor --repo my-repo
+
+# 日常任务 / blocker / cleanup 视图
+node --disable-warning=ExperimentalWarning src/cli.ts status
+
+# stale worktree/task 仍由现有 GC 显式对账；不会自动 destructive close
+node --disable-warning=ExperimentalWarning src/cli.ts gc
+```
+
+如果 repo 没有 `.grande/deploy.yaml`，Doctor 会明确显示 `Deploy ✗`；GrandeGPT 不会为了让 readiness 变绿而生成通用部署体系。没有真实项目需要的 MCP/plugin/skill provider 时，也不会为了“覆盖类型”虚构 capability 集成。
+
 ## Production Gateway
 
 production Gateway 通过 macOS 用户级 LaunchAgent 常驻：登录后自动启动，异常退出由 `launchd` 拉起，
@@ -93,7 +122,7 @@ GPT_Workspace/                    ← 代码工作区根 = 可注册域
 
 Phase 4 最终 closeout 的已记录验证为：`unit-selfhost` **53 files / 566 tests**、`typecheck` 通过、
 host `outer-test` **5 files / 132 tests**、production `selfcheck` **HTTP 200 / 23 tools**、LaunchAgent
-`state=running`。
+`state=running`。Phase 5 的分支验收继续沿用同一纪律；最终结果以该 Phase 的 merge/production closeout 为准。
 
 ## 历史文档
 

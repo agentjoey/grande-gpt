@@ -78,6 +78,12 @@ export class GithubApiError extends Error {
 
 type FetchLike = typeof fetch;
 
+const PASSING_ACTION_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
+const ACTIONS_DIAGNOSTIC_WORKFLOW_LIMIT = 3;
+const ACTIONS_DIAGNOSTIC_JOB_LIMIT = 3;
+const ACTIONS_LOG_RANGE_BYTES = 32 * 1024;
+const ACTIONS_LOG_EXCERPT_BYTES = 8 * 1024;
+
 function headers(token: string): Record<string, string> {
   return {
     Accept: "application/vnd.github+json",
@@ -104,6 +110,34 @@ async function responseJson(response: Response, token: string): Promise<unknown>
       redactToken(`GitHub API 返回了无法解析的 JSON：${error instanceof Error ? error.message : String(error)}`, token),
     );
   }
+}
+
+async function boundedText(response: Response, maxBytes: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let remaining = maxBytes;
+  try {
+    while (remaining > 0) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.byteLength === 0) continue;
+      const slice = value.byteLength <= remaining ? value : value.subarray(0, remaining);
+      chunks.push(slice);
+      remaining -= slice.byteLength;
+      if (remaining === 0) await reader.cancel();
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
 }
 
 function object(value: unknown, context: string): Record<string, unknown> {
@@ -195,6 +229,40 @@ function workflowRun(value: unknown): GithubCheckRun {
   };
 }
 
+interface ActionJob {
+  id: number;
+  name: string;
+  status: string;
+  conclusion: string | null;
+  failedSteps: string[];
+}
+
+function actionJob(value: unknown): ActionJob {
+  const record = object(value, "workflow job");
+  if (typeof record.id !== "number") throw new GithubApiError("GitHub workflow job 缺少 id。 ");
+  const steps = Array.isArray(record.steps) ? record.steps : [];
+  const failedSteps: string[] = [];
+  for (const rawStep of steps) {
+    const step = object(rawStep, "workflow job step");
+    const status = requiredString(step, "status", "workflow job step");
+    const conclusion = nullableString(step.conclusion);
+    if (status === "completed" && !PASSING_ACTION_CONCLUSIONS.has(conclusion ?? "unknown")) {
+      failedSteps.push(requiredString(step, "name", "workflow job step"));
+    }
+  }
+  return {
+    id: record.id,
+    name: requiredString(record, "name", "workflow job"),
+    status: requiredString(record, "status", "workflow job"),
+    conclusion: nullableString(record.conclusion),
+    failedSteps,
+  };
+}
+
+function isFailedAction(status: string, conclusion: string | null): boolean {
+  return status === "completed" && !PASSING_ACTION_CONCLUSIONS.has(conclusion ?? "unknown");
+}
+
 function commitStatus(value: unknown): GithubCommitStatus {
   const record = object(value, "commit status");
   return {
@@ -216,6 +284,81 @@ export function createGithubApi(token: string, fetchImpl: FetchLike = fetch): Gi
       throw new GithubApiError(
         redactToken(`GitHub API 连接失败：${error instanceof Error ? error.message : String(error)}`, token),
       );
+    }
+  };
+
+  const jobLogExcerpt = async (owner: string, repo: string, jobId: number): Promise<string | null> => {
+    const apiUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/jobs/${jobId}/logs`;
+    const range = `bytes=-${ACTIONS_LOG_RANGE_BYTES}`;
+    const response = await fetchImpl(apiUrl, {
+      headers: { ...headers(token), Range: range },
+      redirect: "manual",
+    });
+    let logResponse = response;
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) throw new GithubApiError("GitHub Actions job log redirect 缺少 Location。", response.status);
+      let signed: URL;
+      try {
+        signed = new URL(location);
+      } catch {
+        throw new GithubApiError("GitHub Actions job log redirect Location 无效。", response.status);
+      }
+      if (signed.protocol !== "https:") {
+        throw new GithubApiError("GitHub Actions job log redirect 不是 HTTPS，拒绝跟随。", response.status);
+      }
+      // signed URL 可能指向 GitHub 的对象存储；绝不能把 PAT 带到第二个 origin。
+      logResponse = await fetchImpl(signed.toString(), { headers: { Range: range } });
+    }
+    if (!logResponse.ok) {
+      throw new GithubApiError(`GitHub Actions job log 请求失败：HTTP ${logResponse.status}`, logResponse.status);
+    }
+    const text = (await boundedText(logResponse, ACTIONS_LOG_EXCERPT_BYTES)).trim();
+    return text || null;
+  };
+
+  const enrichWorkflowFailure = async (
+    owner: string,
+    repo: string,
+    run: GithubCheckRun,
+  ): Promise<GithubCheckRun> => {
+    try {
+      const value = object(await request(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${run.id}/jobs?per_page=100`,
+      ), "workflow jobs response");
+      if (!Array.isArray(value.jobs)) {
+        throw new GithubApiError("GitHub API 返回的 workflow jobs 缺少 jobs array。 ");
+      }
+      const failedJobs = value.jobs
+        .map(actionJob)
+        .filter((job) => isFailedAction(job.status, job.conclusion))
+        .slice(0, ACTIONS_DIAGNOSTIC_JOB_LIMIT);
+      if (failedJobs.length === 0) return run;
+
+      const summary: string[] = [];
+      const logs: string[] = [];
+      for (const job of failedJobs) {
+        summary.push(`Failed job: ${job.name}`);
+        for (const step of job.failedSteps) summary.push(`Failed step: ${step}`);
+        try {
+          const log = await jobLogExcerpt(owner, repo, job.id);
+          if (log) logs.push(log);
+        } catch {
+          // 诊断 enrichment 是 best-effort：不能把已经确定的 workflow failure 变成 API failure。
+        }
+      }
+
+      return {
+        ...run,
+        output: {
+          title: "Actions fallback diagnosis",
+          summary: summary.join("\n").slice(0, 4000) || null,
+          text: logs.join("\n\n").slice(0, ACTIONS_LOG_EXCERPT_BYTES) || null,
+        },
+      };
+    } catch {
+      // jobs 权限可能比 workflow runs 更窄；保留 workflow-level failure，继续闭环。
+      return run;
     }
   };
 
@@ -272,7 +415,13 @@ export function createGithubApi(token: string, fetchImpl: FetchLike = fetch): Gi
         if (!Array.isArray(value.workflow_runs)) {
           throw new GithubApiError("GitHub API 返回的 workflow runs 缺少 workflow_runs array。 ");
         }
-        return value.workflow_runs.map(workflowRun);
+        const runs = value.workflow_runs.map(workflowRun);
+        let remainingDiagnostics = ACTIONS_DIAGNOSTIC_WORKFLOW_LIMIT;
+        return await Promise.all(runs.map(async (run) => {
+          if (!isFailedAction(run.status, run.conclusion) || remainingDiagnostics <= 0) return run;
+          remainingDiagnostics -= 1;
+          return await enrichWorkflowFailure(owner, repo, run);
+        }));
       }
     },
 

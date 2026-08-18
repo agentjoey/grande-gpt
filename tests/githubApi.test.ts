@@ -67,6 +67,113 @@ describe("GitHub CI API fallback", () => {
     ]);
   });
 
+  it("失败 workflow 的 Actions fallback 只抓 bounded job/step/log 诊断，signed log URL 不携带 PAT", async () => {
+    const token = "github_pat_test_abcdefghijklmnopqrstuvwxyz";
+    const seen: Array<{ url: string; authorization: string | null; range: string | null }> = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+      const url = String(input);
+      const requestHeaders = new Headers(init?.headers);
+      seen.push({
+        url,
+        authorization: requestHeaders.get("authorization"),
+        range: requestHeaders.get("range"),
+      });
+      if (url.includes("/check-runs")) {
+        return jsonResponse({ message: "Resource not accessible by personal access token" }, 403);
+      }
+      if (url.includes("/actions/runs?")) {
+        return jsonResponse({
+          workflow_runs: [{
+            id: 21,
+            name: "CI",
+            status: "completed",
+            conclusion: "failure",
+            html_url: "https://github.com/fake/repo/actions/runs/21",
+          }],
+        });
+      }
+      if (url.includes("/actions/runs/21/jobs")) {
+        return jsonResponse({
+          jobs: [{
+            id: 301,
+            name: "unit-selfhost",
+            status: "completed",
+            conclusion: "failure",
+            html_url: "https://github.com/fake/repo/actions/runs/21/job/301",
+            steps: [
+              { name: "Checkout", status: "completed", conclusion: "success" },
+              { name: "Run tests", status: "completed", conclusion: "failure" },
+            ],
+          }],
+        });
+      }
+      if (url.includes("/actions/jobs/301/logs")) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://productionresult.example/signed-job-301" },
+        });
+      }
+      if (url === "https://productionresult.example/signed-job-301") {
+        return new Response("RUN pnpm test\nAssertionError: expected 1 to equal 2\n", { status: 200 });
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    }) as typeof fetch;
+
+    const api = createGithubApi(token, fetchImpl);
+    const runs = await api.listCheckRuns("fake", "repo", "abc123");
+
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.output).toEqual({
+      title: "Actions fallback diagnosis",
+      summary: "Failed job: unit-selfhost\nFailed step: Run tests",
+      text: "RUN pnpm test\nAssertionError: expected 1 to equal 2",
+    });
+    expect(seen.find((request) => request.url.includes("/actions/runs/21/jobs"))?.authorization).toBe(`Bearer ${token}`);
+    expect(seen.find((request) => request.url.includes("/actions/jobs/301/logs"))?.authorization).toBe(`Bearer ${token}`);
+    const signed = seen.find((request) => request.url.includes("productionresult.example"));
+    expect(signed?.authorization).toBeNull();
+    expect(signed?.range).toBe("bytes=-32768");
+  });
+
+  it("workflow 已知失败时 jobs/log enrichment 失败只降级诊断，不把 CI 失败本身变成 API failure", async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      seen.push(url);
+      if (url.includes("/check-runs")) {
+        return jsonResponse({ message: "Resource not accessible by personal access token" }, 403);
+      }
+      if (url.includes("/actions/runs?")) {
+        return jsonResponse({
+          workflow_runs: [{
+            id: 31,
+            name: "CI",
+            status: "completed",
+            conclusion: "failure",
+            html_url: "https://github.com/fake/repo/actions/runs/31",
+          }],
+        });
+      }
+      if (url.includes("/actions/runs/31/jobs")) {
+        return jsonResponse({ message: "Resource not accessible by personal access token" }, 403);
+      }
+      throw new Error(`unexpected URL: ${url}`);
+    }) as typeof fetch;
+
+    const api = createGithubApi("github_pat_test_abcdefghijklmnopqrstuvwxyz", fetchImpl);
+    const runs = await api.listCheckRuns("fake", "repo", "abc123");
+
+    expect(seen).toHaveLength(3);
+    expect(runs).toEqual([{
+      id: 31,
+      name: "CI",
+      status: "completed",
+      conclusion: "failure",
+      detailsUrl: "https://github.com/fake/repo/actions/runs/31",
+      output: null,
+    }]);
+  });
+
   it("check-runs 的非 403 错误不回退 Actions", async () => {
     const seen: string[] = [];
     const fetchImpl = (async (input: Parameters<typeof fetch>[0]) => {
