@@ -67,10 +67,12 @@ export interface GithubLifecycleApi extends GithubApi {
 
 export class GithubApiError extends Error {
   readonly code = "GITHUB_API_FAILED";
+  readonly status?: number;
 
-  constructor(message: string, readonly status?: number) {
+  constructor(message: string, status?: number) {
     super(message);
     this.name = "GithubApiError";
+    this.status = status;
   }
 }
 
