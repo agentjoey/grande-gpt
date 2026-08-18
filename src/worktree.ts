@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { inspectCanonicalGitState, type CanonicalGitState } from "./canonicalGit.ts";
 import type { Layout } from "./layout.ts";
 import { assertTaskId, assertValidId, resolveRepoPath } from "./paths.ts";
 import { loadDepDirs } from "./profiles.ts";
@@ -52,49 +53,35 @@ function gitAllowingDiffExit(cwd: string, args: string[]): string {
 }
 
 /**
- * `git symbolic-ref -q HEAD` 用退出码本身携带语义：0 = 在某个分支上，
- * 1 = detached HEAD（`-q` 让这种情况不打印到 stderr）。这与上面 `git diff --no-index`
- * 退出码 1 = 有差异是同一类陷阱——退出码不是「失败/成功」二元开关，上面那个把非零
- * 退出一律转成 `GIT_FAILED` 的通用 `git()` helper 在这里不适用，必须单独处理，否则
- * detached HEAD 会被误判成一次 git 命令失败，而不是「这是一个需要报告的正常状态」（MINOR）。
+ * task/worktree admission 的 fail-closed gate。只把共享的只读 projection 映射回既有
+ * GitError 语义：detached / rebase / merge / cherry-pick / index.lock 仍是
+ * CANONICAL_BUSY；无 Git repository、无 HEAD 或 probe 本身失败仍是 GIT_FAILED。
  */
-function isDetachedHead(repoRoot: string): boolean {
-  try {
-    execFileSync("git", ["symbolic-ref", "-q", "HEAD"], { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-    return false;
-  } catch (e) {
-    const err = e as { status?: number; stderr?: Buffer | string; message: string };
-    if (err.status === 1) return true;
-    const detail = err.stderr ? String(err.stderr).trim() : err.message;
-    throw new GitError("GIT_FAILED", `git symbolic-ref 失败：${detail}`);
+function assertCanonicalReady(repoRoot: string): CanonicalGitState {
+  const state = inspectCanonicalGitState(repoRoot);
+  if (!state.repository) {
+    throw new GitError("GIT_FAILED", `${repoRoot} 不是有效 Git repository，不能派生 worktree。`);
   }
-}
-
-/**
- * canonical 是否处于不适合派生 worktree 的状态。
- *
- * 这些状态下建 worktree 会留下难以理解的现场，而用户此刻正在手动处理某件事 ——
- * 拒绝比「帮忙」更有用。detached HEAD 属于同一类（MINOR：规格 §7 的 `CANONICAL_BUSY`
- * 明确列出 rebase / index.lock / detached HEAD 三种）——用户很可能正用它临时检出
- * 某个 commit 做检查（例如 `git bisect`），这时候派生一个基于该瞬时 commit 的
- * 任务分支同样会制造一个不清楚从哪来的现场。
- */
-function assertCanonicalIdle(repoRoot: string): void {
-  const gitDir = join(repoRoot, ".git");
-  for (const marker of ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "index.lock"]) {
-    if (existsSync(join(gitDir, marker))) {
-      throw new GitError(
-        "CANONICAL_BUSY",
-        `${repoRoot} 正处于 ${marker} 状态。请先在你自己的 checkout 里处理完，再开新任务。`,
-      );
-    }
+  if (state.inspectionError !== null) {
+    throw new GitError("GIT_FAILED", `${repoRoot} 无法确认 canonical Git 状态：${state.inspectionError}`);
   }
-  if (isDetachedHead(repoRoot)) {
+  if (!state.headExists || state.headSha === null) {
+    throw new GitError("GIT_FAILED", `${repoRoot} 没有 baseline commit（HEAD 不存在），不能派生 worktree。`);
+  }
+  if (state.busyReasons.length > 0) {
+    const marker = state.busyReasons[0]!;
+    throw new GitError(
+      "CANONICAL_BUSY",
+      `${repoRoot} 正处于 ${marker} 状态。请先在你自己的 checkout 里处理完，再开新任务。`,
+    );
+  }
+  if (state.detached) {
     throw new GitError(
       "CANONICAL_BUSY",
       `${repoRoot} 处于 detached HEAD（不在任何分支上）。请先在你自己的 checkout 里切回一个分支，再开新任务。`,
     );
   }
+  return state;
 }
 
 /**
@@ -123,14 +110,14 @@ export function openWorktree(
   }
 
   const repoRoot = resolveRepoPath(layout, repoId, registeredIds(layout));
-  assertCanonicalIdle(repoRoot);
+  const canonical = assertCanonicalReady(repoRoot);
 
   const dir = join(layout.worktreesRoot, repoId, taskId);
   if (existsSync(dir)) {
     throw new GitError("WORKTREE_EXISTS", `${taskId} 的 worktree 已存在：${dir}`);
   }
 
-  const baseCommit = git(repoRoot, ["rev-parse", "HEAD"]).trim();
+  const baseCommit = canonical.headSha!;
   // 后缀取 taskId 的**末 4 位字母数字**，而不是裸 `slice(-4)`：`TASK_ID_RE` 允许 taskId
   // 里带 `-`/`_`，生产实测 `task-ub-probe-20260729-001` 的末 4 位是 `-001`，拼在
   // `${slug}-` 后面就成了 `grande/ub-probe--001` 的双连字符。滤掉分隔符后既不会与前面

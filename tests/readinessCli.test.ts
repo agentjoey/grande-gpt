@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,8 @@ let savedCtrl: string | undefined;
 let savedIssuer: string | undefined;
 let lines: string[];
 const out = (line: string): void => void lines.push(line);
+const git = (cwd: string, ...args: string[]): string =>
+  execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 beforeEach(() => {
   savedWs = process.env.GRANDE_WORKSPACE;
@@ -28,7 +31,14 @@ beforeEach(() => {
   const layout = loadLayout();
   ensureLayout(layout);
   const repo = join(ws, "demo");
-  mkdirSync(join(repo, ".git"), { recursive: true });
+  mkdirSync(repo, { recursive: true });
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "config", "user.email", "t@example.com");
+  git(repo, "config", "user.name", "T");
+  writeFileSync(join(repo, "README.md"), "# demo\n", "utf8");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+
   saveRegistry(layout, [{ repoId: "demo", path: repo, registered: true }]);
   writeFileSync(join(layout.configDir, "profiles.yaml"), [
     "repos:",
@@ -54,6 +64,7 @@ describe("grande doctor --repo", () => {
 
     const text = lines.join("\n");
     expect(text).toContain("Development");
+    expect(text).toContain("Git/worktree lifecycle");
     expect(text).toContain("PR/CI");
     expect(text).toContain("Deploy");
     expect(text).toContain("Gateway");

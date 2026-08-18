@@ -7,10 +7,12 @@ import {
   type CapabilityProviderConfig,
   type CapabilityRisk,
 } from "./capabilities.ts";
+import { inspectCanonicalGitState, type CanonicalGitState } from "./canonicalGit.ts";
 import { loadDeploymentSpec, type DeploymentAction } from "./deployment.ts";
 import { createGithubApi } from "./githubApi.ts";
 import { loadGithubToken } from "./githubAuth.ts";
 import type { Layout } from "./layout.ts";
+import { resolveRepoPath } from "./paths.ts";
 import { parseGithubRemote } from "./prOpen.ts";
 import { getProfile, loadProfiles } from "./profiles.ts";
 import { loadRegistry } from "./registry.ts";
@@ -189,6 +191,16 @@ async function deploymentChecks(
   return group(checks);
 }
 
+function canonicalDetail(state: CanonicalGitState | null, fallback: string): string {
+  if (!state) return fallback;
+  if (!state.repository) return "不是有效 Git repository";
+  if (state.inspectionError !== null) return `canonical Git probe 失败：${state.inspectionError}`;
+  if (!state.headExists) return "no baseline commit（HEAD 不存在）";
+  if (state.detached) return `detached HEAD @ ${state.headSha?.slice(0, 8) ?? "unknown"}`;
+  if (state.busyReasons.length > 0) return `canonical busy: ${state.busyReasons.join(", ")}`;
+  return `HEAD ${state.headSha!.slice(0, 8)} on ${state.branch ?? "unknown branch"}；可派生 worktree`;
+}
+
 /**
  * 只做 readiness projection：不新增状态机、不写 repo/control plane，也不运行项目命令。
  * GitHub 与 capability 默认做真实只读 probe，避免把“配置文件存在”误报成 Golden Path ready。
@@ -200,10 +212,20 @@ export async function inspectProjectReadiness(
 ): Promise<ProjectReadiness> {
   const registry = loadRegistry(layout);
   const entry = registry.get(repoId);
-  const repoPath = join(layout.workspaceRoot, repoId);
   const registered = entry?.registered === true;
-  const repoExists = existsSync(repoPath) && existsSync(join(repoPath, ".git"));
   const sandboxAvailable = (options.sandboxAvailable ?? (() => existsSync("/usr/bin/sandbox-exec")))();
+
+  let repoPath = join(layout.workspaceRoot, repoId);
+  let canonical: CanonicalGitState | null = null;
+  let repoError = "repo 目录不存在或路径不安全";
+  try {
+    // Doctor 是只读检查，不借此授权；ephemeral set 仅复用 resolveRepoPath 的既有 path security。
+    repoPath = resolveRepoPath(layout, repoId, new Set([repoId]));
+    canonical = inspectCanonicalGitState(repoPath);
+  } catch (error) {
+    repoError = error instanceof Error ? error.message : String(error);
+  }
+  const repoExists = canonical?.repository === true;
 
   let profilesDetail = "未读取";
   let profilesOk = false;
@@ -219,7 +241,12 @@ export async function inspectProjectReadiness(
 
   const development = group([
     { label: "registered", ok: registered, detail: registered ? "Human Owner 已注册" : "尚未注册" },
-    { label: "repo", ok: repoExists, detail: repoExists ? repoPath : "repo 目录不存在或不是 git repo" },
+    { label: "repo", ok: repoExists, detail: repoExists ? repoPath : canonicalDetail(canonical, repoError) },
+    {
+      label: "Git/worktree lifecycle",
+      ok: canonical?.ready === true,
+      detail: canonicalDetail(canonical, repoError),
+    },
     { label: "sandbox/runtime", ok: sandboxAvailable, detail: sandboxAvailable ? "sandbox-exec 可用" : "sandbox-exec 不可用" },
     { label: "profiles", ok: profilesOk, detail: profilesDetail },
   ]);

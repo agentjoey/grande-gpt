@@ -2,8 +2,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
+import { inspectCanonicalGitState, type CanonicalGitState } from "./canonicalGit.ts";
 import type { Layout } from "./layout.ts";
-import { assertValidId } from "./paths.ts";
+import { resolveRepoPath } from "./paths.ts";
 import { parseGithubRemote } from "./prOpen.ts";
 import { loadRegistry, saveRegistry } from "./registry.ts";
 
@@ -24,6 +25,9 @@ export interface RepoOnboardingProposal {
   ciConfigured: boolean;
   deployConfigured: boolean;
   cloneNodeModules: boolean;
+  git: CanonicalGitState;
+  readyToRegister: boolean;
+  blockingReasons: string[];
 }
 
 export interface OnboardingInspectOptions {
@@ -92,6 +96,25 @@ function hasWorkflow(repoPath: string): boolean {
 }
 
 /**
+ * Onboarding 必须检查未注册候选的真实路径，但不能因此产生授权。这里把 repoId 放进一个
+ * 只存在于本次函数调用内的 ephemeral set，仅用于复用 resolveRepoPath 的既有 path
+ * security；不会读写 repos.yaml，也不会让候选对 MCP 可见。
+ */
+function resolveOnboardingCandidate(layout: Layout, repoId: string): string {
+  return resolveRepoPath(layout, repoId, new Set([repoId]));
+}
+
+function gitBlockingReasons(state: CanonicalGitState): string[] {
+  const reasons: string[] = [];
+  if (!state.repository) reasons.push("Repository is not a valid Git repository.");
+  if (state.inspectionError !== null) reasons.push(`Unable to inspect canonical Git state: ${state.inspectionError}`);
+  if (state.repository && !state.headExists) reasons.push("Repository has no baseline commit.");
+  if (state.detached) reasons.push("Canonical checkout is detached HEAD.");
+  for (const marker of state.busyReasons) reasons.push(`Canonical checkout is busy: ${marker}.`);
+  return reasons;
+}
+
+/**
  * 只做候选发现，不产生授权。repo 内容只能告诉 Human「这个项目看起来怎样」，不能
  * 自己扩大 GrandeGPT 可以执行什么；真正授权发生在 applyRepoOnboarding 的显式调用。
  */
@@ -100,12 +123,9 @@ export function inspectRepoOnboarding(
   repoId: string,
   options: OnboardingInspectOptions = {},
 ): RepoOnboardingProposal {
-  assertValidId(repoId, "repoId");
-  const repoPath = join(layout.workspaceRoot, repoId);
-  if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) {
-    throw new Error(`工作区候选 ${repoId} 不存在或不是 git repo：${repoPath}`);
-  }
-
+  const repoPath = resolveOnboardingCandidate(layout, repoId);
+  const git = inspectCanonicalGitState(repoPath);
+  const blockingReasons = gitBlockingReasons(git);
   const pkg = packageJson(repoPath);
   const packageManager = detectPackageManager(repoPath, pkg);
   const remote = (options.readRemote ?? defaultReadRemote)(repoPath);
@@ -130,6 +150,9 @@ export function inspectRepoOnboarding(
     ciConfigured: hasWorkflow(repoPath),
     deployConfigured: existsSync(join(repoPath, ".grande", "deploy.yaml")),
     cloneNodeModules: existsSync(join(repoPath, "node_modules")),
+    git,
+    readyToRegister: git.ready,
+    blockingReasons,
   };
 }
 
@@ -142,17 +165,11 @@ function profilesDocument(layout: Layout): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-/** Human Owner 已明确 apply 后才调用；所有写入都只落在 control plane。 */
-export function applyRepoOnboarding(layout: Layout, proposal: RepoOnboardingProposal): void {
-  const registry = loadRegistry(layout);
-  registry.set(proposal.repoId, {
-    repoId: proposal.repoId,
-    path: proposal.repoPath,
-    registered: true,
-  });
-  saveRegistry(layout, registry.values());
-
-  if (proposal.profiles.length === 0 && !proposal.cloneNodeModules) return;
+function prepareProfilesWrite(
+  layout: Layout,
+  proposal: RepoOnboardingProposal,
+): { path: string; content: string } | null {
+  if (proposal.profiles.length === 0 && !proposal.cloneNodeModules) return null;
   const path = join(layout.configDir, "profiles.yaml");
   const doc = profilesDocument(layout);
 
@@ -189,5 +206,34 @@ export function applyRepoOnboarding(layout: Layout, proposal: RepoOnboardingProp
     "# `grande repo add <repoId> --apply` 只会补齐不存在的常见 profile，不覆盖已有条目。",
     "",
   ].join("\n");
-  writeFileSync(path, header + stringify(doc), "utf8");
+  return { path, content: header + stringify(doc) };
+}
+
+/**
+ * Human Owner 已明确 apply 后才调用；所有 readiness/path/config validation 必须在第一次
+ * control-plane write 之前完成。这里不做 transaction system，只消除已知 deterministic
+ * failure 导致的半写状态。
+ */
+export function applyRepoOnboarding(layout: Layout, proposal: RepoOnboardingProposal): void {
+  const repoPath = resolveOnboardingCandidate(layout, proposal.repoId);
+  if (repoPath !== proposal.repoPath) {
+    throw new Error(`repo path 在 proposal 后发生变化：${proposal.repoPath} → ${repoPath}`);
+  }
+  const git = inspectCanonicalGitState(repoPath);
+  const blockers = gitBlockingReasons(git);
+  if (!git.ready) {
+    throw new Error(`Repository is not ready for GrandeGPT development lifecycle: ${blockers.join(" ")}`);
+  }
+
+  // 所有 parse/shape validation 都先做完，再发生第一次 mutation。
+  const registry = loadRegistry(layout);
+  const profilesWrite = prepareProfilesWrite(layout, proposal);
+  registry.set(proposal.repoId, {
+    repoId: proposal.repoId,
+    path: repoPath,
+    registered: true,
+  });
+
+  saveRegistry(layout, registry.values());
+  if (profilesWrite) writeFileSync(profilesWrite.path, profilesWrite.content, "utf8");
 }
