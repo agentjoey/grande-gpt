@@ -122,14 +122,23 @@ S6 复用 S3 的 GitHub token、remote 解析和 API wrapper，只新增：
 
 ### 3.1 CI 状态
 
-每次读取 PR 当前 `headSha` 的 GitHub check runs 和 commit statuses，收敛成：
+每次读取 PR 当前 `headSha` 的 CI 与 commit statuses，收敛成：
 
 ```text
 none | pending | passed | failed
 ```
 
-失败结果只返回与修复直接相关的 check 名、conclusion、details URL 和 check output
-`title/summary/text` 的有界 excerpt；不建设 Actions log archive 或 observability 数据库。
+CI 读取优先使用 GitHub check runs。若且仅若 check-runs API 返回 HTTP 403（例如 fine-grained PAT
+无法取得 Checks 权限），退回读取同一 `headSha` 的 Actions workflow runs；commit statuses 仍照常读取。
+Actions fallback 使用 `head_sha` 精确绑定当前 PR head，不复用旧 SHA 的结果。
+
+fallback 不是 fail-open：check-runs 的 401、网络错误、5xx、响应结构异常都直接失败；403 后 Actions
+读取本身失败也直接失败，绝不能伪装成 `CI=none`。因此 fine-grained PAT 的最小 S6 权限可使用
+Metadata:R、Contents:RW、Pull requests:RW、Commit statuses:R、Actions:R，而不要求不可配置的
+Checks 权限。
+
+失败结果只返回与修复直接相关的 check/run 名、conclusion、details URL；原生 check run 还可返回 check
+output `title/summary/text` 的有界 excerpt。Actions fallback 不建设 log archive，也不会额外抓 Actions job logs。
 
 ### 3.2 Merge 门禁
 
@@ -258,7 +267,8 @@ Phase 4 的 load-bearing 重点包括：
 1. invalid TaskBrief 在 worktree 创建前拒绝；
 2. destructive/production capability 没有控制平面放行时拒绝；
 3. PR head SHA 变化后旧 CI/attestation 不能 merge；
-4. merge 前不能 deploy；
-5. deploy spec 变化后旧 receipt 不能 verify；
-6. verify failure 不能产生 DONE；
-7. Bug/New Request 只建立新 Task，重新进入同一 S4→S7 路径。
+4. check-runs 403 时 Actions fallback 仍绑定当前 head SHA，且 fallback 自身失败必须 fail closed；
+5. merge 前不能 deploy；
+6. deploy spec 变化后旧 receipt 不能 verify；
+7. verify failure 不能产生 DONE；
+8. Bug/New Request 只建立新 Task，重新进入同一 S4→S7 路径。

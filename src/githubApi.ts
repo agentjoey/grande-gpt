@@ -68,7 +68,7 @@ export interface GithubLifecycleApi extends GithubApi {
 export class GithubApiError extends Error {
   readonly code = "GITHUB_API_FAILED";
 
-  constructor(message: string) {
+  constructor(message: string, readonly status?: number) {
     super(message);
     this.name = "GithubApiError";
   }
@@ -90,9 +90,9 @@ async function responseJson(response: Response, token: string): Promise<unknown>
   if (!response.ok) {
     const detail = redactToken(text || `${response.status} ${response.statusText}`, token);
     const credentialHint = response.status === 401 || response.status === 403
-      ? "GitHub PAT 已失效、过期或权限不足；请检查专用 PAT。S6 读取 CI 还需要 Checks:read / Commit statuses:read，merge 需要 Contents:write。"
+      ? "GitHub PAT 已失效、过期或权限不足；请检查专用 PAT。S6 建议 Commit statuses:read / Actions:read，merge 需要 Contents:write。"
       : "GitHub API 请求失败。";
-    throw new GithubApiError(`${credentialHint} HTTP ${response.status}：${detail}`);
+    throw new GithubApiError(`${credentialHint} HTTP ${response.status}：${detail}`, response.status);
   }
   if (!text) return null;
   try {
@@ -180,6 +180,19 @@ function checkRun(value: unknown): GithubCheckRun {
   };
 }
 
+function workflowRun(value: unknown): GithubCheckRun {
+  const record = object(value, "workflow run");
+  if (typeof record.id !== "number") throw new GithubApiError("GitHub workflow run 缺少 id。 ");
+  return {
+    id: record.id,
+    name: requiredString(record, "name", "workflow run"),
+    status: requiredString(record, "status", "workflow run"),
+    conclusion: nullableString(record.conclusion),
+    detailsUrl: nullableString(record.html_url),
+    output: null,
+  };
+}
+
 function commitStatus(value: unknown): GithubCommitStatus {
   const record = object(value, "commit status");
   return {
@@ -239,14 +252,26 @@ export function createGithubApi(token: string, fetchImpl: FetchLike = fetch): Gi
     },
 
     async listCheckRuns(owner, repo, ref) {
-      const value = object(await request(
-        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/` +
-          `${encodeURIComponent(ref)}/check-runs?per_page=100`,
-      ), "check runs response");
-      if (!Array.isArray(value.check_runs)) {
-        throw new GithubApiError("GitHub API 返回的 check runs 缺少 check_runs array。 ");
+      try {
+        const value = object(await request(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/` +
+            `${encodeURIComponent(ref)}/check-runs?per_page=100`,
+        ), "check runs response");
+        if (!Array.isArray(value.check_runs)) {
+          throw new GithubApiError("GitHub API 返回的 check runs 缺少 check_runs array。 ");
+        }
+        return value.check_runs.map(checkRun);
+      } catch (error) {
+        if (!(error instanceof GithubApiError) || error.status !== 403) throw error;
+        const query = new URLSearchParams({ head_sha: ref, per_page: "100" });
+        const value = object(await request(
+          `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs?${query}`,
+        ), "workflow runs response");
+        if (!Array.isArray(value.workflow_runs)) {
+          throw new GithubApiError("GitHub API 返回的 workflow runs 缺少 workflow_runs array。 ");
+        }
+        return value.workflow_runs.map(workflowRun);
       }
-      return value.check_runs.map(checkRun);
     },
 
     async listCommitStatuses(owner, repo, ref) {
