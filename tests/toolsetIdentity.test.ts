@@ -58,10 +58,15 @@ describe("toolset identity", () => {
       destructiveHint: false,
       readOnlyHint: true,
     });
+    const descriptionChangedA = {
+      ...a,
+      description: "description changed without changing the tool contract",
+    };
 
     const first = identity!([b, a], "build-abc");
     const sameContract = identity!([reorderedA, b], "build-abc");
     const sameContractNewBuild = identity!([a, b], "build-def");
+    const sameContractNewDescription = identity!([descriptionChangedA, b], "build-abc");
     const changedContract = identity!([
       b,
       tool("grande_a", {
@@ -79,6 +84,7 @@ describe("toolset identity", () => {
     expect(first.toolsDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(sameContract.toolsDigest).toBe(first.toolsDigest);
     expect(sameContractNewBuild.toolsDigest).toBe(first.toolsDigest);
+    expect(sameContractNewDescription.toolsDigest).toBe(first.toolsDigest);
     expect(changedContract.toolsDigest).not.toBe(first.toolsDigest);
   });
 
