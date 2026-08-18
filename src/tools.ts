@@ -8,6 +8,7 @@ import { addLocalLoopTools } from "./localLoopTools.ts";
 import { addPrLifecycleTools } from "./prLifecycle.ts";
 import { registeredIds } from "./registry.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
+import { stableToolDefinitions, toolsetIdentity } from "./toolsetIdentity.ts";
 import {
   buildTools as buildCoreTools,
   type ToolDef,
@@ -15,6 +16,13 @@ import {
 } from "./toolsCore.ts";
 
 export type { ToolDef, ToolDeps } from "./toolsCore.ts";
+export {
+  TOOLSET_EPOCH,
+  gatewayBuildIdentity,
+  stableToolDefinitions,
+  toolsetIdentity,
+  type ToolsetIdentity,
+} from "./toolsetIdentity.ts";
 
 /**
  * 生产工具列表的唯一组装点。Task 始终是中心：
@@ -82,7 +90,27 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
   const capabilityTools = withCapabilities.slice(withDeployment.length);
   deploymentDeps.push(...capabilityTools);
 
-  return withArgCheck(deps, withCapabilities);
+  // 最后一层只规范化 tools/list 可见的顺序/对象键，不改变 handler wiring 或契约含义。
+  return stableToolDefinitions(withToolsetIdentity(withArgCheck(deps, withCapabilities)));
+}
+
+/**
+ * 通过现有 grande_task_status 暴露 server-side toolset identity；不新增 MCP tool。
+ * identity 在完整 23-tool 列表组装完之后一次性计算，handler 包装不进入 digest。
+ */
+function withToolsetIdentity(tools: ToolDef[]): ToolDef[] {
+  const identity = toolsetIdentity(tools);
+  const status = tools.find((tool) => tool.name === "grande_task_status");
+  if (!status) return tools;
+
+  const inner = status.handler;
+  status.handler = async (args) => {
+    const response = await inner(args);
+    const envelope = response.structuredContent as { ok?: unknown; data?: Record<string, unknown> };
+    if (envelope.ok === true && envelope.data) Object.assign(envelope.data, identity);
+    return response;
+  };
+  return tools;
 }
 
 /**

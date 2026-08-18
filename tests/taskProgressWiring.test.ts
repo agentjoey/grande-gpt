@@ -6,7 +6,7 @@ import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { saveRegistry } from "../src/registry.ts";
 import { createTask } from "../src/tasks.ts";
-import { buildTools } from "../src/tools.ts";
+import { buildTools, toolsetIdentity } from "../src/tools.ts";
 
 let ws: string;
 let ctrl: string;
@@ -80,6 +80,34 @@ describe("grande_task_status S10 progress wiring", () => {
     expect(envelope.ok).toBe(true);
     expect(envelope.data?.activeTasks?.[0]?.progress?.stages).toHaveProperty("deploy");
     expect(envelope.data?.activeTasks?.[0]?.progress).toHaveProperty("cleanupRequired");
+    db.close();
+  });
+
+  it("现有 grande_task_status 暴露同一份 server toolset identity，不新增 MCP tool，且 production tools/list 组装顺序稳定", async () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const tools = buildTools({ db, layout });
+    const status = tools.find((tool) => tool.name === "grande_task_status")!;
+    const expected = toolsetIdentity(tools);
+
+    const overview = await status.handler({});
+    const overviewEnvelope = overview.structuredContent as { ok: boolean; data?: Record<string, unknown> };
+    expect(overviewEnvelope.ok).toBe(true);
+    expect(overviewEnvelope.data).toMatchObject(expected);
+
+    expect(tools).toHaveLength(23);
+    expect(tools.map((tool) => tool.name)).not.toContain("grande_toolset_identity");
+
+    // src/server.ts 直接按 buildTools() 返回顺序 registerTool；这里钉住真实 production
+    // 组装入口，而不只测试规范化 helper。
+    const names = tools.map((tool) => tool.name);
+    expect(names).toEqual([...names].sort());
+    for (const tool of tools) {
+      const propertyKeys = Object.keys(tool.inputSchema.properties ?? {});
+      expect(propertyKeys, `${tool.name} root schema properties`).toEqual([...propertyKeys].sort());
+      const required = tool.inputSchema.required ?? [];
+      expect(required, `${tool.name} required`).toEqual([...required].sort());
+    }
     db.close();
   });
 });

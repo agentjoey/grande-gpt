@@ -9,17 +9,21 @@ import { renderSelfCheck, type SelfCheckResult } from "../src/selfcheck.ts";
  * 这个文件只测渲染：**输出必须能让人一眼比对出 2026-07-29 那次故障的变量**。
  */
 
-const base: SelfCheckResult = {
+const base = {
   url: "http://127.0.0.1:8787/mcp",
   httpStatus: 200,
   bytes: 11326,
+  gatewayBuild: "build-test-abc",
+  toolsetEpoch: 1,
+  toolsCount: 4,
+  toolsDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   tools: [
     { name: "grande_repo_read", readOnly: true, destructive: false, openWorld: false, requiredParams: ["path"] },
     { name: "grande_task_open", readOnly: false, destructive: false, openWorld: false, requiredParams: ["taskId"] },
     { name: "grande_task_close", readOnly: false, destructive: true, openWorld: false, requiredParams: ["taskId"] },
     { name: "grande_push", readOnly: false, destructive: false, openWorld: true, requiredParams: ["taskId"] },
   ],
-};
+} as SelfCheckResult;
 
 const text = (r: SelfCheckResult) => renderSelfCheck(r).join("\n");
 
@@ -44,6 +48,16 @@ describe("自检输出必须能直接支撑 2026-07-29 那次排查", () => {
     expect(t).toContain("能列出、调不动");
   });
 
+  it("暴露 server toolset identity，并明确 ChatGPT session binding 无法 server-side 验证", () => {
+    const t = text(base);
+    expect(t).toContain("build-test-abc");
+    expect(t).toContain("toolsetEpoch  1");
+    expect(t).toContain("toolsCount    4");
+    expect(t).toContain("sha256:aaaaaaaa");
+    expect(t).toContain("ChatGPT session binding");
+    expect(t).toContain("server-side 无法直接验证");
+  });
+
   it("响应字节数带上已知的对照基准——否则那个数字没法解读", () => {
     // 被排除的假设之一是「tools/list 响应被 ChatGPT 静默截断」。
     // 一个孤零零的 11326 无法证伪它；带上 POC 实测的 73,896 才可以。
@@ -58,7 +72,7 @@ describe("自检输出必须能直接支撑 2026-07-29 那次排查", () => {
   });
 
   it("一个工具都没有时【不能】渲染成正常——空名单要看得出是空的", () => {
-    const t = text({ ...base, tools: [] });
+    const t = text({ ...base, tools: [], toolsCount: 0 } as SelfCheckResult);
     expect(t).toContain("0 个：0 只读 / 0 写");
     expect(t).toContain("触网工具  （无）");
   });
@@ -68,7 +82,7 @@ describe("失败路径必须给出可照做的下一步", () => {
   it("401 时首先指向 revoke，并说明那是【正确】行为", () => {
     // 跑过 grande revoke --yes 之后自检被拒是对的——真实客户端此刻同样被拒。
     // 不说这一句的话，人会把一次成功的吊销读成自检坏了。
-    const t = text({ ...base, httpStatus: 401, tools: [] });
+    const t = text({ ...base, httpStatus: 401, tools: [] } as SelfCheckResult);
     expect(t).toContain("revoke");
     expect(t).toContain("【正确】行为");
     expect(t).toContain("GRANDE_ISSUER");
@@ -77,7 +91,7 @@ describe("失败路径必须给出可照做的下一步", () => {
   });
 
   it("非 200 非 401 时把人引回服务端日志的两行", () => {
-    const t = text({ ...base, httpStatus: 500, tools: [] });
+    const t = text({ ...base, httpStatus: 500, tools: [] } as SelfCheckResult);
     expect(t).toContain("[gw]");
     expect(t).toContain("[rpc]");
   });

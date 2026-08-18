@@ -15,7 +15,7 @@ import { applyGc, planGc } from "./worktreeGc.ts";
 import { spawnSync } from "node:child_process";
 import { planOuterTest, resolveOuterTestCwd } from "./outerTest.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
-import { renderSelfCheck, selfCheck } from "./selfcheck.ts";
+import { renderSelfCheck, selfCheck, type SelfCheckResult } from "./selfcheck.ts";
 import { compactTaskProgress, projectTaskProgress } from "./taskProgress.ts";
 
 const USAGE = `grande —— GrandeGPT 控制平面运维工具
@@ -216,6 +216,7 @@ async function cmdProjectDoctor(out: (l: string) => void, repoId: string): Promi
   const port = process.env.PORT || "8787";
   const host = process.env.GRANDE_HOST ?? "127.0.0.1";
   const baseUrl = `http://${host}:${port}`;
+  let gatewaySelfCheck: SelfCheckResult | undefined;
 
   try {
     const readiness = await inspectProjectReadiness(layout, repoId, {
@@ -228,11 +229,35 @@ async function cmdProjectDoctor(out: (l: string) => void, repoId: string): Promi
           keyPath: join(layout.controlRoot, "secrets", "oauth-key"),
           baseUrl,
         });
+        gatewaySelfCheck = result;
         if (result.httpStatus !== 200) throw new Error(`Gateway tools/list HTTP ${result.httpStatus}`);
-        return `tools/list HTTP 200，${result.tools.length} tools`;
+        const identity = result.gatewayBuild !== null && result.toolsetEpoch !== null && result.toolsDigest !== null
+          ? `；gatewayBuild=${result.gatewayBuild}；toolsetEpoch=${result.toolsetEpoch}；toolsDigest=${result.toolsDigest}`
+          : `；server toolset identity 不可用${result.identityError ? `（${result.identityError}）` : ""}`;
+        return `tools/list HTTP 200，${result.tools.length} tools${identity}`;
       },
     });
     for (const line of renderProjectReadiness(readiness)) out(line);
+    out("");
+    out("Connector Compatibility");
+    out(`  ${readiness.gateway.ok ? "✓" : "✗"} Gateway reachable — ${readiness.gateway.detail}`);
+    if (
+      gatewaySelfCheck?.gatewayBuild !== null && gatewaySelfCheck?.gatewayBuild !== undefined &&
+      gatewaySelfCheck.toolsetEpoch !== null && gatewaySelfCheck.toolsDigest !== null
+    ) {
+      out(
+        `  ✓ Server toolset identity — gatewayBuild=${gatewaySelfCheck.gatewayBuild}；` +
+        `toolsetEpoch=${gatewaySelfCheck.toolsetEpoch}；toolsCount=${gatewaySelfCheck.toolsCount}；` +
+        `toolsDigest=${gatewaySelfCheck.toolsDigest}`,
+      );
+    } else {
+      out(
+        `  ? Server toolset identity — ${gatewaySelfCheck?.identityError ?? "Gateway probe 未取得 server identity"}`,
+      );
+    }
+    out(
+      "  ? ChatGPT session binding — server-side 无法直接验证；Refresh/Reconnect 后必须在新聊天执行 read probe 验证当前 binding",
+    );
     return readiness.development.ready && readiness.prCi.ready && readiness.deploy.ready && readiness.gateway.ok ? 0 : 1;
   } catch (e) {
     out(e instanceof Error ? e.message : String(e));
