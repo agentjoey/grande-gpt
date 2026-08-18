@@ -130,7 +130,9 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
   const inspectRemoteState = options.inspectRemoteState ?? inspectGithubRemoteState;
   return {
     name: "grande_pr_open",
-    description: "为任务分支打开 Draft GitHub PR。按 head 幂等查重，可信尾注由 Gateway 重建；只接受 github.com HTTPS remote。",
+    description:
+      "为任务分支打开 ready GitHub PR（非 Draft），供 S6 CI→merge 闭环继续。" +
+      "按 head 幂等查重，可信尾注由 Gateway 重建；只接受 github.com HTTPS remote。",
     inputSchema: {
       type: "object",
       properties: {
@@ -146,7 +148,6 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
       let audit: AuditHandle | undefined;
       let token: string | undefined;
       try {
-        // 1. 先找任务；不存在时不读 remote、不碰 API。
         const task = getTask(deps.db, taskId);
         if (!task) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
         try {
@@ -159,12 +160,10 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
         const body = typeof args.body === "string" ? args.body : "";
         if (!title) throw new StateError("INVALID_INPUT", "PR title 不能为空。 ");
 
-        // 2. 先只读并解析 URL。非法 remote 在任何 ls-remote/API 调用之前被拒绝。
         const remoteUrl = readRemoteUrl(task.worktreePath, token);
         const { owner, repo } = parseGithubRemote(remoteUrl);
         const api = apiFactory(token);
 
-        // 3. 幂等查询必须在任何创建审计、remote state 探测和 create 之前。
         const existing = await api.findPullRequest(owner, repo, task.branch);
         if (existing) {
           return {
@@ -177,7 +176,6 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
           };
         }
 
-        // 4. 只有确实要创建时才写审计并进入执行态。
         audit = beginAudit(deps.db, {
           taskId,
           tool: "grande_pr_open",
@@ -193,7 +191,7 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
           .find((candidate) => candidate.commit === remote.commit)?.attestationId ?? "none";
         const trustedBody = buildPullRequestBody(body, taskId, attestationId, remote.commit);
 
-        // 5. draft 是字面量 true；既不读参数，也没有 false 分支。
+        // S6：非 Draft 是固定策略，不读取调用方 draft 参数；旧 S3 的人工 Ready 断点在此被移除。
         const created = await api.createPullRequest({
           owner,
           repo,
@@ -201,7 +199,7 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
           base: remote.defaultBranch,
           title,
           body: trustedBody,
-          draft: true,
+          draft: false,
         });
         audit.succeeded([task.worktreePath]);
         return {
@@ -210,11 +208,11 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
             data: {
               ...created,
               existing: false,
-              draft: true,
+              draft: false,
               head: task.branch,
               base: remote.defaultBranch,
             },
-            hint: `任务 ${taskId} 已创建 Draft PR #${created.number}。`,
+            hint: `任务 ${taskId} 已创建 ready PR #${created.number}；下一步读取 CI 状态。`,
             taskContext: { branch: task.branch, filesChanged: 0, lastJob: null },
           }),
         };

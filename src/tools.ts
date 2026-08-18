@@ -1,9 +1,13 @@
 import { checkArgs } from "./argCheck.ts";
+import { addCapabilityTools } from "./capabilities.ts";
+import { addDeploymentTools } from "./deployment.ts";
 import { err } from "./envelope.ts";
 import { toToolError, redact } from "./errors.ts";
 import { loadGuidance } from "./guidance.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
+import { addPrLifecycleTools } from "./prLifecycle.ts";
 import { registeredIds } from "./registry.ts";
+import { addTaskBriefSupport } from "./taskBrief.ts";
 import {
   buildTools as buildCoreTools,
   type ToolDef,
@@ -13,9 +17,16 @@ import {
 export type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
 /**
- * 保持工具注册主体稳定，只在公共入口给 grande_task_open 的成功数据附加 repo guidance，
- * 再把 S2 本地闭环工具接入同一个生产工具列表。
- * guidance 在调用原处理器前加载：坏配置会以标准错误信封返回，不会先创建 worktree。
+ * 生产工具列表的唯一组装点。Task 始终是中心：
+ * core → local loop → S6 GitHub lifecycle → S4 brief → S7 deploy → S5 capability → arg check。
+ *
+ * S7 的 handler 运行时需要复用 S5 capability tools，而 S5 的 native discovery 又应该
+ * 看见 S7 deployment tools。这里用一个共享的 `deploymentDeps` 数组解决这个接线顺序：
+ * deployment handler 闭包先持有它；deployment tools 建好后再构建 capability（因此 native
+ * 快照能看见 deploy tools）；最后只把三只 capability tool 追加回 `deploymentDeps`，供 S7
+ * 运行时查找。capability 自己不进入 native 快照，因此不会递归暴露。
+ *
+ * 没有 workflow engine；每层只在已有 Task 上补一个垂直缺口。
  */
 export function buildTools(deps: ToolDeps): ToolDef[] {
   const tools = buildCoreTools(deps);
@@ -28,7 +39,6 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       try {
         registered = typeof repoId === "string" && registeredIds(deps.layout).has(repoId);
       } catch {
-        // 注册表自身的错误继续交给原处理器及其统一 wrap 转换，避免在这里复制规则。
         return coreHandler(args);
       }
       if (!registered) return coreHandler(args);
@@ -59,25 +69,25 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     };
   }
 
-  return withArgCheck(deps, addLocalLoopTools(deps, tools));
+  const local = addLocalLoopTools(deps, tools);
+  const github = addPrLifecycleTools(deps, local);
+  const withBrief = addTaskBriefSupport(deps, github);
+
+  // 共享引用：createDeploymentTools 内部会闭包捕获这个数组。
+  const deploymentDeps = [...withBrief];
+  const withDeployment = addDeploymentTools(deps, deploymentDeps);
+
+  // native provider 的快照发生在 deploy tools 已经存在之后，所以 discover/list 完整。
+  const withCapabilities = addCapabilityTools(deps, withDeployment);
+  const capabilityTools = withCapabilities.slice(withDeployment.length);
+  deploymentDeps.push(...capabilityTools);
+
+  return withArgCheck(deps, withCapabilities);
 }
 
 /**
  * 给**每一个**工具的 handler 前置一道入参校验（遗留表 #13）。
- *
- * ## 为什么接在这里
- *
- * 这是生产工具列表的**唯一出口**——`server.ts` 从这里拿，测试也从这里拿。
- * 接在 `server.ts` 的注册循环里会漏掉 `addLocalLoopTools` 之外的调用方，
- * 而「接了但没接全」正是本项目已出现 5 次的 P-A 形状。
- *
- * 注意顺序：必须在 `addLocalLoopTools` **之后**包，否则它新加的工具没有校验。
- *
- * ## 为什么不是靠 SDK 的 zod
- *
- * `server.ts` 的 `toZodSchema` 确实建出了带 `required` 的 zod schema，但那道
- * 校验只在 MCP over HTTP 这一条路径上，**且它的失败是 JSON-RPC 层的错误**，
- * 不是我们的 `ok/error` 信封——模型拿到的东西形状都不一样。这里统一成信封。
+ * 必须在所有 add*Tools/support 之后包，否则后加工具没有统一信封式参数错误。
  */
 function withArgCheck(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
   for (const tool of tools) {
@@ -88,8 +98,6 @@ function withArgCheck(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
       } catch (e) {
         const te = toToolError(e);
         te.message = redact(te.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
-        // taskId 尽量带上：模型靠它把错误对回是哪个任务。参数本身可能就是错的，
-        // 所以只在它确实是字符串时才用。
         return {
           structuredContent: err({
             ...te,

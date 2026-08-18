@@ -1,5 +1,9 @@
+import type { DatabaseSync } from "node:sqlite";
+import { join } from "node:path";
+import { StateError } from "./errors.ts";
 import type { Layout } from "./layout.ts";
 import { getProfile, ProfileError } from "./profiles.ts";
+import { getTask } from "./tasks.ts";
 
 /**
  * 「外层测试」—— 自举时跑不了的那些测试文件。
@@ -31,7 +35,7 @@ import { getProfile, ProfileError } from "./profiles.ts";
  * 跑的就是它们的补集。profile 改了，这个命令自动跟上。
  */
 
-/** 每个被排除文件为什么跑不进沙箱。仅用于人类可读的解释，不参与判定。 */
+/** 每个被排除文件为什么跑不进沙箱。未登记意味着 profile 漂移，必须 fail closed。 */
 const WHY: Record<string, string> = {
   "tests/sandbox.test.ts": "自己 spawn sandbox-exec（测的就是沙箱本身）",
   "tests/runner.test.ts": "起真实 job，经沙箱",
@@ -43,10 +47,34 @@ const WHY: Record<string, string> = {
 export interface OuterTestPlan {
   /** 要跑的测试文件（= `unit-selfhost` 排除掉的那些）。 */
   files: string[];
-  /** 每个文件的排除理由，缺失时为 undefined——**不编一个理由**。 */
-  reasons: Map<string, string | undefined>;
+  /** 每个文件的排除理由。planOuterTest 保证这里不会出现 undefined。 */
+  reasons: Map<string, string>;
   /** 反推所依据的 profile 名。 */
   fromProfile: string;
+}
+
+/**
+ * 选择 outer-test 真正执行 vitest 的 cwd。
+ *
+ * 不传 taskId 保持旧的 canonical 行为；自举产出在合并前必须显式传 taskId，
+ * 否则会出现「canonical 绿，但待合并 worktree 根本没被测」的假验收。
+ */
+export function resolveOuterTestCwd(
+  db: DatabaseSync,
+  layout: Layout,
+  repoId: string,
+  taskId?: string,
+): string {
+  if (taskId === undefined) return join(layout.workspaceRoot, repoId);
+  const task = getTask(db, taskId);
+  if (!task) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+  if (task.repoId !== repoId) {
+    throw new StateError(
+      "INVALID_INPUT",
+      `任务 ${taskId} 属于仓库 ${task.repoId}，不能用于验收仓库 ${repoId}。`,
+    );
+  }
+  return task.worktreePath;
 }
 
 /**
@@ -72,7 +100,18 @@ export function planOuterTest(layout: Layout, repoId: string, profileName = "uni
         `而本命令的反推逻辑没跟上。请人工确认，不要猜。`,
     );
   }
-  const reasons = new Map<string, string | undefined>();
-  for (const f of files) reasons.set(f, WHY[f]);
+
+  const reasons = new Map<string, string>();
+  for (const f of files) {
+    const reason = WHY[f];
+    if (reason === undefined) {
+      throw new ProfileError(
+        "PROFILE_NOT_FOUND",
+        `${profileName} 排除了 ${f}，但 outer-test 的 WHY 表没有登记理由。` +
+          `这通常表示生产 profile 已发生漂移；请先确认为什么该测试不能在 selfhost 沙箱中运行，再登记理由。`,
+      );
+    }
+    reasons.set(f, reason);
+  }
   return { files, reasons, fromProfile: profileName };
 }

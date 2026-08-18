@@ -1,70 +1,78 @@
 # GrandeGPT
 
-在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行平台。
+在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行层，定位于个人开发者、小团队和中小型/轻量项目。
 
-ChatGPT 负责理解目标和组织步骤；Gateway 负责授权与执行；Git worktree 隔离任务；
-macOS Seatbelt 沙箱执行测试；Git 与 GitHub 提供版本、协作与最终保护。
+ChatGPT 负责理解需求、调研仓库和组织步骤；Gateway 负责授权与执行；Git worktree 隔离任务；
+macOS Seatbelt 沙箱执行受控 profile；Git/GitHub 与项目已有部署机制完成代码上线闭环。
 
-> **状态**：设计完成，待 POC 验证。
-> POC 是 S0 的**前置门禁** —— 1–2 人日验证 GPT-5.6 在 chat 模式下能否撑住这种交互
-> （尤其**能否自主轮询**）。未通过则暂停项目并重新设计交互模型。
-> 方向层面的风险与质疑见规格 [§13](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md)。
+> **当前状态**：S0 → S3 已完成，Phase 4（S4–S7）已进入实现验证。
+> 当前 Golden Path：`Request → inspect → plan → code → test → commit → push → PR → CI → merge → deploy → verify → DONE`。
+> Bug / 新需求不会进入另一套维护平台，而是创建新 Task，再次走同一条闭环。
 
-## 它不是什么
+## 产品边界
 
-不是让 ChatGPT 拿到一个 shell。没有 `shell_exec`、`filesystem_raw`、`git_raw`、
-`github_api_raw`。ChatGPT 只能看到 Gateway 注册的高层语义工具，Gateway 是唯一执行权威。
+GrandeGPT **不是大型软件工程平台**。它不建设多 repo orchestration、Jira/Linear 替代品、
+企业审批/RBAC/SSO、release train、Kubernetes/DevOps orchestration、observability/incident
+management、multi-agent organization、plugin marketplace、semantic code graph 或自动 model routing。
+
+它也不是给 ChatGPT 一个 shell。没有 `shell_exec`、`filesystem_raw`、`git_raw`、
+`github_api_raw`。ChatGPT 只能使用 Gateway 注册的高层语义工具，Gateway 是唯一执行权威。
 
 ## 架构一览
 
-```
-ChatGPT (chat 模式)
-   │  只能看到 Gateway 注册的工具
+```text
+ChatGPT
+   │  高层语义工具
    ▼
-MCP Server   公网 HTTPS · /mcp/<repoId> · streamable HTTP · OAuth 2.1 + PKCE
-   │  只做 schema 校验与转发，不碰文件系统
+MCP Server   公网 HTTPS · 单一 /mcp · OAuth 2.1 + PKCE
+   │  schema 校验与转发
    ▼
-Gateway      127.0.0.1 · 唯一执行权威 · Policy + 审计
-   ├──► 文件 / Git 操作 —— Gateway 进程直接执行（受信代码）
-   └──► run_profile     —— sandbox-exec 子进程（不受信代码）
+Gateway      127.0.0.1 · Policy + 审计 · 唯一执行权威
+   ├──► Task / worktree / safe filesystem / Git / GitHub
+   ├──► sandbox profile
+   └──► 薄 capability adapter（native / MCP / plugin / skill）
 ```
+
+**Task 始终是核心执行对象。** S4 的 plan/acceptance criteria 只是 TaskBrief；S6 的 CI/merge
+和 S7 的 deployment receipt 都不会升级成独立 workflow platform。
+
+## Phase 4 能力
+
+| 切片 | 最小能力 |
+|---|---|
+| **S4** | 自然语言 / Issue / Markdown / Bug / PR feedback → repo 调研 → TaskBrief（plan + acceptance criteria）→ 现有 Task 开发循环 |
+| **S5** | capability `list / inspect / invoke`；native 复用现有工具；MCP/plugin 复用标准 tools；skill 激活控制平面可信指令；production/destructive fail-closed |
+| **S6** | ready PR → 当前 head 的 checks/statuses → 失败诊断 → 修复/重新 push → CI green/none + 当前 SHA attestation → expected-SHA merge |
+| **S7** | merge 后读取 repo 的 `.grande/deploy.yaml`，调用已批准 profile 或 S5 capability → verify → DONE；rollback 只调用项目/平台已经声明的机制 |
+
+Phase 4 配置和运行约定见
+[`docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md`](docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md)。
 
 ## 目录约定
 
-```
+```text
 GPT_Workspace/                    ← 代码工作区根 = 可注册域
 ├── grande-gpt/                   ← 本项目，普通 checkout，canonical
 ├── <other-project>/              ← 其他项目，平级
 └── .grande-work/                 ← 派生数据（worktrees / fixtures / tmp）
 
 ~/.grande-control/                ← 控制平面（沙箱完全不可见）
-└── state/ · config/ · artifacts/ · checkpoints/ · secrets/
+└── state/ · config/ · artifacts/ · checkpoints/ · secrets/ · skills/
 ```
 
-控制平面状态刻意放在工作区之外：**被审计者不能拥有审计记录的写权限。**
+控制平面状态刻意放在工作区之外：**被审计者不能拥有审计记录或凭据的写权限。**
 
-## 文档
+## 验证纪律
+
+自举开发使用 `unit-selfhost + typecheck`。`unit-selfhost` 刻意排除自身需要再起沙箱或绑定真实端口的
+外层测试；合并自举产出前仍必须在宿主执行 `grande outer-test --run`，不能把 selfhost 的绿灯误当成
+全部安全不变量已经覆盖。
+
+## 历史文档
 
 | 文档 | 内容 |
 |---|---|
-| [S0 设计规格](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md) | 完整设计、决策与取舍、验收标准、路线图 |
-| [ChatGPT 平台约束调研](docs/research/2026-07-25-chatgpt-platform-constraints.md) | 官方能力边界与硬性限制（含来源） |
-
-## 路线图
-
-| 切片 | 内容 | 粗估（人日） |
-|---|---|---|
-| **POC** | **交互可行性验证：假 MCP 服务端 + 硬编码数据。未通过不启动 S0** | **1–2** |
-| **S0** | 薄端到端：九工具 + Seatbelt + `/mcp/<repoId>` + CLI 调试视图 | 13–19 |
-| S1 | 安全写入层：OID 校验、事务 patch、Checkpoint、Trash | 8–11 |
-| S1.5 | 开发约束层：硬 policy 门禁 + 软方法论指引 | 3–4 |
-| S2 | 本地开发闭环：worktree 生命周期、commit、base sync、Attestation | 11–15 |
-| S2.5 | 前端控制台（T3，须过 Mockup Gate） | 10–15 |
-| S3 | GitHub 闭环：GitHub App、push、Draft PR、CI | 6–9 |
-| S4 | 稳固化：审计对账、僵尸恢复、保留策略 | 4–7 |
-| S5 | 外部校验器接入（按需评估，很可能不做） | 0–5 |
-
-## 设计来源
-
-- 用户提供的 `Chat-Dev-Control-Plane-方案B-设计文档.docx`（v0.9 设计整理稿）
-- 参考项目 NAS AI Ops 的双层控制思路：MCP 只发布工具，Gateway 才是执行权威
+| [S0 设计规格](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md) | 初始架构、风险与早期路线图（历史决策上下文，不再代表当前 roadmap） |
+| [S1 设计](docs/superpowers/specs/2026-07-29-grande-gpt-s1-design.md) | Safe filesystem / checkpoint / trash / rollback / policy |
+| [S2 设计](docs/superpowers/specs/2026-07-30-grande-gpt-s2-design.md) | Local development loop |
+| [S3 设计](docs/superpowers/specs/2026-07-30-grande-gpt-s3-design.md) | GitHub push / PR 的历史切片设计；Phase 4 已将新 PR 从 Draft 改为 ready，以移除人工闭环断点 |
