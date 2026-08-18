@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,11 +7,14 @@ import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { loadProfiles } from "../src/profiles.ts";
 import { loadRegistry, saveRegistry } from "../src/registry.ts";
 import { applyRepoOnboarding, inspectRepoOnboarding } from "../src/onboarding.ts";
+import { openWorktree } from "../src/worktree.ts";
 
 let ws: string;
 let ctrl: string;
 let savedWs: string | undefined;
 let savedCtrl: string | undefined;
+const git = (cwd: string, ...args: string[]): string =>
+  execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
 beforeEach(() => {
   savedWs = process.env.GRANDE_WORKSPACE;
@@ -31,7 +35,10 @@ afterEach(() => {
 
 function makeRepo(repoId = "fresh"): string {
   const repo = join(ws, repoId);
-  mkdirSync(join(repo, ".git"), { recursive: true });
+  mkdirSync(repo, { recursive: true });
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "config", "user.email", "t@example.com");
+  git(repo, "config", "user.name", "T");
   mkdirSync(join(repo, ".github", "workflows"), { recursive: true });
   mkdirSync(join(repo, ".grande"), { recursive: true });
   mkdirSync(join(repo, "node_modules"), { recursive: true });
@@ -42,6 +49,8 @@ function makeRepo(repoId = "fresh"): string {
     packageManager: "pnpm@10.33.0",
     scripts: { test: "vitest run", typecheck: "tsc --noEmit", build: "vite build" },
   }, null, 2), "utf8");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
   return repo;
 }
 
@@ -52,6 +61,8 @@ describe("project onboarding", () => {
       readRemote: () => "https://github.com/acme/fresh.git",
     });
 
+    expect(proposal.git.ready).toBe(true);
+    expect(proposal.readyToRegister).toBe(true);
     expect(proposal.packageManager).toBe("pnpm");
     expect(proposal.githubRepo).toBe("acme/fresh");
     expect(proposal.ciConfigured).toBe(true);
@@ -71,6 +82,22 @@ describe("project onboarding", () => {
 
     expect(loadRegistry(layout).has("fresh")).toBe(false);
     expect(loadProfiles(layout, "fresh").size).toBe(0);
+  });
+
+  it("onboarding 与 openWorktree 对 detached canonical 使用同一 readiness 标准", () => {
+    const repo = makeRepo();
+    const layout = loadLayout();
+    const sha = git(repo, "rev-parse", "HEAD").trim();
+    git(repo, "checkout", "-q", sha);
+
+    const proposal = inspectRepoOnboarding(layout, "fresh", { readRemote: () => null });
+    expect(proposal.readyToRegister).toBe(false);
+    expect(proposal.git.detached).toBe(true);
+
+    saveRegistry(layout, [{ repoId: "fresh", path: repo, registered: true }]);
+    expect(() => openWorktree(layout, "fresh", "parity", "task_parity")).toThrow(
+      expect.objectContaining({ code: "CANONICAL_BUSY" }),
+    );
   });
 
   it("显式 apply 才写可信控制平面；不向 repo 写 profiles/secrets，并保留已有仓库配置", () => {

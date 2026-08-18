@@ -261,6 +261,19 @@ function cmdRepo(out: (l: string) => void, args: string[]): number {
     ensureLayout(layout);
     const proposal = inspectRepoOnboarding(layout, repoId);
     out(`Onboarding proposal: ${proposal.repoId}`);
+    out("Repository");
+    out(`  ${proposal.git.repository ? "✓" : "✗"} Git repository`);
+    out(
+      `  ${proposal.git.headExists ? "✓" : "✗"} HEAD — ${proposal.git.headSha ? proposal.git.headSha.slice(0, 8) : "no baseline commit"}`,
+    );
+    out(
+      `  ${proposal.git.detached ? "✗" : "✓"} Branch — ${proposal.git.detached ? "detached HEAD" : proposal.git.branch ?? "unknown"}`,
+    );
+    out(
+      `  ${proposal.git.busy ? "✗" : "✓"} Canonical — ${proposal.git.busy ? `busy: ${proposal.git.busyReasons.join(", ")}` : "idle"}`,
+    );
+    out(`  ${proposal.git.ready ? "✓" : "✗"} Worktree lifecycle — ${proposal.git.ready ? "ready" : "not ready"}`);
+    out("");
     out(`  Package manager  ${proposal.packageManager ?? "未检测到"}`);
     for (const name of ["test", "typecheck", "lint", "build"] as const) {
       const profile = proposal.profiles.find((item) => item.name === name);
@@ -272,6 +285,13 @@ function cmdRepo(out: (l: string) => void, args: string[]): number {
     out(`  Deploy           ${proposal.deployConfigured ? "✓ .grande/deploy.yaml" : "✗ 未配置"}`);
     out(`  Dependencies     ${proposal.cloneNodeModules ? "✓ 复用 canonical node_modules" : "— 无 node_modules 克隆需求"}`);
     out(`  Registered       ${proposal.alreadyRegistered ? "✓ 已注册" : "✗ 尚未授权"}`);
+    out("");
+    out(`Ready to register: ${proposal.readyToRegister ? "YES" : "NO"}`);
+    if (proposal.blockingReasons.length > 0) {
+      out("");
+      out("Blocker:");
+      for (const reason of proposal.blockingReasons) out(`  ${reason}`);
+    }
 
     if (!flags.includes("--apply")) {
       out("");

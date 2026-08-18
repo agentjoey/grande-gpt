@@ -55,7 +55,7 @@ Phase 4 最终为 **23 tools：9 read-only / 14 write**。配置、运行约定�
 Phase 5 不增加新的生命周期平台，重点是把 Phase 4 Golden Path 在真实轻量项目里用顺。
 
 - **S8 · Real-world Loop Hardening**：Checks API 403 回退 GitHub Actions 时，失败 workflow 可继续下钻到有限数量的 failed job / failed step，并只读取 bounded log excerpt；signed log URL 不携带 GitHub PAT。诊断增强失败会退回 workflow-level failure，不会把已知失败误报成 CI=none。
-- **S9 · Project Onboarding**：`grande repo add <repoId>` 默认只生成 proposal；只有 Human Owner 显式加 `--apply` 才把 registration 与缺失的常用 run profiles 写入可信控制平面。repo 内容不能借 onboarding 扩大执行权限。
+- **S9 · Project Onboarding**：`grande repo add <repoId>` 默认只生成 proposal，并检查候选是否是安全的 workspace direct child、具有有效 HEAD、且 canonical 非 detached / merge / rebase / cherry-pick / index.lock，真正具备 worktree lifecycle readiness；只有 Human Owner 显式加 `--apply` 且 readiness 仍通过时，才把 registration 与缺失的常用 run profiles 写入可信控制平面。repo 内容不能借 onboarding 扩大执行权限。
 - **S9 · Readiness Doctor**：`grande doctor --repo <repoId>` 按 `Development / PR/CI / Deploy / Gateway` 展示 Golden Path readiness，并实际 probe GitHub credential/access 与 Gateway tools/list，而不是只看配置文件是否存在。
 - **S10 · Daily Operations**：`grande status` 与 `grande_task_status` 从既有 Task / jobs / attestation / PR audit / deployment receipt 投影 `Code / Tests / PR / CI / Merged / Deploy / Verify`，显示 blocker、下一步和 completed-but-not-cleaned-up。不会因此新增十几个持久状态，也不会自动 destructive close。
 
