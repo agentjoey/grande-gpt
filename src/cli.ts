@@ -8,6 +8,7 @@ import { listJobs } from "./jobs.ts";
 import { ensureLayout, loadLayout, type Layout } from "./layout.ts";
 import { applyRepoOnboarding, inspectRepoOnboarding } from "./onboarding.ts";
 import { assertValidId } from "./paths.ts";
+import { inspectProjectReadiness, renderProjectReadiness } from "./readiness.ts";
 import { getTask, listActiveTasks } from "./tasks.ts";
 import { discoverRepos, loadRegistry } from "./registry.ts";
 import { applyGc, planGc } from "./worktreeGc.ts";
@@ -21,7 +22,7 @@ const USAGE = `grande —— GrandeGPT 控制平面运维工具
   grande status                 活跃任务：分支、worktree、状态、最近 job
   grande jobs [--task <id>]     job 列表：profile、状态、耗时、退出码
   grande audit [--task <id>]    审计流水：opId、工具、决策、触及路径
-  grande doctor                 环境自检
+  grande doctor [--repo <id>]   环境自检；--repo 做 Golden Path readiness
   grande repo add <id> [--apply]  新 repo onboarding（默认 proposal；--apply 才写控制平面）
   grande gateway <action>       macOS LaunchAgent：install/start/stop/restart/status/uninstall
   grande gc [--apply]           worktree 与 task 对账（默认 dry-run）
@@ -187,6 +188,45 @@ function cmdDoctor(out: (l: string) => void): number {
   }
 
   return bad === 0 ? 0 : 1;
+}
+
+async function cmdProjectDoctor(out: (l: string) => void, repoId: string): Promise<number> {
+  let layout: Layout;
+  try {
+    layout = loadLayout();
+  } catch (e) {
+    out(e instanceof Error ? e.message : String(e));
+    return 1;
+  }
+  ensureLayout(layout);
+  const db = openDb(layout);
+  const port = process.env.PORT || "8787";
+  const host = process.env.GRANDE_HOST ?? "127.0.0.1";
+  const baseUrl = `http://${host}:${port}`;
+
+  try {
+    const readiness = await inspectProjectReadiness(layout, repoId, {
+      gatewayProbe: async () => {
+        const issuer = process.env.GRANDE_ISSUER;
+        if (!issuer) throw new Error("GRANDE_ISSUER 未设置，无法执行真实 Gateway tools/list probe");
+        const result = await selfCheck({
+          issuer,
+          db,
+          keyPath: join(layout.controlRoot, "secrets", "oauth-key"),
+          baseUrl,
+        });
+        if (result.httpStatus !== 200) throw new Error(`Gateway tools/list HTTP ${result.httpStatus}`);
+        return `tools/list HTTP 200，${result.tools.length} tools`;
+      },
+    });
+    for (const line of renderProjectReadiness(readiness)) out(line);
+    return readiness.development.ready && readiness.prCi.ready && readiness.deploy.ready && readiness.gateway.ok ? 0 : 1;
+  } catch (e) {
+    out(e instanceof Error ? e.message : String(e));
+    return 1;
+  } finally {
+    db.close();
+  }
 }
 
 function cmdRepo(out: (l: string) => void, args: string[]): number {
@@ -396,15 +436,30 @@ export function runCli(argv: string[], out: (line: string) => void): number | Pr
   const taskIdx = rest.indexOf("--task");
   const taskDangling = taskIdx >= 0 && rest[taskIdx + 1] === undefined;
   const taskId = taskIdx >= 0 ? rest[taskIdx + 1] : undefined;
+  const repoIdx = rest.indexOf("--repo");
+  const repoDangling = repoIdx >= 0 && rest[repoIdx + 1] === undefined;
+  const repoId = repoIdx >= 0 ? rest[repoIdx + 1] : undefined;
 
   if (taskDangling && (cmd === "jobs" || cmd === "audit" || cmd === "status" || cmd === "outer-test")) {
     out("用法错误：--task 后面需要一个任务 id，例如 --task task_abc");
+    return 1;
+  }
+  if (repoDangling && cmd === "doctor") {
+    out("用法错误：--repo 后面需要一个 repo id，例如 --repo grande-gpt");
     return 1;
   }
 
   if (taskId !== undefined && (cmd === "jobs" || cmd === "audit" || cmd === "outer-test")) {
     try {
       assertValidId(taskId, "--task");
+    } catch (e) {
+      out(`用法错误：${e instanceof Error ? e.message : String(e)}`);
+      return 1;
+    }
+  }
+  if (repoId !== undefined && cmd === "doctor") {
+    try {
+      assertValidId(repoId, "--repo");
     } catch (e) {
       out(`用法错误：${e instanceof Error ? e.message : String(e)}`);
       return 1;
@@ -419,7 +474,7 @@ export function runCli(argv: string[], out: (line: string) => void): number | Pr
     case "audit":
       return cmdAudit(out, taskId);
     case "doctor":
-      return cmdDoctor(out);
+      return repoId === undefined ? cmdDoctor(out) : cmdProjectDoctor(out, repoId);
     case "repo":
       return cmdRepo(out, rest);
     case "gateway":
