@@ -9,7 +9,7 @@ import type { ToolDef } from "./toolsCore.ts";
  * (tool name, input schema, or annotations). Ordinary implementation/build
  * patches keep the same epoch.
  */
-export const TOOLSET_EPOCH = 1;
+export const TOOLSET_EPOCH = 2;
 
 export interface ToolsetIdentity {
   gatewayBuild: string;

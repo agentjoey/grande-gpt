@@ -55,7 +55,7 @@ Phase 4 最终为 **23 tools：9 read-only / 14 write**。配置、运行约定�
 Phase 5 不增加新的生命周期平台，重点是把 Phase 4 Golden Path 在真实轻量项目里用顺。
 
 - **S8 · Real-world Loop Hardening**：Checks API 403 回退 GitHub Actions 时，失败 workflow 可继续下钻到有限数量的 failed job / failed step，并只读取 bounded log excerpt；signed log URL 不携带 GitHub PAT。诊断增强失败会退回 workflow-level failure，不会把已知失败误报成 CI=none。
-- **S9 · Project Onboarding**：`grande repo add <repoId>` 默认只生成 proposal，并检查候选是否是安全的 workspace direct child、具有有效 HEAD、且 canonical 非 detached / merge / rebase / cherry-pick / index.lock，真正具备 worktree lifecycle readiness；只有 Human Owner 显式加 `--apply` 且 readiness 仍通过时，才把 registration 与缺失的常用 run profiles 写入可信控制平面。repo 内容不能借 onboarding 扩大执行权限。
+- **S9 · Project Onboarding**：`grande repo add <repoId>` 默认只生成 proposal，并检查候选是否是安全的 workspace direct child、具有有效 HEAD、且 canonical 非 detached / merge / rebase / cherry-pick / index.lock，真正具备 worktree lifecycle readiness；只有 Human Owner 显式加 `--apply` 且 readiness 仍通过时，才把 registration 与缺失的常用 run profiles 写入可信控制平面。repo 内容不能借 onboarding 扩大执行权限。ChatGPT 路径复用同一套 S9 primitive：`grande_repo_add_propose` 只读生成 proposal + digest，Human Owner 明确确认后才调用 `grande_repo_add_apply`；apply 会重新检查 readiness 与 trusted control-plane pre-state，stale/blocked 时零写入。CLI 保留为 fallback。
 - **S9 · Readiness Doctor**：`grande doctor --repo <repoId>` 按 `Development / PR/CI / Deploy / Gateway` 展示 Golden Path readiness，并实际 probe GitHub credential/access 与 Gateway tools/list，而不是只看配置文件是否存在。
 - **S10 · Daily Operations**：`grande status` 与 `grande_task_status` 从既有 Task / jobs / attestation / PR audit / deployment receipt 投影 `Code / Tests / PR / CI / Merged / Deploy / Verify`，显示 blocker、下一步和 completed-but-not-cleaned-up。不会因此新增十几个持久状态，也不会自动 destructive close。
 
@@ -88,6 +88,8 @@ ChatGPT App 采用明确的开发/生产分离，避免开发期频繁 schema �
 
 GrandeGPT 对 server toolset 使用四个兼容性字段：`gatewayBuild / toolsetEpoch / toolsCount / toolsDigest`。
 `toolsDigest` 只覆盖稳定排序后的 tool name、input schema 与 annotations；`toolsetEpoch` 也只在这三类 contract 真正改变时 bump。实现代码、日志、CLI 文本等 patch 即使产生新的 `gatewayBuild`，只要 tool contract 未变，就保持同一 epoch/digest，**不 Refresh App**。
+
+当前 onboarding MCP 是一次正式 tool-contract release：**25 tools**，`toolsetEpoch=2`。相对 epoch 1 / 23-tool contract 只新增 `grande_repo_add_propose` 与 `grande_repo_add_apply` 两只本地工具；open-world 与 destructive 高风险名单不扩张。部署该 release 后必须 Scan/Refresh Tools，并在**新聊天**先执行 `grande_task_status` read probe，确认 server-side `toolsetEpoch=2 / toolsCount=25 / toolsDigest` 与 App snapshot 对齐后，再调用新的 apply 写工具。
 
 开发期的新 schema 先在 GrandeGPT Dev 收敛；正式发布时才 bump epoch、部署 production、Scan/Refresh Tools，并在**新聊天**先执行 `grande_task_status` read probe。出现 `Resource not found` / `tool disabled` 时，不允许绕过 Gateway 或降低安全注解来恢复调用；保留 task，Refresh/Reconnect 后在新聊天 resume。
 

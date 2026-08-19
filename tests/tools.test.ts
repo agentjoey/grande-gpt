@@ -104,6 +104,7 @@ const READ_ONLY = [
   "grande_task_status", "grande_repo_map", "grande_repo_search",
   "grande_repo_read", "grande_diff", "grande_run_result",
   "grande_capability_list", "grande_capability_inspect", "grande_pr_status",
+  "grande_repo_add_propose",
 ] as const;
 
 const OPEN_WORLD = [
@@ -122,7 +123,7 @@ const DESTRUCTIVE = [
 ] as const;
 
 describe("工具注解", () => {
-  it("Phase 4 恰好注册 23 个工具：9 只读 + 14 写，且新增能力是最小闭环所需的 8 个", () => {
+  it("当前 contract 恰好注册 25 个工具：10 只读 + 15 写；onboarding 只新增 propose/apply 两只本地工具", () => {
     const names = buildTools(deps).map((t) => t.name).sort();
     expect(names.filter((n) => READ_ONLY.includes(n as typeof READ_ONLY[number]))).toEqual([...READ_ONLY].sort());
     for (const name of [
@@ -130,12 +131,13 @@ describe("工具注解", () => {
       "grande_commit", "grande_sync_base", "grande_push", "grande_pr_open",
       "grande_capability_invoke", "grande_pr_merge",
       "grande_deploy", "grande_deploy_verify", "grande_deploy_rollback",
+      "grande_repo_add_apply",
     ]) expect(names).toContain(name);
-    expect(names).toHaveLength(23);
-    expect(names.length - READ_ONLY.length).toBe(14);
+    expect(names).toHaveLength(25);
+    expect(names.length - READ_ONLY.length).toBe(15);
   });
 
-  it("九个只读工具全部 readOnlyHint: true", () => {
+  it("十个只读工具全部 readOnlyHint: true", () => {
     const tools = buildTools(deps).filter((t) => READ_ONLY.includes(t.name as typeof READ_ONLY[number]));
     expect(tools).toHaveLength(READ_ONLY.length);
     for (const t of tools) {
@@ -197,7 +199,7 @@ describe("工具注解", () => {
 });
 
 describe("D18：repoId 参数只出现在该出现的地方（单一端点 + 任务绑定隔离）", () => {
-  it("grande_task_open 要求 repoId——D18 下唯一一处由模型显式指定写入目标仓库", () => {
+  it("grande_task_open 要求 repoId——D18 下唯一一处由模型显式指定 task-bound 写入目标仓库", () => {
     const tool = buildTools(deps).find((t) => t.name === "grande_task_open")!;
     expect(tool.inputSchema.properties.repoId).toBeDefined();
     expect(tool.inputSchema.required).toContain("repoId");
@@ -467,7 +469,7 @@ describe("grande_run / grande_run_result", () => {
   });
 }, 15_000);
 
-describe("工具注解必须逐字匹配 Phase 4 规格", () => {
+describe("工具注解必须逐字匹配当前 contract", () => {
   const SPEC: Record<string, { readOnly: boolean; destructive: boolean; openWorld?: true }> = {
     grande_task_open:         { readOnly: false, destructive: false },
     grande_task_status:       { readOnly: true,  destructive: false },
@@ -475,6 +477,8 @@ describe("工具注解必须逐字匹配 Phase 4 规格", () => {
     grande_repo_search:       { readOnly: true,  destructive: false },
     grande_repo_read:         { readOnly: true,  destructive: false },
     grande_repo_edit:         { readOnly: false, destructive: false },
+    grande_repo_add_propose:  { readOnly: true,  destructive: false },
+    grande_repo_add_apply:    { readOnly: false, destructive: false },
     grande_rollback:          { readOnly: false, destructive: false },
     grande_diff:              { readOnly: true,  destructive: false },
     grande_run:               { readOnly: false, destructive: false },

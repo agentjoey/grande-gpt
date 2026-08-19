@@ -20,12 +20,14 @@ node --disable-warning=ExperimentalWarning src/cli.ts doctor --repo grande-gpt
 
 ### Server toolset identity
 
-Gateway 通过现有 `grande_task_status` 暴露以下字段，不新增 MCP tool：
+Gateway 通过现有 `grande_task_status` 暴露以下字段，不新增额外 identity MCP tool：
 
 - `gatewayBuild`：优先使用显式 `GRANDE_GATEWAY_BUILD`；否则为运行 checkout 的 `git:<40-char HEAD>`；没有 Git metadata 时才退化为 `dev`。
 - `toolsetEpoch`：ChatGPT tool-contract compatibility epoch。**只有 tool contract 改变时才递增。**
-- `toolsCount`：当前工具数；当前 Phase 5 基线为 23。
+- `toolsCount`：当前正式 onboarding contract 基线为 25。
 - `toolsDigest`：`sha256:` digest，只覆盖稳定排序后的 tool `name + input schema + annotations`。
+
+当前正式 contract 是 **epoch 2**（`toolsetEpoch=2`）/ **25 tools**。相对 epoch 1 的 23-tool baseline，只新增本地 `grande_repo_add_propose` 与 `grande_repo_add_apply`；前者 read-only proposal，后者是 Human Owner 明确确认后才调用的 write action。该 release 没有新增 open-world 或 destructive 工具。
 
 `gatewayBuild` 与 `toolsetEpoch` 是两条不同的轴。实现代码可以变、build 可以变，而 tool contract 完全不变；这种情况下 epoch 必须保持不变，digest 也应保持不变。
 
@@ -70,6 +72,8 @@ description、handler 实现、日志、CLI 文本、内部重构不进入 `tool
 5. **新建聊天**，先执行 read probe：调用 `grande_task_status`（无参数即可）。
 6. read probe 必须成功返回，并与 server-side 的 `toolsetEpoch / toolsCount / toolsDigest` 对得上，再继续写操作。
 
+本次 onboarding release 的具体预期为：`toolsetEpoch=2`、`toolsCount=25`、`toolsDigest` 不等于 epoch-1 23-tool digest；新聊天 read probe 通过后，才开始使用 `grande_repo_add_propose`，并在 Human Owner 确认后调用 `grande_repo_add_apply`。
+
 Production App 只在这种正式 tool-contract release 时更新工具 snapshot。
 
 ## 4. `Resource not found` / `tool disabled` 恢复流程
@@ -111,6 +115,7 @@ Production App 只在这种正式 tool-contract release 时更新工具 snapshot
 - 确认是否真实改变 tool contract。
 - 如果没有：确认 `TOOLSET_EPOCH` 没被改。
 - 如果有：确认 epoch 已 bump，deterministic digest / tools-list 测试已通过。
+- 本次 onboarding release：确认 production buildTools 精确为 25 tools、epoch 2，并且只新增 `grande_repo_add_propose` / `grande_repo_add_apply`。
 - 运行 `unit-selfhost + typecheck`；涉及 selfhost 排除区域时，再运行 host `outer-test`。
 
 发布后：
@@ -119,3 +124,4 @@ Production App 只在这种正式 tool-contract release 时更新工具 snapshot
 - `doctor --repo grande-gpt`：`Connector Compatibility` 中 Gateway reachable 与 Server toolset identity 可读。
 - contract 未变：到此结束，不 Refresh App。
 - contract 已变：Scan/Refresh Tools → 新聊天 → `grande_task_status` read probe → 再恢复写操作。
+- onboarding release 的 read probe 必须看到 `toolsetEpoch=2`、`toolsCount=25` 与新的 `toolsDigest`；只有随后才对真实 repo 执行 propose/confirm/apply。

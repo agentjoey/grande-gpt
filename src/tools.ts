@@ -5,6 +5,7 @@ import { err } from "./envelope.ts";
 import { toToolError, redact } from "./errors.ts";
 import { loadGuidance } from "./guidance.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
+import { addOnboardingTools } from "./onboardingTools.ts";
 import { addPrLifecycleTools } from "./prLifecycle.ts";
 import { registeredIds } from "./registry.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
@@ -26,7 +27,7 @@ export {
 
 /**
  * 生产工具列表的唯一组装点。Task 始终是中心：
- * core → local loop → S6 GitHub lifecycle → S4 brief → S7 deploy → S5 capability → arg check。
+ * core → local loop → S6 GitHub lifecycle → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
  *
  * S7 的 handler 运行时需要复用 S5 capability tools，而 S5 的 native discovery 又应该
  * 看见 S7 deployment tools。这里用一个共享的 `deploymentDeps` 数组解决这个接线顺序：
@@ -80,9 +81,10 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
   const local = addLocalLoopTools(deps, tools);
   const github = addPrLifecycleTools(deps, local);
   const withBrief = addTaskBriefSupport(deps, github);
+  const withOnboarding = addOnboardingTools(deps, withBrief);
 
   // 共享引用：createDeploymentTools 内部会闭包捕获这个数组。
-  const deploymentDeps = [...withBrief];
+  const deploymentDeps = [...withOnboarding];
   const withDeployment = addDeploymentTools(deps, deploymentDeps);
 
   // native provider 的快照发生在 deploy tools 已经存在之后，所以 discover/list 完整。
@@ -95,8 +97,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
 }
 
 /**
- * 通过现有 grande_task_status 暴露 server-side toolset identity；不新增 MCP tool。
- * identity 在完整 23-tool 列表组装完之后一次性计算，handler 包装不进入 digest。
+ * 通过现有 grande_task_status 暴露 server-side toolset identity；不新增额外 identity MCP tool。
+ * identity 在完整 25-tool 列表组装完之后一次性计算，handler 包装不进入 digest。
  */
 function withToolsetIdentity(tools: ToolDef[]): ToolDef[] {
   const identity = toolsetIdentity(tools);
