@@ -7,10 +7,11 @@
 当前权威入口：
 
 - [`README.md`](README.md) —— 当前产品定位、能力与 production 运维入口；
+- [`docs/BACKLOG.md`](docs/BACKLOG.md) —— **当前 backlog 的唯一权威状态源**；新增、优先级变化、重复复现与关闭都只在这里维护。本文件后半历史“已知遗留”表冻结为事故快照，不再作为当前 backlog；
 - [`docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md`](docs/superpowers/specs/2026-08-18-grande-gpt-phase4.md) —— S4–S7 当前规格；
 - [`docs/research/2026-08-18-phase4-closeout.md`](docs/research/2026-08-18-phase4-closeout.md) —— Phase 4 最终验收与收口证据。
 
-早期 [`docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md) 与本文件后半的 dated observations 保留为历史决策/事故上下文；其中旧 roadmap、工具数量、Draft PR 等描述不是当前产品状态。
+早期 [`docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md`](docs/superpowers/specs/2026-07-25-grande-gpt-s0-design.md) 与本文件后半的 dated observations 保留为历史决策/事故上下文；其中旧 roadmap、工具数量、Draft PR、“已知遗留”状态等描述不是当前产品/backlog 状态。
 
 ---
 
@@ -111,7 +112,7 @@ Phase 4 closeout 的最终证据：
 
 ## 历史观察与事故复盘
 
-**以下内容按原日期保留。数字、工具数量、roadmap 和策略描述是当时快照；与当前状态冲突时，以本文件顶部、README、Phase 4 规格和 closeout 为准。**
+**以下内容按原日期保留。数字、工具数量、roadmap、策略描述和“已知遗留”表都是当时快照；当前 backlog 一律以 [`docs/BACKLOG.md`](docs/BACKLOG.md) 为准，下面不再新增/更新待办状态。**
 
 **已在真实 ChatGPT 普通对话里验证通过的三件事**：
 
@@ -153,7 +154,7 @@ Phase 4 closeout 的最终证据：
 已用 `grande gc --apply` 完成首次真实回收：722M → 635M，git 注册项与分支一并清掉，
 活跃任务无误伤，重跑幂等。
 
-**已知遗留**（按优先级）：
+**已知遗留（历史冻结快照；当前状态见 `docs/BACKLOG.md`）**：
 
 | # | 问题 | 状态 |
 |---|---|---|
