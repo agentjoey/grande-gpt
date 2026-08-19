@@ -20,6 +20,46 @@ GrandeGPT 已多次出现同一类闭环缺陷：GitHub PR 已成功 merge 到 r
 - Agent 容易误判“PR merged = local canonical 已更新”，导致重复开发、冲突、错误 gap analysis 或不必要的人类介入。
 - 破坏 Golden Path 在连续多 Task 场景下的闭环：`merge → 下一 Task` 之间仍存在隐藏的人工作业。
 
+## 相关已确认问题：`grande_sync_base` 的公开语义会误导同步方向
+
+**状态**：Open  
+**优先级**：P1（语义契约 / 可诊断性；会放大本页 P0 stale-canonical 问题）
+
+`grande_sync_base` 当前公开描述为：
+
+> 把任务分支同步到本机 canonical HEAD。
+
+这句话容易被理解为“把 task 的结果同步回 canonical”，但实际实现完全不会写 canonical。`src/syncBase.ts` 的真实方向是 **local canonical → task worktree**：
+
+1. 读取 local canonical HEAD；
+2. 若 canonical HEAD 已是 task HEAD 的祖先，则返回 `action=up-to-date`；
+3. 若 task 没有自己的提交，则在 **task worktree** 中 `merge --ff-only <canonical>`；
+4. 若双方都有提交，则仍在 **task worktree** 中 merge canonical；
+5. canonical checkout 全程不被修改。
+
+因此当前 `up-to-date` 的真实含义不是“task HEAD 与 canonical HEAD 相等”，而是：
+
+> **task 已经包含当前 local canonical 的历史，不需要再把 canonical 合进 task。**
+
+这个差异已经实机复现。2026-08-19 调用 `grande_sync_base` 时：
+
+- task HEAD：`8446ff8aa2d82ff3423ea110114c3b1d8dff3788`
+- canonical HEAD：`c5c4c348ce28f9132c4e8a3d2657fef3cfbfb4c2`
+- 两个 HEAD 明显不同；
+- 工具仍返回 `action=up-to-date`，并给出 hint：`已与本机 canonical HEAD 保持一致，无需同步。`
+
+该 hint 的“保持一致”会进一步误导用户/模型把“canonical 是 task 的祖先”理解成“canonical 已追上 task / 两边 HEAD 一致”。在刚发生“PR 已 merge，但 local canonical 仍旧”的场景里，这尤其危险：它会掩盖真正需要解决的是 **canonical 本身 stale**，而不是 task 需要 sync base。
+
+现有 `tests/syncBase.test.ts` 只覆盖了“task HEAD == canonical HEAD 时返回 up-to-date”的平凡情形，没有覆盖“task HEAD 领先、canonical 只是其祖先”这一条真实语义，所以当前文案误导不会被测试抓住。
+
+最小后续修复应包括：
+
+- 把 tool description 改成方向明确的表述，例如“把**本机 canonical HEAD 合入/快进到 task worktree**；绝不修改 canonical，也绝不 fetch”。
+- 把 `up-to-date` hint 改成“不需要把当前 local canonical 合入 task；task 已包含 canonical HEAD”，避免暗示 HEAD equality。
+- 响应继续保留并突出 `before` / `after` / `canonicalHead`，让调用方能直接看出两边是否相等。
+- 新增回归测试：canonical 是 task 祖先但两个 HEAD 不同 → `action=up-to-date`，且用户可见 hint 不得声称“两边一致”。
+- 不把 `grande_sync_base` 改造成 task → canonical 的写入工具；canonical refresh 是本页 P0 的另一条受控语义，不能混在同一个工具里。
+
 ## 期望行为
 
 GrandeGPT 必须让“remote PR 已 merge，但 local canonical 未跟上”成为**显式状态**，不能静默继续。
@@ -45,3 +85,5 @@ GrandeGPT 必须让“remote PR 已 merge，但 local canonical 未跟上”成�
 - 连续两个 Task 场景下，Task A 通过 GrandeGPT merge 后，Task B 不会基于 merge 前的旧 canonical HEAD 启动。
 - dirty/diverged canonical 下 refresh 明确拒绝且无副作用。
 - remote/local staleness 有可观察诊断，不再依赖 Human 事后发现 README/文件缺失。
+- `grande_sync_base` 的公开描述明确为 canonical → task，不再让人误读为 task → canonical。
+- canonical 是 task 祖先但 HEAD 不相等时，工具仍可返回 `up-to-date`，但 hint 必须准确表达“task 已包含 canonical”，不得声称两个 HEAD 已一致。
