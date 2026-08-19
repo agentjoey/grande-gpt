@@ -33,7 +33,7 @@ afterEach(() => {
 });
 
 describe("Phase 4 capability wiring", () => {
-  it("native discovery 包含后接入的 S7 deployment tools，但不递归暴露 capability tools 自己", async () => {
+  it("native discovery 包含后接入的 S7 deployment 与 S9 onboarding tools，但不递归暴露 capability tools 自己", async () => {
     const list = buildTools(deps).find((tool) => tool.name === "grande_capability_list")!;
     const envelope = (await list.handler({ provider: "native" })).structuredContent as {
       ok: boolean;
@@ -44,11 +44,13 @@ describe("Phase 4 capability wiring", () => {
     expect(names).toContain("grande_deploy");
     expect(names).toContain("grande_deploy_verify");
     expect(names).toContain("grande_deploy_rollback");
+    expect(names).toContain("grande_repo_add_propose");
+    expect(names).toContain("grande_repo_add_apply");
     expect(names).not.toContain("grande_capability_list");
     expect(names).not.toContain("grande_capability_invoke");
   });
 
-  it("selfhost-safe manifest 精确钉住 Phase 4 的 23 tools / 10 open-world / 5 destructive", () => {
+  it("selfhost-safe manifest 精确钉住 25 tools / 10 open-world / 5 destructive", () => {
     const tools = buildTools(deps);
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
@@ -64,6 +66,8 @@ describe("Phase 4 capability wiring", () => {
       "grande_pr_open",
       "grande_pr_status",
       "grande_push",
+      "grande_repo_add_apply",
+      "grande_repo_add_propose",
       "grande_repo_edit",
       "grande_repo_map",
       "grande_repo_read",

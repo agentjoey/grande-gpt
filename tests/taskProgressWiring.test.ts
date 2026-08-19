@@ -83,7 +83,7 @@ describe("grande_task_status S10 progress wiring", () => {
     db.close();
   });
 
-  it("现有 grande_task_status 暴露同一份 server toolset identity，不新增 MCP tool，且 production tools/list 组装顺序稳定", async () => {
+  it("现有 grande_task_status 暴露同一份 server toolset identity，不新增 MCP identity tool，且 production tools/list 组装顺序稳定", async () => {
     const layout = loadLayout();
     const db = openDb(layout);
     const tools = buildTools({ db, layout });
@@ -95,7 +95,7 @@ describe("grande_task_status S10 progress wiring", () => {
     expect(overviewEnvelope.ok).toBe(true);
     expect(overviewEnvelope.data).toMatchObject(expected);
 
-    expect(tools).toHaveLength(23);
+    expect(tools).toHaveLength(25);
     expect(tools.map((tool) => tool.name)).not.toContain("grande_toolset_identity");
 
     // src/server.ts 直接按 buildTools() 返回顺序 registerTool；这里钉住真实 production

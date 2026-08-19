@@ -208,7 +208,7 @@ describe("grande_pr_open", () => {
     expect(row?.pathsTouched).toContain(worktree);
   });
 
-  it("S7：所有网络工具显式 openWorldHint=true，仍有 13 个本地工具保持 false", () => {
+  it("S9 onboarding tools 加入后，所有网络工具仍显式 openWorldHint=true，15 个本地工具保持 false", () => {
     const tools = buildTools(deps);
     expect(
       tools.filter((tool) => tool.annotations.openWorldHint).map((tool) => tool.name).sort(),
@@ -224,7 +224,7 @@ describe("grande_pr_open", () => {
       "grande_pr_status",
       "grande_push",
     ]);
-    expect(tools.filter((tool) => !tool.annotations.openWorldHint)).toHaveLength(13);
+    expect(tools.filter((tool) => !tool.annotations.openWorldHint)).toHaveLength(15);
     expect(tools.find((tool) => tool.name === "grande_pr_open")?.annotations).toEqual({
       readOnlyHint: false,
       destructiveHint: false,
