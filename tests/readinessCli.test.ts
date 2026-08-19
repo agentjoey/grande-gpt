@@ -73,6 +73,16 @@ describe("grande doctor --repo", () => {
     expect(text).toContain("GRANDE_ISSUER");
   });
 
+  it("增加 Connector Compatibility，并把 Gateway / server identity / ChatGPT binding 三层明确拆开", async () => {
+    await runCli(["doctor", "--repo", "demo"], out);
+    const text = lines.join("\n");
+    expect(text).toContain("Connector Compatibility");
+    expect(text).toContain("Gateway reachable");
+    expect(text).toContain("Server toolset identity");
+    expect(text).toContain("ChatGPT session binding");
+    expect(text).toContain("server-side 无法直接验证");
+  });
+
   it("--repo 悬空时是用法错误，不进入普通 doctor", () => {
     const result = runCli(["doctor", "--repo"], out);
     expect(typeof result).toBe("number");

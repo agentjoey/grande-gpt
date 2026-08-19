@@ -79,6 +79,20 @@ node --disable-warning=ExperimentalWarning src/cli.ts gc
 
 如果 repo 没有 `.grande/deploy.yaml`，Doctor 会明确显示 `Deploy ✗`；GrandeGPT 不会为了让 readiness 变绿而生成通用部署体系。没有真实项目需要的 MCP/plugin/skill provider 时，也不会为了“覆盖类型”虚构 capability 集成。
 
+## ChatGPT App 稳定性与发布分层
+
+ChatGPT App 采用明确的开发/生产分离，避免开发期频繁 schema 变化污染稳定会话：
+
+- **GrandeGPT Dev**：只用于开发和验证新的 tool contract，指向 development/staging Gateway。开发期间可以频繁修改 schema、Scan/Refresh Tools，并始终用新聊天验证 binding。
+- **GrandeGPT Production App**：只指向稳定 production Gateway。普通实现 patch 不 Refresh App；只有正式 **tool-contract release** 才更新 Production App 的 tools snapshot。
+
+GrandeGPT 对 server toolset 使用四个兼容性字段：`gatewayBuild / toolsetEpoch / toolsCount / toolsDigest`。
+`toolsDigest` 只覆盖稳定排序后的 tool name、input schema 与 annotations；`toolsetEpoch` 也只在这三类 contract 真正改变时 bump。实现代码、日志、CLI 文本等 patch 即使产生新的 `gatewayBuild`，只要 tool contract 未变，就保持同一 epoch/digest，**不 Refresh App**。
+
+开发期的新 schema 先在 GrandeGPT Dev 收敛；正式发布时才 bump epoch、部署 production、Scan/Refresh Tools，并在**新聊天**先执行 `grande_task_status` read probe。出现 `Resource not found` / `tool disabled` 时，不允许绕过 Gateway 或降低安全注解来恢复调用；保留 task，Refresh/Reconnect 后在新聊天 resume。
+
+完整诊断、release 与恢复步骤见 [`docs/chatgpt-connector-compatibility-runbook.md`](docs/chatgpt-connector-compatibility-runbook.md)。
+
 ## Production Gateway
 
 production Gateway 通过 macOS 用户级 LaunchAgent 常驻：登录后自动启动，异常退出由 `launchd` 拉起，
@@ -99,6 +113,8 @@ GRANDE_WORKSPACE=/absolute/path/to/GPT_Workspace \
 GRANDE_ISSUER=https://grande.agentjoey.ai \
 node --disable-warning=ExperimentalWarning src/cli.ts gateway install
 ```
+
+Gateway build identity 默认来自运行 checkout 的精确 Git HEAD（`git:<40-char HEAD>`）；正式 release 系统也可以通过 `GRANDE_GATEWAY_BUILD` 显式覆盖。这个 build identity 与 `toolsetEpoch` 独立，Gateway restart 后会重新识别当前运行 checkout。
 
 ## 目录约定
 
