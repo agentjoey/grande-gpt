@@ -9,6 +9,12 @@ macOS Seatbelt 沙箱执行受控 profile；Git/GitHub 与项目已有部署机�
 > 当前 Golden Path：`Request → inspect → plan → code → test → commit → push → PR → CI → merge → deploy → verify → DONE`。
 > Bug / 新需求不会进入另一套维护平台，而是创建新 Task，再次走同一条闭环。
 
+## Backlog
+
+当前待办、优先级和状态的**唯一权威入口**是 [`docs/BACKLOG.md`](docs/BACKLOG.md)。
+`CLAUDE.md` 的旧“已知遗留”和 `docs/research/**` 只保留历史/evidence，不再单独维护当前 backlog 状态。
+新增问题、重复复现、优先级变化和关闭都必须更新 `docs/BACKLOG.md`；已接受且不计划修的架构取舍仍放在 `CLAUDE.md` 的“已接受的风险”，不混入 backlog。
+
 ## 产品边界
 
 GrandeGPT **不是大型软件工程平台**。它不建设多 repo orchestration、Jira/Linear 替代品、
