@@ -25,6 +25,7 @@ type LaunchdModule = {
     action: "start" | "stop" | "restart" | "status" | "uninstall",
     identity: { uid: number; homeDir: string },
     exec: LaunchctlExec,
+    readinessProbe?: () => boolean,
   ): CommandResult;
 };
 
@@ -156,11 +157,10 @@ describe("Gateway LaunchAgent lifecycle", () => {
     expect(status.lines.join("\n")).toContain("state=running");
 
     loadedCalls.length = 0;
-    expect(launchd.manageGatewayLaunchAgent("restart", identity, loadedExec).code).toBe(0);
+    expect(launchd.manageGatewayLaunchAgent("restart", identity, loadedExec, () => true).code).toBe(0);
     expect(loadedCalls).toEqual([
       ["print", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
-      ["bootout", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
-      ["bootstrap", `gui/${c.uid}`, plistPath],
+      ["kickstart", "-k", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
     ]);
 
     const stoppedCalls: string[][] = [];
@@ -178,5 +178,36 @@ describe("Gateway LaunchAgent lifecycle", () => {
       ["bootout", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
     ]);
     expect(existsSync(plistPath)).toBe(false);
+  });
+
+  it("restart 只在 HTTP 就绪后报告成功；未就绪时不通过 bootout 破坏已加载服务", async () => {
+    const launchd = await loadLaunchd();
+    expect(launchd, "src/launchd.ts 尚未实现").not.toBeNull();
+    if (!launchd) return;
+
+    const c = makeConfig();
+    const identity = { uid: c.uid, homeDir: c.homeDir };
+    const plistPath = join(c.homeDir, "Library", "LaunchAgents", `${launchd.GATEWAY_LAUNCHD_LABEL}.plist`);
+    mkdirSync(join(c.homeDir, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(plistPath, "fixture");
+    const calls: string[][] = [];
+    const exec: LaunchctlExec = (args) => {
+      calls.push(args);
+      return { status: 0, stdout: "state = running\n", stderr: "" };
+    };
+    let probes = 0;
+
+    const result = launchd.manageGatewayLaunchAgent("restart", identity, exec, () => {
+      probes += 1;
+      return false;
+    });
+
+    expect(result.code).toBe(1);
+    expect(result.lines.join("\n")).toContain("未就绪");
+    expect(probes).toBeGreaterThan(1);
+    expect(calls).toEqual([
+      ["print", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
+      ["kickstart", "-k", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
+    ]);
   });
 });

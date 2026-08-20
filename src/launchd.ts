@@ -25,6 +25,7 @@ export interface LaunchctlResult {
 }
 
 export type LaunchctlExec = (args: string[]) => LaunchctlResult;
+export type GatewayReadinessProbe = () => boolean;
 
 export interface GatewayLaunchdCommandResult {
   code: number;
@@ -139,6 +140,25 @@ function bootstrap(
   return { code: 0, lines: [`Gateway LaunchAgent 已启动：${serviceTarget(identity)}`] };
 }
 
+function gatewayEndpointReady(): boolean {
+  const result = spawnSync("/usr/bin/curl", [
+    "--fail",
+    "--silent",
+    "--max-time",
+    "1",
+    "http://127.0.0.1:8787/.well-known/oauth-authorization-server",
+  ], { encoding: "utf8" });
+  return result.status === 0;
+}
+
+function awaitGatewayReadiness(probe: GatewayReadinessProbe): boolean {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (probe()) return true;
+    if (attempt < 4) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+  }
+  return false;
+}
+
 export function installGatewayLaunchAgent(
   config: GatewayLaunchdInstallConfig,
   exec: LaunchctlExec = execLaunchctl,
@@ -180,6 +200,7 @@ export function manageGatewayLaunchAgent(
   action: GatewayLaunchdManageAction,
   identity: GatewayLaunchdIdentity,
   exec: LaunchctlExec = execLaunchctl,
+  readinessProbe: GatewayReadinessProbe = gatewayEndpointReady,
 ): GatewayLaunchdCommandResult {
   const plistPath = launchAgentPath(identity);
   const target = serviceTarget(identity);
@@ -224,8 +245,14 @@ export function manageGatewayLaunchAgent(
   }
 
   if (isLoaded) {
-    const stopped = exec(["bootout", target]);
-    if (stopped.status !== 0) return commandFailed("bootout", stopped);
+    const restarted = exec(["kickstart", "-k", target]);
+    if (restarted.status !== 0) return commandFailed("kickstart", restarted);
+  } else {
+    const started = bootstrap(identity, exec);
+    if (started.code !== 0) return started;
   }
-  return bootstrap(identity, exec);
+  if (!awaitGatewayReadiness(readinessProbe)) {
+    return { code: 1, lines: [`Gateway LaunchAgent 重启后未就绪：${target}`] };
+  }
+  return { code: 0, lines: [`Gateway LaunchAgent 已重启并就绪：${target}`] };
 }
