@@ -141,8 +141,10 @@ GPT_Workspace/                    ← 代码工作区根 = 可注册域
 ## 验证纪律
 
 自举开发使用 `unit-selfhost + typecheck`。`unit-selfhost` 刻意排除自身需要再起沙箱或绑定真实端口的
-外层测试；合并自举产出前仍必须在宿主执行 `grande outer-test --run`，不能把 selfhost 的绿灯误当成
-全部安全不变量已经覆盖。
+外层测试；合并自举 Task 前必须在宿主执行 `grande outer-test --task <taskId> --run`。成功时 CLI 会为
+**运行前锁定且运行后仍未变化的 clean HEAD SHA** 写入 `OuterTestReceipt`；`grande_pr_merge` 对
+`grande-gpt` 自举 PR 要求 receipt 与当前 PR head 精确一致，无 receipt 或旧 SHA receipt 都 fail closed。
+仅执行 canonical `grande outer-test --run` 不会签发 task receipt，不能替代这道门禁。
 
 Phase 4 最终 closeout 的已记录验证为：`unit-selfhost` **53 files / 566 tests**、`typecheck` 通过、
 host `outer-test` **5 files / 132 tests**、production `selfcheck` **HTTP 200 / 23 tools**、LaunchAgent

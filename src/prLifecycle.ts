@@ -13,6 +13,7 @@ import {
 } from "./githubApi.ts";
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
 import type { Layout } from "./layout.ts";
+import { hasCurrentOuterTestReceipt } from "./outerTestReceipt.ts";
 import { parseGithubRemote, readGithubRemoteUrl } from "./prOpen.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
@@ -239,7 +240,8 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
     name: "grande_pr_merge",
     description:
       "合并【当前 task.branch 自己的 PR】。每次调用重新读取 PR/CI，要求本地 HEAD=PR head、当前 SHA 有 attestation、" +
-      "CI 不是 pending/failed、PR 可合并；merge 前后安全 refresh local canonical（fixed origin/current base，clean + ff-only）。" +
+      "CI 不是 pending/failed、PR 可合并；grande-gpt 自举 PR 还要求当前 SHA 的 host outer-test receipt；" +
+      "merge 前后安全 refresh local canonical（fixed origin/current base，clean + ff-only）。" +
       "CI=none 时允许轻量项目在 attestation 门禁下继续。",
     inputSchema: {
       type: "object",
@@ -311,6 +313,16 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
             "POLICY_DENIED",
             `PR #${state.pr.number} 当前 head ${state.pr.headSha} 没有本机 attestation；` +
               `请先对当前代码运行验证并 grande_commit，旧 SHA 的验证不能复用。`,
+          );
+        }
+        if (
+          state.task.repoId === "grande-gpt" &&
+          !hasCurrentOuterTestReceipt(deps.db, taskId, state.pr.headSha)
+        ) {
+          throw new StateError(
+            "POLICY_DENIED",
+            `PR #${state.pr.number} 当前 head ${state.pr.headSha} 没有匹配的 host outer-test receipt；` +
+              `请在宿主执行 grande outer-test --task ${taskId} --run。旧 SHA 的 outer-test 结果不能复用。`,
           );
         }
         if (state.ci.state === "failed") {

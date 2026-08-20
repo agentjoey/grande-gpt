@@ -14,6 +14,7 @@ import { discoverRepos, loadRegistry } from "./registry.ts";
 import { applyGc, planGc } from "./worktreeGc.ts";
 import { spawnSync } from "node:child_process";
 import { planOuterTest, resolveOuterTestCwd } from "./outerTest.ts";
+import { prepareOuterTestRun, recordOuterTestPass } from "./outerTestReceipt.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
 import { renderSelfCheck, selfCheck, type SelfCheckResult } from "./selfcheck.ts";
 import { compactTaskProgress, projectTaskProgress } from "./taskProgress.ts";
@@ -40,6 +41,23 @@ function fmtTime(ms: number): string {
 }
 
 type WithDbResult<T> = { ok: true; value: T } | { ok: false };
+
+type OuterTestSpawnResult = { status: number | null; error?: Error };
+type OuterTestSpawn = (
+  command: string,
+  args: string[],
+  options: { cwd: string; stdio: "inherit"; encoding: "utf8" },
+) => OuterTestSpawnResult;
+
+export interface RunCliOptions {
+  /** 仅用于测试 host-only outer-test 编排；生产调用不传，固定走 node:child_process spawnSync。 */
+  outerTestSpawn?: OuterTestSpawn;
+}
+
+const defaultOuterTestSpawn: OuterTestSpawn = (command, args, options) => {
+  const result = spawnSync(command, args, options);
+  return { status: result.status, error: result.error };
+};
 
 function withDb<T>(
   out: (l: string) => void,
@@ -333,7 +351,12 @@ function cmdRepo(out: (l: string) => void, args: string[]): number {
   }
 }
 
-function cmdOuterTest(out: (l: string) => void, run: boolean, taskId?: string): number {
+function cmdOuterTest(
+  out: (l: string) => void,
+  run: boolean,
+  taskId?: string,
+  outerTestSpawn: OuterTestSpawn = defaultOuterTestSpawn,
+): number {
   return withDbExitCode(out, (db, layout) => {
     const plan = planOuterTest(layout, "grande-gpt");
     let cwd: string;
@@ -360,9 +383,20 @@ function cmdOuterTest(out: (l: string) => void, run: boolean, taskId?: string): 
       out("以上仅为清单。加 --run 在【当前进程】跑它们（必须在沙箱外）。");
       return 0;
     }
+
+    let expectedCommit: string | undefined;
+    if (taskId !== undefined) {
+      try {
+        expectedCommit = prepareOuterTestRun(db, taskId, cwd);
+      } catch (e) {
+        out(e instanceof Error ? e.message : String(e));
+        return 1;
+      }
+    }
+
     out("正在运行……（沙箱外）");
     out("");
-    const r = spawnSync("npx", ["vitest", "run", ...plan.files], {
+    const r = outerTestSpawn("npx", ["vitest", "run", ...plan.files], {
       cwd,
       stdio: "inherit",
       encoding: "utf8",
@@ -373,8 +407,33 @@ function cmdOuterTest(out: (l: string) => void, run: boolean, taskId?: string): 
     }
     const code = r.status ?? 1;
     out("");
-    out(code === 0 ? "外层测试全部通过。" : `外层测试失败（exit ${code}）——不要合并。`);
-    return code;
+    if (code !== 0) {
+      out(`外层测试失败（exit ${code}）——不要合并。`);
+      return code;
+    }
+
+    if (taskId === undefined) {
+      out("外层测试全部通过。canonical 验收不签发 task receipt。");
+      return 0;
+    }
+
+    try {
+      const receipt = recordOuterTestPass(
+        db,
+        taskId,
+        cwd,
+        plan.fromProfile,
+        plan.files,
+        Date.now(),
+        expectedCommit,
+      );
+      out(`外层测试全部通过；已记录 host outer-test receipt（commit ${receipt.commit}）。`);
+      return 0;
+    } catch (e) {
+      out(`外层测试通过，但 receipt 签发失败：${e instanceof Error ? e.message : String(e)}`);
+      out("不要合并；重新确认 task HEAD/worktree 后再次执行 outer-test。");
+      return 1;
+    }
   });
 }
 
@@ -489,7 +548,11 @@ function cmdGc(out: (l: string) => void, apply: boolean): number {
 }
 
 /** @returns 进程退出码 */
-export function runCli(argv: string[], out: (line: string) => void): number | Promise<number> {
+export function runCli(
+  argv: string[],
+  out: (line: string) => void,
+  options: RunCliOptions = {},
+): number | Promise<number> {
   const [cmd, ...rest] = argv;
   const taskIdx = rest.indexOf("--task");
   const taskDangling = taskIdx >= 0 && rest[taskIdx + 1] === undefined;
@@ -540,7 +603,7 @@ export function runCli(argv: string[], out: (line: string) => void): number | Pr
     case "gc":
       return cmdGc(out, rest.includes("--apply"));
     case "outer-test":
-      return cmdOuterTest(out, rest.includes("--run"), taskId);
+      return cmdOuterTest(out, rest.includes("--run"), taskId, options.outerTestSpawn);
     case "revoke":
       return cmdRevoke(out, rest.includes("--yes"));
     case "selfcheck":
