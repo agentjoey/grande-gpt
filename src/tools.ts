@@ -1,8 +1,10 @@
 import { checkArgs } from "./argCheck.ts";
+import { beginAudit } from "./audit.ts";
 import { addCapabilityTools } from "./capabilities.ts";
+import { refreshCanonical } from "./canonicalRefresh.ts";
 import { addDeploymentTools } from "./deployment.ts";
 import { err } from "./envelope.ts";
-import { toToolError, redact } from "./errors.ts";
+import { toToolError, redact, StateError } from "./errors.ts";
 import { loadGuidance } from "./guidance.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
 import { addOnboardingTools } from "./onboardingTools.ts";
@@ -44,6 +46,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     const coreHandler = taskOpen.handler;
     taskOpen.handler = async (args) => {
       const repoId = args.repoId as string;
+      const taskId = args.taskId as string;
       let registered = false;
       try {
         registered = typeof repoId === "string" && registeredIds(deps.layout).has(repoId);
@@ -51,6 +54,32 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
         return coreHandler(args);
       }
       if (!registered) return coreHandler(args);
+
+      // S16：对有 origin 的 repo，在创建 worktree 之前把 canonical 安全 refresh 到 origin
+      // 同名 branch。refresh 自己只有 fetch/compare/ff-only；dirty、local-ahead、diverged
+      // 一律 fail closed。作为 task_open 的前置写操作单独记 audit，避免 canonical 变化无账。
+      let canonicalRefresh: ReturnType<typeof refreshCanonical>;
+      const refreshAudit = beginAudit(deps.db, {
+        taskId,
+        tool: "grande_task_open:canonical_refresh",
+        input: { repoId },
+      });
+      refreshAudit.allowed();
+      if (!refreshAudit.executing()) {
+        const error = new StateError("STALE_STATE", `任务 ${taskId} 的 canonical refresh 审计句柄无法推进到 EXECUTING。`);
+        refreshAudit.failed(error.message);
+        const toolError = toToolError(error);
+        return { structuredContent: err({ ...toolError, taskId }) };
+      }
+      try {
+        canonicalRefresh = refreshCanonical(deps.layout, repoId);
+        refreshAudit.succeeded([]);
+      } catch (error) {
+        refreshAudit.failed(error instanceof Error ? error.message : String(error));
+        const toolError = toToolError(error);
+        toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+        return { structuredContent: err({ ...toolError, taskId }) };
+      }
 
       let guidance: string | undefined;
       try {
@@ -71,8 +100,9 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
         ok?: unknown;
         data?: Record<string, unknown>;
       };
-      if (envelope.ok === true && envelope.data && guidance !== undefined) {
-        envelope.data.guidance = guidance;
+      if (envelope.ok === true && envelope.data) {
+        envelope.data.canonicalRefresh = canonicalRefresh;
+        if (guidance !== undefined) envelope.data.guidance = guidance;
       }
       return result;
     };

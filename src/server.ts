@@ -4,6 +4,7 @@ import { serve } from "@hono/node-server";
 import { z } from "zod";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { SUPPORTED_PROTOCOL_VERSIONS } from "@modelcontextprotocol/sdk/types.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { Layout } from "./layout.ts";
 import { createOAuth, OAuthError, type OAuthConfig } from "./oauth.ts";
@@ -114,6 +115,79 @@ export function createApp(cfg: AppConfig): Hono {
     const p = (n: number, w = 2): string => String(n).padStart(w, "0");
     return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
   };
+
+  const MODERN_MCP_PROTOCOL_VERSION = "2026-07-28";
+
+  /** JSON-RPC 请求 id 只能是 string / number / null；非法值不能原样回显。 */
+  function jsonRpcId(value: unknown): string | number | null {
+    return typeof value === "string" || typeof value === "number" || value === null ? value : null;
+  }
+
+  function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null && !Array.isArray(value);
+  }
+
+  function jsonRpcError(c: Context, id: string | number | null, code: number, message: string) {
+    return c.json({
+      jsonrpc: "2.0",
+      id,
+      error: { code, message },
+    }, 400);
+  }
+
+  /**
+   * ChatGPT 已开始先用 2026-era `server/discover` 选择协议，而当前 SDK 1.x 只会
+   * 将该请求折叠为 `-32000` / `id: null` 的通用 400。这里不伪装成支持 modern MCP：
+   * 明确返回标准 `UnsupportedProtocolVersion`，让客户端选 SDK 实际支持的 legacy
+   * 版本后再走 `initialize`。其他请求仍交给 SDK，避免把未实现的 2026-era wire
+   * 误报为可用。
+   */
+  async function modernDiscoverFallback(c: Context): Promise<Response | undefined> {
+    if (c.req.header("mcp-protocol-version") !== MODERN_MCP_PROTOCOL_VERSION) return undefined;
+
+    let request: Record<string, unknown>;
+    try {
+      const parsed = JSON.parse(await c.req.raw.clone().text()) as unknown;
+      if (!isRecord(parsed)) return undefined;
+      request = parsed;
+    } catch {
+      return undefined;
+    }
+    if (request.method !== "server/discover") return undefined;
+
+    const id = jsonRpcId(request.id);
+    // MCP 2026 要求传输层的 Mcp-Method 与请求体一致；不能因 SDK 尚未支持
+    // discover 就跳过这一层验证、把损坏的请求伪装成可安全降级。
+    if (c.req.header("mcp-method") !== "server/discover") {
+      return jsonRpcError(c, id, -32020, "Header mismatch: Mcp-Method must match the JSON-RPC method");
+    }
+
+    const params = isRecord(request.params) ? request.params : undefined;
+    const meta = params && isRecord(params._meta) ? params._meta : undefined;
+    const bodyProtocolVersion = meta?.["io.modelcontextprotocol/protocolVersion"];
+    if (typeof bodyProtocolVersion !== "string" || !isRecord(meta?.["io.modelcontextprotocol/clientCapabilities"])) {
+      return jsonRpcError(c, id, -32602, "Invalid params: server/discover requires protocolVersion and clientCapabilities metadata");
+    }
+    if (bodyProtocolVersion !== MODERN_MCP_PROTOCOL_VERSION) {
+      return jsonRpcError(c, id, -32020, "Header mismatch: MCP-Protocol-Version must match the request metadata");
+    }
+
+    console.log(
+      `[rpc] ${ts()} server/discover #${String(id)} protocol=${MODERN_MCP_PROTOCOL_VERSION} outcome=legacy_fallback`,
+    );
+    return c.json({
+      jsonrpc: "2.0",
+      id,
+      error: {
+        code: -32022,
+        message: "Unsupported protocol version",
+        data: {
+          supported: SUPPORTED_PROTOCOL_VERSIONS,
+          requested: MODERN_MCP_PROTOCOL_VERSION,
+        },
+      },
+    }, 400);
+  }
 
   /**
    * JSON-RPC 方法级日志（遗留 #4 上半）。
@@ -243,11 +317,13 @@ export function createApp(cfg: AppConfig): Hono {
   });
 
   app.post("/token", async (c) => {
+    let requestedGrant = "missing";
     try {
       const text = await c.req.text();
       const form = new URLSearchParams(text);
+      requestedGrant = form.get("grant_type") ?? "missing";
       const result = await oauth.token({
-        grant_type: form.get("grant_type")!,
+        grant_type: requestedGrant,
         code: form.get("code") ?? undefined,
         code_verifier: form.get("code_verifier") ?? undefined,
         client_id: form.get("client_id") ?? undefined,
@@ -259,6 +335,10 @@ export function createApp(cfg: AppConfig): Hono {
       return c.json(result);
     } catch (e) {
       if (e instanceof OAuthError) {
+        const grant = ["authorization_code", "refresh_token"].includes(requestedGrant)
+          ? requestedGrant
+          : "other";
+        console.warn(`[auth] /token denied grant=${grant} error=${e.code}`);
         return c.json({ error: e.code, error_description: e.message }, oauthErrorStatus(e) as 200 | 400 | 401);
       }
       throw e;
@@ -294,11 +374,15 @@ export function createApp(cfg: AppConfig): Hono {
    */
   async function handleMcp(c: Context, defaultRepoId: string | undefined) {
     const bearer = /^Bearer (.+)$/.exec(c.req.header("authorization") ?? "")?.[1];
-    if (!bearer) return unauthorized(cfg.issuer);
+    if (!bearer) {
+      console.warn("[auth] /mcp denied reason=missing_bearer");
+      return unauthorized(cfg.issuer);
+    }
 
     try {
       await oauth.verifyBearer(bearer, oauthCfg.endpointFor());
     } catch {
+      console.warn("[auth] /mcp denied reason=invalid_bearer");
       return unauthorized(cfg.issuer);
     }
 
@@ -307,6 +391,9 @@ export function createApp(cfg: AppConfig): Hono {
     if (defaultRepoId !== undefined && !registeredIds(layout).has(defaultRepoId)) {
       return c.json({ error: "not_found" }, 404);
     }
+
+    const modernFallback = await modernDiscoverFallback(c);
+    if (modernFallback) return modernFallback;
 
     const transport = new WebStandardStreamableHTTPServerTransport();
     const mcpServer = new McpServer(

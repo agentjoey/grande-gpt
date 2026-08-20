@@ -115,6 +115,42 @@ describe("Verification Attestation", () => {
     expect(git(worktree, "log", "-1", "--format=%B")).toContain(`Grande-Attestation: ${rows[0]!.attestationId}`);
   });
 
+  it("S18：sync_base 产生 clean HEAD 后，fresh verification 可直接给该 HEAD 签发 attestation，不制造空 commit", async () => {
+    const before = git(worktree, "rev-parse", "HEAD").trim();
+    const jobId = passedJob();
+
+    const result = await commit();
+
+    expect(result.ok).toBe(true);
+    expect(result.data.commit).toBe(before);
+    expect(result.data.filesChanged).toBe(0);
+    expect(result.data.attestation.issued).toBe(true);
+    expect(git(worktree, "rev-parse", "HEAD").trim()).toBe(before);
+    const rows = getAttestations(deps.db, "task_attest");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.commit).toBe(before);
+    expect(rows[0]!.jobId).toBe(jobId);
+  });
+
+  it("S18：旧 clean HEAD 的 verification 不能给后来变化的 clean HEAD 背书", async () => {
+    passedJob();
+    const verifiedHead = git(worktree, "rev-parse", "HEAD").trim();
+    git(
+      worktree,
+      "-c", "user.name=Human",
+      "-c", "user.email=human@example.com",
+      "commit", "--allow-empty", "-q", "-m", "advance clean head",
+    );
+    const currentHead = git(worktree, "rev-parse", "HEAD").trim();
+    expect(currentHead).not.toBe(verifiedHead);
+
+    const result = await commit();
+
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).toMatch(/验证|attestation|工作区|改动/i);
+    expect(getAttestations(deps.db, "task_attest")).toEqual([]);
+  });
+
   it("AC-S2-7：run 后工作区再变化则不签发，并明确说明原因", async () => {
     writeFileSync(join(worktree, "verified.txt"), "v1\n", "utf8");
     passedJob();

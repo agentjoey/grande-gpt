@@ -130,7 +130,8 @@ function commitTool(deps: ToolDeps): ToolDef {
 function syncBaseTool(deps: ToolDeps): ToolDef {
   return {
     name: "grande_sync_base",
-    description: "把任务分支同步到本机 canonical HEAD。操作前建立 checkpoint；可快进或 merge，冲突时会 abort 并恢复原状。绝不 fetch。",
+    description: "把当前本机 canonical HEAD 合入或快进到任务 worktree；绝不修改 canonical，也绝不 fetch。" +
+      "返回 relation=equal/task_ahead/canonical_ahead/diverged 明确两个 HEAD 在操作前的关系。",
     inputSchema: {
       type: "object",
       properties: {
@@ -152,13 +153,18 @@ function syncBaseTool(deps: ToolDeps): ToolDef {
         }
         const result = syncBase(deps.layout, task);
         audit.succeeded([task.worktreePath]);
+        const hint = result.relation === "equal"
+          ? `任务 ${taskId} HEAD 与当前本机 canonical HEAD 相等，无需操作。`
+          : result.relation === "task_ahead"
+            ? `任务 ${taskId} 已包含当前 canonical HEAD，且 task 有额外提交；无需把 canonical 合入 task。`
+            : result.relation === "canonical_ahead"
+              ? `当前 canonical HEAD 领先 task；已在任务 worktree fast-forward 到 ${result.after}。`
+              : `task 与当前 canonical 已分叉；已在任务 worktree 合入 canonical，结果 ${result.after}。`;
         return {
           structuredContent: ok({
             taskId,
             data: result,
-            hint: result.action === "up-to-date"
-              ? `任务 ${taskId} 已与本机 canonical HEAD 保持一致，无需同步。`
-              : `任务 ${taskId} 已通过 ${result.action} 同步到 ${result.after}。`,
+            hint,
             taskContext: taskContext(deps, taskId),
           }),
         };
@@ -180,7 +186,6 @@ function wrapRunWithVerificationContext(deps: ToolDeps, tools: ToolDef[]): void 
     let context: VerificationContext | undefined;
     if (task) {
       try {
-        // 必须在 core handler 真正启动 run 之前捕获，之后再读已经太晚。
         context = captureVerificationContext(deps.layout, task.worktreePath);
       } catch {
         // 验证上下文记录失败不应阻止用户运行 profile；只是这次 run 不能用于 attestation。

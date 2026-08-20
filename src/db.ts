@@ -22,9 +22,10 @@ import { SCHEMA_VERSION as CONTRACT_VERSION } from "./contract.ts";
  * 绝不修改 audit 原行**（账本不可篡改）。没有它，判据明确的异常会永远挂在首屏，
  * 两天后人就开始无视整个告警区，而那正是设计要避免的。
  *
- * S4 的 `task_brief` 与 S7 的 `deployment_receipt` 都是【向后兼容的附属表】：旧代码
- * 完全忽略它们，新代码可用 `CREATE TABLE IF NOT EXISTS` 在已匹配版本的库上安全补齐，
- * 因此不增加 user_version。两者都不改变既有表/列，也不扩张 Task 状态机。
+ * S4 的 `task_brief`、S7 的 `deployment_receipt` 与 S18 的 `outer_test_receipt` 都是
+ * 【向后兼容的附属表】：旧代码完全忽略它们，新代码可用 `CREATE TABLE IF NOT EXISTS`
+ * 在已匹配版本的库上安全补齐，因此不增加 user_version。它们都不改变既有表/列，
+ * 也不扩张 Task 状态机。
  *
  * 导出是为了让测试断言跟着它走。**不要在测试里写死版本号**——那只会让每次升版
  * 多一道手改杂活，而真正的门禁是运行时那道（版本不符直接拒绝打开，线上表现为 502）。
@@ -81,6 +82,12 @@ export function openDb(layout: Layout): DatabaseSync {
     );
 
     CREATE TABLE IF NOT EXISTS deployment_receipt (
+      taskId      TEXT PRIMARY KEY REFERENCES task(taskId),
+      receiptJson TEXT NOT NULL,
+      updatedAt   INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS outer_test_receipt (
       taskId      TEXT PRIMARY KEY REFERENCES task(taskId),
       receiptJson TEXT NOT NULL,
       updatedAt   INTEGER NOT NULL

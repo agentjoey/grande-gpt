@@ -40,6 +40,7 @@ interface CodeRecord {
   challenge: string;
   clientId: string;
   redirectUri: string;
+  scopes: string[];
   expiresAt: number;
 }
 
@@ -71,6 +72,21 @@ const SUPPORTED_GRANT_TYPES = ["authorization_code", "refresh_token"] as const;
  * 哪个仓库由后续的工具调用（尤其是 `taskId`）决定，不由这枚令牌决定。
  */
 const SCOPE = "grande:workspace";
+const OFFLINE_ACCESS_SCOPE = "offline_access";
+const SUPPORTED_SCOPES = [SCOPE, OFFLINE_ACCESS_SCOPE] as const;
+
+function requestedScopes(scope: string | undefined): string[] {
+  // scope 在 OAuth 中是可选的；老客户端省略它时仍保留原来的在线工作区访问，
+  // 但不会获得新的离线续期凭据。
+  const scopes = (scope ?? SCOPE).split(/\s+/).filter(Boolean);
+  if (!scopes.includes(SCOPE)) {
+    throw new OAuthError("invalid_scope", `scope 必须包含 ${SCOPE}`);
+  }
+  if (scopes.some((value) => !(SUPPORTED_SCOPES as readonly string[]).includes(value))) {
+    throw new OAuthError("invalid_scope", "请求了不支持的 scope");
+  }
+  return SUPPORTED_SCOPES.filter((value) => scopes.includes(value));
+}
 
 function getOrCreateKey(keyPath: string): Uint8Array {
   try {
@@ -259,11 +275,13 @@ export function createOAuth(cfg: OAuthConfig) {
       throw new OAuthError("invalid_request", "redirect_uri 与注册值不符");
     }
 
+    const scopes = requestedScopes(params.scope);
     const code = randomUUID();
     codes.set(code, {
       challenge: params.code_challenge,
       clientId: params.client_id,
       redirectUri: params.redirect_uri,
+      scopes,
       expiresAt: Date.now() + 10 * 60 * 1000,
     });
     return code;
@@ -330,15 +348,14 @@ export function createOAuth(cfg: OAuthConfig) {
         .setExpirationTime("8h")
         .sign(KEY);
 
-      const rt = randomUUID();
-      insertRefreshStmt.run(rt, resource, null, 1, Date.now());
-
+      const refreshToken = rec.scopes.includes(OFFLINE_ACCESS_SCOPE) ? randomUUID() : undefined;
+      if (refreshToken) insertRefreshStmt.run(refreshToken, resource, null, 1, Date.now());
       return {
         access_token: accessToken,
         token_type: "Bearer",
         expires_in: 8 * 3600,
-        refresh_token: rt,
-        scope: SCOPE,
+        scope: rec.scopes.join(" "),
+        refresh_token: refreshToken,
       };
     }
 
@@ -407,7 +424,9 @@ export function createOAuth(cfg: OAuthConfig) {
         token_type: "Bearer",
         expires_in: 8 * 3600,
         refresh_token: newRt,
-        scope: SCOPE,
+        // 现有的 refresh token 都是旧实现无条件签发的离线授权，必须继续可用；
+        // 新 token 只会在 authorization request 明确包含 offline_access 时创建。
+        scope: SUPPORTED_SCOPES.join(" "),
       };
     }
 
@@ -426,7 +445,7 @@ export function createOAuth(cfg: OAuthConfig) {
     return {
       resource: cfg.endpointFor(),
       authorization_servers: [cfg.issuer],
-      scopes_supported: [SCOPE],
+      scopes_supported: [...SUPPORTED_SCOPES],
     };
   }
 
@@ -437,7 +456,7 @@ export function createOAuth(cfg: OAuthConfig) {
       token_endpoint: `${cfg.issuer}/token`,
       registration_endpoint: `${cfg.issuer}/register`,
       jwks_uri: `${cfg.issuer}/jwks`,
-      scopes_supported: [SCOPE],
+      scopes_supported: [...SUPPORTED_SCOPES],
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],

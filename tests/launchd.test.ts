@@ -25,6 +25,7 @@ type LaunchdModule = {
     action: "start" | "stop" | "restart" | "status" | "uninstall",
     identity: { uid: number; homeDir: string },
     exec: LaunchctlExec,
+    readinessProbe?: () => boolean,
   ): CommandResult;
 };
 
@@ -121,6 +122,109 @@ describe("Gateway LaunchAgent lifecycle", () => {
     ]);
   });
 
+  it("S17：loaded restart 必须保留 service registration，只用 kickstart -k 替换进程", async () => {
+    const launchd = await loadLaunchd();
+    expect(launchd, "src/launchd.ts 尚未实现").not.toBeNull();
+    if (!launchd) return;
+
+    const c = makeConfig();
+    const identity = { uid: c.uid, homeDir: c.homeDir };
+    const plistPath = join(c.homeDir, "Library", "LaunchAgents", `${launchd.GATEWAY_LAUNCHD_LABEL}.plist`);
+    mkdirSync(join(c.homeDir, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(plistPath, "fixture");
+
+    const calls: string[][] = [];
+    const exec: LaunchctlExec = (args) => {
+      calls.push(args);
+      if (args[0] === "print") {
+        return { status: 0, stdout: "state = running\npid = 123\n", stderr: "" };
+      }
+      if (args[0] === "kickstart") {
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      return { status: 1, stdout: "", stderr: `unexpected ${args[0]}` };
+    };
+
+    const result = launchd.manageGatewayLaunchAgent("restart", identity, exec, () => true);
+    const target = `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`;
+
+    expect(result.code).toBe(0);
+    expect(calls).toEqual([
+      ["print", target],
+      ["kickstart", "-k", target],
+    ]);
+    expect(calls.some(([action]) => action === "bootout")).toBe(false);
+    expect(calls.some(([action]) => action === "bootstrap")).toBe(false);
+  });
+
+  it("S17-2：bootstrap 短暂返回 error 5 时必须有限重试并恢复成功", async () => {
+    const launchd = await loadLaunchd();
+    expect(launchd, "src/launchd.ts 尚未实现").not.toBeNull();
+    if (!launchd) return;
+
+    const c = makeConfig();
+    const identity = { uid: c.uid, homeDir: c.homeDir };
+    const plistPath = join(c.homeDir, "Library", "LaunchAgents", `${launchd.GATEWAY_LAUNCHD_LABEL}.plist`);
+    mkdirSync(join(c.homeDir, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(plistPath, "fixture");
+
+    const calls: string[][] = [];
+    let bootstrapAttempts = 0;
+    const exec: LaunchctlExec = (args) => {
+      calls.push(args);
+      if (args[0] === "print") return { status: 3, stdout: "", stderr: "service not found" };
+      if (args[0] === "bootstrap") {
+        bootstrapAttempts += 1;
+        if (bootstrapAttempts === 1) {
+          return { status: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      return { status: 1, stdout: "", stderr: "unexpected" };
+    };
+
+    const result = launchd.manageGatewayLaunchAgent("start", identity, exec);
+
+    expect(result.code).toBe(0);
+    expect(bootstrapAttempts).toBe(2);
+    expect(calls.filter(([action]) => action === "bootstrap")).toEqual([
+      ["bootstrap", `gui/${c.uid}`, plistPath],
+      ["bootstrap", `gui/${c.uid}`, plistPath],
+    ]);
+  });
+
+  it("S17-2：bootstrap error 5 持续失败时重试必须有上限，并输出明确 recovery", async () => {
+    const launchd = await loadLaunchd();
+    expect(launchd, "src/launchd.ts 尚未实现").not.toBeNull();
+    if (!launchd) return;
+
+    const c = makeConfig();
+    const identity = { uid: c.uid, homeDir: c.homeDir };
+    const plistPath = join(c.homeDir, "Library", "LaunchAgents", `${launchd.GATEWAY_LAUNCHD_LABEL}.plist`);
+    mkdirSync(join(c.homeDir, "Library", "LaunchAgents"), { recursive: true });
+    writeFileSync(plistPath, "fixture");
+
+    let bootstrapAttempts = 0;
+    const exec: LaunchctlExec = (args) => {
+      if (args[0] === "print") return { status: 3, stdout: "", stderr: "service not found" };
+      if (args[0] === "bootstrap") {
+        bootstrapAttempts += 1;
+        return { status: 5, stdout: "", stderr: "Bootstrap failed: 5: Input/output error" };
+      }
+      return { status: 1, stdout: "", stderr: "unexpected" };
+    };
+
+    const result = launchd.manageGatewayLaunchAgent("start", identity, exec);
+    const text = result.lines.join("\n");
+
+    expect(result.code).toBe(1);
+    expect(bootstrapAttempts).toBe(3);
+    expect(text).toContain("Bootstrap failed: 5: Input/output error");
+    expect(text).toContain("已重试 3 次");
+    expect(text).toContain("grande gateway status");
+    expect(text).toContain("grande gateway start");
+  });
+
   it("start/status/restart/stop/uninstall 只通过 launchctl argv 管理用户级 service", async () => {
     const launchd = await loadLaunchd();
     expect(launchd, "src/launchd.ts 尚未实现").not.toBeNull();
@@ -146,9 +250,22 @@ describe("Gateway LaunchAgent lifecycle", () => {
     ]);
 
     const loadedCalls: string[][] = [];
+    let loadedState = true;
     const loadedExec: LaunchctlExec = (args) => {
       loadedCalls.push(args);
-      if (args[0] === "print") return { status: 0, stdout: "state = running\npid = 123\n", stderr: "" };
+      if (args[0] === "print") {
+        return loadedState
+          ? { status: 0, stdout: "state = running\npid = 123\n", stderr: "" }
+          : { status: 3, stdout: "", stderr: "not loaded" };
+      }
+      if (args[0] === "bootout") {
+        loadedState = false;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "bootstrap") {
+        loadedState = true;
+        return { status: 0, stdout: "", stderr: "" };
+      }
       return { status: 0, stdout: "", stderr: "" };
     };
     const status = launchd.manageGatewayLaunchAgent("status", identity, loadedExec);
@@ -156,11 +273,10 @@ describe("Gateway LaunchAgent lifecycle", () => {
     expect(status.lines.join("\n")).toContain("state=running");
 
     loadedCalls.length = 0;
-    expect(launchd.manageGatewayLaunchAgent("restart", identity, loadedExec).code).toBe(0);
+    expect(launchd.manageGatewayLaunchAgent("restart", identity, loadedExec, () => true).code).toBe(0);
     expect(loadedCalls).toEqual([
       ["print", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
-      ["bootout", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
-      ["bootstrap", `gui/${c.uid}`, plistPath],
+      ["kickstart", "-k", `gui/${c.uid}/${launchd.GATEWAY_LAUNCHD_LABEL}`],
     ]);
 
     const stoppedCalls: string[][] = [];

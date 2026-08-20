@@ -25,6 +25,7 @@ export interface LaunchctlResult {
 }
 
 export type LaunchctlExec = (args: string[]) => LaunchctlResult;
+export type GatewayReadinessProbe = () => boolean;
 
 export interface GatewayLaunchdCommandResult {
   code: number;
@@ -32,6 +33,11 @@ export interface GatewayLaunchdCommandResult {
 }
 
 export type GatewayLaunchdManageAction = "start" | "stop" | "restart" | "status" | "uninstall";
+
+const BOOTSTRAP_ATTEMPTS = 3;
+const BOOTSTRAP_RETRY_DELAY_MS = 100;
+const READINESS_ATTEMPTS = 5;
+const READINESS_RETRY_DELAY_MS = 200;
 
 function escapeXml(value: string): string {
   return value
@@ -129,14 +135,54 @@ function loaded(identity: GatewayLaunchdIdentity, exec: LaunchctlExec): Launchct
   return exec(["print", serviceTarget(identity)]);
 }
 
+function pause(ms: number): void {
+  const state = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+  Atomics.wait(state, 0, 0, ms);
+}
+
 function bootstrap(
   identity: GatewayLaunchdIdentity,
   exec: LaunchctlExec,
 ): GatewayLaunchdCommandResult {
   const plistPath = launchAgentPath(identity);
-  const result = exec(["bootstrap", domainTarget(identity), plistPath]);
-  if (result.status !== 0) return commandFailed("bootstrap", result);
-  return { code: 0, lines: [`Gateway LaunchAgent 已启动：${serviceTarget(identity)}`] };
+  let result: LaunchctlResult | undefined;
+  for (let attempt = 0; attempt < BOOTSTRAP_ATTEMPTS; attempt += 1) {
+    result = exec(["bootstrap", domainTarget(identity), plistPath]);
+    if (result.status === 0) {
+      return { code: 0, lines: [`Gateway LaunchAgent 已启动：${serviceTarget(identity)}`] };
+    }
+    if (result.status !== 5 || attempt + 1 >= BOOTSTRAP_ATTEMPTS) break;
+    pause(BOOTSTRAP_RETRY_DELAY_MS);
+  }
+  const failed = commandFailed("bootstrap", result!);
+  if (result!.status !== 5) return failed;
+  return {
+    code: 1,
+    lines: [
+      ...failed.lines,
+      `launchctl bootstrap error 5 已重试 ${BOOTSTRAP_ATTEMPTS} 次，Gateway 仍未成功加载。`,
+      "请运行 grande gateway status；若仍未加载，再运行 grande gateway start。",
+    ],
+  };
+}
+
+function gatewayEndpointReady(): boolean {
+  const result = spawnSync("/usr/bin/curl", [
+    "--fail",
+    "--silent",
+    "--max-time",
+    "1",
+    "http://127.0.0.1:8787/.well-known/oauth-authorization-server",
+  ], { encoding: "utf8" });
+  return result.status === 0;
+}
+
+function awaitGatewayReadiness(probe: GatewayReadinessProbe): boolean {
+  for (let attempt = 0; attempt < READINESS_ATTEMPTS; attempt += 1) {
+    if (probe()) return true;
+    if (attempt + 1 < READINESS_ATTEMPTS) pause(READINESS_RETRY_DELAY_MS);
+  }
+  return false;
 }
 
 export function installGatewayLaunchAgent(
@@ -180,6 +226,7 @@ export function manageGatewayLaunchAgent(
   action: GatewayLaunchdManageAction,
   identity: GatewayLaunchdIdentity,
   exec: LaunchctlExec = execLaunchctl,
+  readinessProbe: GatewayReadinessProbe = gatewayEndpointReady,
 ): GatewayLaunchdCommandResult {
   const plistPath = launchAgentPath(identity);
   const target = serviceTarget(identity);
@@ -224,8 +271,15 @@ export function manageGatewayLaunchAgent(
   }
 
   if (isLoaded) {
-    const stopped = exec(["bootout", target]);
-    if (stopped.status !== 0) return commandFailed("bootout", stopped);
+    const restarted = exec(["kickstart", "-k", target]);
+    if (restarted.status !== 0) return commandFailed("kickstart", restarted);
+  } else {
+    const started = bootstrap(identity, exec);
+    if (started.code !== 0) return started;
   }
-  return bootstrap(identity, exec);
+
+  if (!awaitGatewayReadiness(readinessProbe)) {
+    return { code: 1, lines: [`Gateway endpoint 在 LaunchAgent restart 后未就绪：${target}`] };
+  }
+  return { code: 0, lines: [`Gateway LaunchAgent 已重启并就绪：${target}`] };
 }

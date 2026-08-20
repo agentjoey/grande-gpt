@@ -88,12 +88,13 @@ function snapshot(paths: string[]): Map<string, Buffer> {
 }
 
 describe("grande_sync_base", () => {
-  it("AC-S2-10：任务分支没有自己的提交时可快进，worktree 内容更新", async () => {
+  it("AC-S2-10 / S16：canonical ahead 时 relation=canonical_ahead，并 fast-forward task", async () => {
     const canonicalHead = commit(canonical, "canonical.txt", "from canonical\n", "canonical");
 
     const result = await sync();
 
     expect(result.ok).toBe(true);
+    expect(result.data.relation).toBe("canonical_ahead");
     expect(result.data.action).toBe("fast-forward");
     expect(git(worktree, "rev-parse", "HEAD").trim()).toBe(canonicalHead);
     expect(readFileSync(join(worktree, "canonical.txt"), "utf8")).toBe("from canonical\n");
@@ -121,13 +122,14 @@ describe("grande_sync_base", () => {
     expect(readdirSync(checkpointRoot).length).toBeGreaterThan(0);
   });
 
-  it("AC-S2-12：双方无冲突改动产生 merge commit，两边内容都保留", async () => {
+  it("AC-S2-12 / S16：双方无冲突改动 relation=diverged，merge 后两边内容都保留", async () => {
     const canonicalHead = commit(canonical, "canonical.txt", "canonical\n", "canonical");
     const taskHead = commit(worktree, "task.txt", "task\n", "task");
 
     const result = await sync();
 
     expect(result.ok).toBe(true);
+    expect(result.data.relation).toBe("diverged");
     expect(result.data.action).toBe("merged");
     expect(readFileSync(join(worktree, "canonical.txt"), "utf8")).toBe("canonical\n");
     expect(readFileSync(join(worktree, "task.txt"), "utf8")).toBe("task\n");
@@ -135,18 +137,36 @@ describe("grande_sync_base", () => {
     expect(parents).toEqual([taskHead, canonicalHead]);
   });
 
-  it("已最新时无操作，不产生多余 commit", async () => {
+  it("S16：canonical == task 时 relation=equal，action=none", async () => {
     const before = git(worktree, "rev-parse", "HEAD").trim();
 
     const result = await sync();
 
     expect(result.ok).toBe(true);
-    expect(result.data.action).toBe("up-to-date");
+    expect(result.data.relation).toBe("equal");
+    expect(result.data.action).toBe("none");
     expect(git(worktree, "rev-parse", "HEAD").trim()).toBe(before);
   });
 
-  it("工具注解与参数符合写工具契约", () => {
+  it("S16：task ahead 时 relation=task_ahead，不再返回 up-to-date 或声称 HEAD 一致", async () => {
+    const taskHead = commit(worktree, "task.txt", "task\n", "task ahead");
+
+    const result = await sync();
+
+    expect(result.ok).toBe(true);
+    expect(result.data.relation).toBe("task_ahead");
+    expect(result.data.action).toBe("none");
+    expect(result.data.before).toBe(taskHead);
+    expect(result.data.after).toBe(taskHead);
+    expect(result.hint).toContain("已包含当前 canonical HEAD");
+    expect(result.hint).not.toContain("保持一致");
+    expect(result.hint).not.toContain("up-to-date");
+  });
+
+  it("工具描述明确 canonical → task，且绝不暗示 task → canonical", () => {
     const tool = buildTools(deps).find((candidate) => candidate.name === "grande_sync_base");
+    expect(tool?.description).toContain("canonical HEAD 合入或快进到任务 worktree");
+    expect(tool?.description).toContain("绝不修改 canonical");
     expect(tool?.inputSchema.required).toContain("taskId");
     expect(tool?.annotations).toEqual({
       readOnlyHint: false,
