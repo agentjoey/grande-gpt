@@ -80,7 +80,7 @@ async function mintTokenFull(a: Hono): Promise<{
   const q = new URLSearchParams({
     client_id: reg.client_id, redirect_uri: redirectUri,
     code_challenge: challenge, code_challenge_method: "S256", response_type: "code",
-    resource: `${ISSUER}/mcp`, scope: "grande:workspace",
+    resource: `${ISSUER}/mcp`, scope: "grande:workspace offline_access",
   });
   const authRes = await a.request(`/authorize?${q}`, {
     redirect: "manual",
@@ -175,6 +175,46 @@ describe("D18：单一端点 /mcp + 认证", () => {
     expect(h).toContain("resource_metadata=");
     expect(h).toContain("/.well-known/oauth-protected-resource/mcp");
     expect(h).not.toMatch(/\/mcp\/[^"]+"/); // 不应该带着某个具体 repoId 段
+  });
+
+  it("无效 Bearer 仍只返回 401，但服务端留下不含凭据的拒绝类别", async () => {
+    const secretBearer = "must-not-appear-in-logs";
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...parts: unknown[]) => warnings.push(parts.join(" "));
+    try {
+      const res = await app.request("/mcp", {
+        method: "POST",
+        headers: { authorization: `Bearer ${secretBearer}` },
+      });
+      expect(res.status).toBe(401);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual(["[auth] /mcp denied reason=invalid_bearer"]);
+    expect(warnings.join("\n")).not.toContain(secretBearer);
+  });
+
+  it("无效 refresh_token 返回原有 OAuth 错误，并记录不含凭据的拒绝类别", async () => {
+    const secretRefreshToken = "must-not-appear-in-token-log";
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...parts: unknown[]) => warnings.push(parts.join(" "));
+    try {
+      const res = await app.request("/token", {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: secretRefreshToken,
+        }).toString(),
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      console.warn = originalWarn;
+    }
+    expect(warnings).toEqual(["[auth] /token denied grant=refresh_token error=invalid_grant"]);
+    expect(warnings.join("\n")).not.toContain(secretRefreshToken);
   });
 
   it("测试要求 1：单一端点签发的令牌能打开 /mcp", async () => {
@@ -277,7 +317,7 @@ describe("D18：单一端点 /mcp + 认证", () => {
     const body = await res.json() as { resource: string; authorization_servers: string[]; scopes_supported: string[] };
     expect(body.resource).toBe(`${ISSUER}/mcp`);
     expect(body.authorization_servers).toContain(ISSUER);
-    expect(body.scopes_supported).toEqual(["grande:workspace"]);
+    expect(body.scopes_supported).toEqual(["grande:workspace", "offline_access"]);
   });
 });
 

@@ -10,6 +10,8 @@ import { createOAuth } from "../src/oauth.ts";
 
 const ISSUER = "https://grande.example.test";
 const SCOPE = "grande:workspace";
+const OFFLINE_ACCESS = "offline_access";
+const OFFLINE_SCOPE = `${SCOPE} ${OFFLINE_ACCESS}`;
 
 /**
  * openDb() 只用得到 `layout.stateDb`（建目录 + 打开文件），其余字段在这里
@@ -41,7 +43,11 @@ const oauth = (db?: DatabaseSync) =>
 
 const s256 = (v: string) => createHash("sha256").update(v).digest("base64url");
 
-async function fullFlow(o: ReturnType<typeof createOAuth>, resource = `${ISSUER}/mcp`) {
+async function fullFlow(
+  o: ReturnType<typeof createOAuth>,
+  resource = `${ISSUER}/mcp`,
+  scope = OFFLINE_SCOPE,
+) {
   const reg = await o.register({
     client_name: "ChatGPT",
     redirect_uris: ["https://chatgpt.com/connector/oauth/opaque"],
@@ -56,7 +62,7 @@ async function fullFlow(o: ReturnType<typeof createOAuth>, resource = `${ISSUER}
     code_challenge: s256(verifier),
     code_challenge_method: "S256",
     resource,
-    scope: SCOPE,
+    scope,
   });
   const tok = await o.token({
     grant_type: "authorization_code",
@@ -70,11 +76,11 @@ async function fullFlow(o: ReturnType<typeof createOAuth>, resource = `${ISSUER}
 }
 
 describe("发现文档（D18：单一端点）", () => {
-  it("受保护资源元数据指向单一端点，且 scope 是单一的 grande:workspace", () => {
+  it("受保护资源元数据指向单一端点，并声明离线续期授权", () => {
     const m = oauth().protectedResourceMetadata();
     expect(m.resource).toBe(`${ISSUER}/mcp`);
     expect(m.authorization_servers).toContain(ISSUER);
-    expect(m.scopes_supported).toEqual([SCOPE]);
+    expect(m.scopes_supported).toEqual([SCOPE, OFFLINE_ACCESS]);
   });
 
   it("AS 元数据【如实】声明 grant_types_supported 含 refresh_token，且发现端点三件套齐全", () => {
@@ -85,7 +91,7 @@ describe("发现文档（D18：单一端点）", () => {
     expect(m.authorization_endpoint).toBe(`${ISSUER}/authorize`);
     expect(m.token_endpoint).toBe(`${ISSUER}/token`);
     expect(m.jwks_uri).toBe(`${ISSUER}/jwks`);
-    expect(m.scopes_supported).toEqual([SCOPE]);
+    expect(m.scopes_supported).toEqual([SCOPE, OFFLINE_ACCESS]);
   });
 });
 
@@ -113,13 +119,51 @@ describe("动态注册（DCR）", () => {
 });
 
 describe("授权码流 + PKCE", () => {
-  it("正确的 verifier 换得到 access_token 与 refresh_token，scope 是单一的 grande:workspace", async () => {
+  it("正确的 verifier 换得到 access_token 与 refresh_token，并回传离线授权", async () => {
     const { tok } = await fullFlow(oauth());
     expect(tok.token_type).toBe("Bearer");
     expect(typeof tok.access_token).toBe("string");
     expect(typeof tok.refresh_token).toBe("string");
     expect(tok.expires_in).toBeGreaterThan(0);
-    expect(tok.scope).toBe(SCOPE);
+    expect(tok.scope).toBe(OFFLINE_SCOPE);
+  });
+
+  it("仅 offline_access 授权会签发可跨重启使用的 refresh_token", async () => {
+    const o = oauth();
+    const online = await fullFlow(o, `${ISSUER}/mcp`, SCOPE);
+    expect(online.tok.scope).toBe(SCOPE);
+    expect(online.tok.refresh_token).toBeUndefined();
+
+    const offline = await fullFlow(o);
+    expect(offline.tok.scope).toBe(OFFLINE_SCOPE);
+    expect(typeof offline.tok.refresh_token).toBe("string");
+
+    const refreshed = await o.token({
+      grant_type: "refresh_token",
+      refresh_token: offline.tok.refresh_token,
+      resource: `${ISSUER}/mcp`,
+    });
+    expect(refreshed.scope).toBe(OFFLINE_SCOPE);
+    expect(typeof refreshed.refresh_token).toBe("string");
+  });
+
+  it("省略 scope 的旧客户端仍可取得在线工作区令牌，但不获 refresh_token", async () => {
+    const o = oauth();
+    const reg = await o.register({
+      client_name: "legacy", redirect_uris: ["https://chatgpt.com/connector/oauth/legacy"],
+      grant_types: ["authorization_code"], response_types: ["code"], token_endpoint_auth_method: "none",
+    });
+    const verifier = randomBytes(48).toString("base64url");
+    const code = await o.authorize({
+      client_id: reg.client_id, redirect_uri: reg.redirect_uris[0]!,
+      code_challenge: s256(verifier), code_challenge_method: "S256", resource: `${ISSUER}/mcp`,
+    });
+    const token = await o.token({
+      grant_type: "authorization_code", code, code_verifier: verifier,
+      client_id: reg.client_id, redirect_uri: reg.redirect_uris[0]!, resource: `${ISSUER}/mcp`,
+    });
+    expect(token.scope).toBe(SCOPE);
+    expect(token.refresh_token).toBeUndefined();
   });
 
   it("错误的 verifier 被拒（PKCE 校验无条件生效）", async () => {
@@ -239,7 +283,7 @@ describe("refresh_token", () => {
     });
     expect(typeof next.access_token).toBe("string");
     expect(next.access_token).not.toBe(tok.access_token);
-    expect(next.scope).toBe(SCOPE);
+    expect(next.scope).toBe(OFFLINE_SCOPE);
   });
 
   it("refresh 得到的令牌 aud 仍精确绑定单一端点", async () => {

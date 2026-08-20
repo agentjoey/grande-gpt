@@ -243,11 +243,13 @@ export function createApp(cfg: AppConfig): Hono {
   });
 
   app.post("/token", async (c) => {
+    let requestedGrant = "missing";
     try {
       const text = await c.req.text();
       const form = new URLSearchParams(text);
+      requestedGrant = form.get("grant_type") ?? "missing";
       const result = await oauth.token({
-        grant_type: form.get("grant_type")!,
+        grant_type: requestedGrant,
         code: form.get("code") ?? undefined,
         code_verifier: form.get("code_verifier") ?? undefined,
         client_id: form.get("client_id") ?? undefined,
@@ -259,6 +261,10 @@ export function createApp(cfg: AppConfig): Hono {
       return c.json(result);
     } catch (e) {
       if (e instanceof OAuthError) {
+        const grant = ["authorization_code", "refresh_token"].includes(requestedGrant)
+          ? requestedGrant
+          : "other";
+        console.warn(`[auth] /token denied grant=${grant} error=${e.code}`);
         return c.json({ error: e.code, error_description: e.message }, oauthErrorStatus(e) as 200 | 400 | 401);
       }
       throw e;
@@ -294,11 +300,15 @@ export function createApp(cfg: AppConfig): Hono {
    */
   async function handleMcp(c: Context, defaultRepoId: string | undefined) {
     const bearer = /^Bearer (.+)$/.exec(c.req.header("authorization") ?? "")?.[1];
-    if (!bearer) return unauthorized(cfg.issuer);
+    if (!bearer) {
+      console.warn("[auth] /mcp denied reason=missing_bearer");
+      return unauthorized(cfg.issuer);
+    }
 
     try {
       await oauth.verifyBearer(bearer, oauthCfg.endpointFor());
     } catch {
+      console.warn("[auth] /mcp denied reason=invalid_bearer");
       return unauthorized(cfg.issuer);
     }
 
