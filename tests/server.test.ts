@@ -227,6 +227,314 @@ describe("D18：单一端点 /mcp + 认证", () => {
     expect(res.status).toBe(200);
   });
 
+  it("现代 ChatGPT 的 server/discover 得到可确定性降级的协议错误，而不是 SDK 的通用 400", async () => {
+    // ChatGPT 当前会先用 MCP 2026-07-28 的标准 discover 请求探测端点。Gateway
+    // 仍是 2025-era server 时，正确行为不是把这条请求交给旧 SDK 产生 -32000，
+    // 而是明确告诉客户端可回退到哪个 legacy protocol version。
+    const token = await mintToken(app);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "server/discover",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "openai-mcp-discover",
+        method: "server/discover",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": { name: "ChatGPT", version: "test" },
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as {
+      jsonrpc?: string;
+      id?: unknown;
+      error?: { code?: number; message?: string; data?: { requested?: string; supported?: string[] } };
+    };
+    expect(body.jsonrpc).toBe("2.0");
+    expect(body.id).toBe("openai-mcp-discover");
+    expect(body.error?.code).toBe(-32022);
+    expect(body.error?.message).toBe("Unsupported protocol version");
+    expect(body.error?.data?.requested).toBe("2026-07-28");
+    expect(body.error?.data?.supported).toContain("2025-11-25");
+  });
+
+  it("modern discover 明示回退版本后，legacy initialize → tools/list 可完整继续", async () => {
+    const token = await mintToken(app);
+    const discovery = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "server/discover",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "discover-then-legacy",
+        method: "server/discover",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+    const discovered = await discovery.json() as { error?: { data?: { supported?: string[] } } };
+    expect(discovery.status).toBe(400);
+    expect(discovered.error?.data?.supported).toContain("2025-11-25");
+
+    const legacyHeaders = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2025-11-25",
+    };
+    const initialized = await app.request("/mcp", {
+      method: "POST",
+      headers: legacyHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: {},
+          clientInfo: { name: "ChatGPT", version: "test" },
+        },
+      }),
+    });
+    expect(initialized.status).toBe(200);
+    expect(await initialized.text()).toContain("2025-11-25");
+
+    const listed = await app.request("/mcp", {
+      method: "POST",
+      headers: legacyHeaders,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+    });
+    expect(listed.status).toBe(200);
+    expect(await listed.text()).toContain("grande_task_status");
+  });
+
+  it("现代 discover 的 Mcp-Method 与 body 不一致时返回 HeaderMismatch，而不进入 legacy fallback", async () => {
+    const token = await mintToken(app);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "tools/list",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "mismatch-method",
+        method: "server/discover",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { id?: unknown; error?: { code?: number } };
+    expect(body.id).toBe("mismatch-method");
+    expect(body.error?.code).toBe(-32020);
+  });
+
+  it("现代 discover 缺少必需 Mcp-Method 时返回 HeaderMismatch，而不进入 legacy fallback", async () => {
+    const token = await mintToken(app);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "missing-method",
+        method: "server/discover",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { id?: unknown; error?: { code?: number } };
+    expect(body.id).toBe("missing-method");
+    expect(body.error?.code).toBe(-32020);
+  });
+
+  it("现代 discover 的 protocol header 与 _meta 不一致时返回 HeaderMismatch，而不进入 legacy fallback", async () => {
+    const token = await mintToken(app);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "server/discover",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "mismatch-version",
+        method: "server/discover",
+        params: {
+          _meta: {
+            "io.modelcontextprotocol/protocolVersion": "2025-11-25",
+            "io.modelcontextprotocol/clientCapabilities": {},
+          },
+        },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { id?: unknown; error?: { code?: number } };
+    expect(body.id).toBe("mismatch-version");
+    expect(body.error?.code).toBe(-32020);
+  });
+
+  it("现代 discover 缺少必需 clientCapabilities 时返回 Invalid params，而不进入 legacy fallback", async () => {
+    const token = await mintToken(app);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "server/discover",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "missing-capabilities",
+        method: "server/discover",
+        params: { _meta: { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { id?: unknown; error?: { code?: number } };
+    expect(body.id).toBe("missing-capabilities");
+    expect(body.error?.code).toBe(-32602);
+  });
+
+  it("现代 discover 缺少必需 protocolVersion metadata 时返回 Invalid params，而不进入 legacy fallback", async () => {
+    const token = await mintToken(app);
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2026-07-28",
+        "mcp-method": "server/discover",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "missing-version",
+        method: "server/discover",
+        params: { _meta: { "io.modelcontextprotocol/clientCapabilities": {} } },
+      }),
+    });
+
+    expect(res.status).toBe(400);
+    const body = await res.json() as { id?: unknown; error?: { code?: number } };
+    expect(body.id).toBe("missing-version");
+    expect(body.error?.code).toBe(-32602);
+  });
+
+  it("现代 discover 保留合法的数值和 null JSON-RPC id", async () => {
+    const token = await mintToken(app);
+    for (const id of [42, null]) {
+      const res = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "server/discover",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          method: "server/discover",
+          params: {
+            _meta: {
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+              "io.modelcontextprotocol/clientCapabilities": {},
+            },
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+      const body = await res.json() as { id?: unknown; error?: { code?: number } };
+      expect(body.id).toBe(id);
+      expect(body.error?.code).toBe(-32022);
+    }
+  });
+
+  it("现代 discover 的降级会留下不含 bearer 的协议追踪日志", async () => {
+    const token = await mintToken(app);
+    const lines: string[] = [];
+    const originalLog = console.log;
+    console.log = (...parts: unknown[]) => lines.push(parts.map(String).join(" "));
+    try {
+      const res = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          "mcp-protocol-version": "2026-07-28",
+          "mcp-method": "server/discover",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: "openai-mcp-discover",
+          method: "server/discover",
+          params: {
+            _meta: {
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+              "io.modelcontextprotocol/clientInfo": { name: "ChatGPT", version: "test" },
+              "io.modelcontextprotocol/clientCapabilities": {},
+            },
+          },
+        }),
+      });
+      expect(res.status).toBe(400);
+    } finally {
+      console.log = originalLog;
+    }
+
+    const text = lines.join("\n");
+    expect(text).toMatch(/\[rpc\].*server\/discover #openai-mcp-discover protocol=2026-07-28 outcome=legacy_fallback/);
+    expect(text).not.toContain(token);
+  });
+
   it("revoke 之后同一枚令牌立刻被拒 —— 这是整个 tokenEpoch 特性的判据", async () => {
     // 只证明 epoch 整数会递增是不够的：真正要证的是 /mcp 【真的会拒】。
     // 用一枚【合法签发】的令牌（走完整 OAuth 流程），先确认它能用，
