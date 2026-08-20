@@ -840,6 +840,27 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
     } finally { restore(); }
   });
 
+  it("工具日志只记安全元数据，不回显文件路径、内容或其他任意参数值", async () => {
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    const secret = "SECRET_TOOL_ARGUMENT_MUST_NOT_REACH_LOGS";
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 81, method: "tools/call",
+          params: { name: "grande_repo_read", arguments: { path: secret } },
+        }),
+      });
+      await response.text();
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines.join("\n")).toContain("grande_repo_read");
+      expect(toolLines.join("\n")).toContain("path");
+      expect(toolLines.join("\n")).not.toContain(secret);
+    } finally { restore(); }
+  });
+
   it("通知（无 id）标成 notif，不渲染成 #undefined", async () => {
     const token = await mintToken(app);
     const [text, restore] = captureLog();

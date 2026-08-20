@@ -1,4 +1,5 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -11,7 +12,7 @@ import type { ToolDeps } from "../src/toolsCore.ts";
 
 const taskId = "task_s18_verification";
 const branch = "grande/s18-verification";
-const headSha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+let headSha: string;
 const token = "github_pat_s18_abcdefghijklmnopqrstuvwxyz";
 
 let root: string;
@@ -121,12 +122,21 @@ beforeEach(() => {
   mkdirSync(join(layout.controlRoot, "secrets"), { recursive: true });
   writeFileSync(join(layout.controlRoot, "secrets", "github-token"), `${token}\n`, { mode: 0o600 });
   deps = { db: openDb(layout), layout, defaultRepoId: "grande-gpt" };
+  const worktreePath = join(root, "worktree");
+  mkdirSync(worktreePath, { recursive: true });
+  execFileSync("git", ["init", "-b", branch], { cwd: worktreePath, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: worktreePath });
+  execFileSync("git", ["config", "user.name", "Grande Test"], { cwd: worktreePath });
+  writeFileSync(join(worktreePath, "README.md"), "verification fixture\n");
+  execFileSync("git", ["add", "README.md"], { cwd: worktreePath });
+  execFileSync("git", ["commit", "-m", "fixture"], { cwd: worktreePath, stdio: "ignore" });
+  headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8" }).trim();
   createTask(deps.db, {
     taskId,
     repoId: "grande-gpt",
     branch,
     baseCommit: "base",
-    worktreePath: join(root, "worktree"),
+    worktreePath,
     state: "READY",
   });
   attestCurrentHead();

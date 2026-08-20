@@ -6,6 +6,7 @@ import { StateError, redact, toToolError } from "./errors.ts";
 import { createGithubApi, GithubApiError, type GithubApi } from "./githubApi.ts";
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
 import { githubGitArgv } from "./push.ts";
+import { assertTaskBranch } from "./commit.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
@@ -67,7 +68,7 @@ export function parseGithubRemote(remote: string): { owner: string; repo: string
   } catch {
     throw new StateError(
       "INVALID_INPUT",
-      `origin remote 不是可接受的 GitHub URL：${remote}。只接受 https://github.com/<owner>/<repo>.git。`,
+      "origin remote 不是可接受的 GitHub URL。只接受 https://github.com/<owner>/<repo>.git。",
     );
   }
   if (
@@ -76,7 +77,7 @@ export function parseGithubRemote(remote: string): { owner: string; repo: string
   ) {
     throw new StateError(
       "INVALID_INPUT",
-      `origin remote 必须是无内嵌凭据的 https://github.com/<owner>/<repo>.git，收到：${remote}`,
+      "origin remote 必须是无内嵌凭据的 https://github.com/<owner>/<repo>.git。",
     );
   }
   const parts = url.pathname.split("/").filter(Boolean);
@@ -86,7 +87,7 @@ export function parseGithubRemote(remote: string): { owner: string; repo: string
   const owner = parts[0]!;
   const repo = parts[1]!.replace(/\.git$/i, "");
   if (!owner || !repo || repo === ".git") {
-    throw new StateError("INVALID_INPUT", `GitHub remote 缺少有效 owner/repo：${remote}`);
+    throw new StateError("INVALID_INPUT", "GitHub remote 缺少有效 owner/repo。");
   }
   return { owner, repo };
 }
@@ -150,6 +151,7 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
       try {
         const task = getTask(deps.db, taskId);
         if (!task) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+        assertTaskBranch(task.worktreePath, task.branch);
         try {
           token = loadGithubToken(deps.layout).token;
         } catch (error) {

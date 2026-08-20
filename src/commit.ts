@@ -23,6 +23,40 @@ export interface WorktreeCommitState {
 }
 
 /**
+ * Bind a task operation to the branch recorded in the control plane.
+ * Worktree paths are durable task state, but Git still permits a caller to
+ * detach HEAD or switch that directory to another branch. Continuing would
+ * commit/push/merge a ref different from the one the task and PR name.
+ */
+export function assertTaskBranch(worktreePath: string, expectedBranch: string): string {
+  let actualBranch: string;
+  try {
+    actualBranch = execFileSync(
+      "git",
+      ["-c", "core.hooksPath=/dev/null", "symbolic-ref", "-q", "--short", "HEAD"],
+      { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trim();
+  } catch (error) {
+    const e = error as { status?: number; stderr?: Buffer | string; message: string };
+    if (e.status === 1) {
+      throw new StateError(
+        "STALE_STATE",
+        `任务 worktree 处于 detached HEAD；期望分支 ${expectedBranch}，拒绝继续。`,
+      );
+    }
+    const detail = e.stderr ? String(e.stderr).trim() : e.message;
+    throw new GitError("GIT_FAILED", `git symbolic-ref 失败：${detail}`);
+  }
+  if (actualBranch !== expectedBranch) {
+    throw new StateError(
+      "STALE_STATE",
+      `任务 worktree 当前分支 ${actualBranch} 与记录的任务分支 ${expectedBranch} 不一致，拒绝继续。`,
+    );
+  }
+  return git(worktreePath, ["rev-parse", "HEAD"]).trim();
+}
+
+/**
  * S2 的所有 git 调用都从这个 helper 经过。`core.hooksPath=/dev/null` 位于 argv
  * 前缀，因而 status/add/diff/commit/rev-parse 无一例外；这不是只保护 commit
  * 那一条，而是把本模块整个 git 能力面都固定为「绝不执行仓库 hook」。

@@ -189,12 +189,41 @@ describe("grande_pr_open", () => {
     expect(order).toEqual(["url"]);
   });
 
+  it("拒绝带 userinfo 的 remote 时不把用户名或密码回显到工具错误", async () => {
+    const api = fakeApi();
+    const username = "REMOTE_USER_SECRET_MARKER";
+    const password = "REMOTE_PASSWORD_SECRET_MARKER";
+
+    const result = await callPr(api, {
+      url: `https://${username}:${password}@github.com/fake-owner/fake-repo.git`,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toContain("无内嵌凭据");
+    expect(result.error.message).not.toContain(username);
+    expect(result.error.message).not.toContain(password);
+    expect(api.calls).toEqual([]);
+  });
+
   it("TASK_NOT_FOUND 在任何 remote/API 操作之前返回", async () => {
     const order: string[] = [];
     const api = fakeApi(null, order);
     const result = await callPr(api, { id: "task_missing", order });
     expect(result.ok).toBe(false);
     expect(result.error.code).toBe("TASK_NOT_FOUND");
+    expect(api.calls).toEqual([]);
+    expect(order).toEqual([]);
+  });
+
+  it("worktree 分支与 task.branch 不一致时在 remote/API 操作之前拒绝", async () => {
+    git(worktree, "switch", "-q", "-c", "grande/wrong-pr-branch");
+    const order: string[] = [];
+    const api = fakeApi(null, order);
+
+    const result = await callPr(api, { order });
+
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toMatch(/grande\/pr-test|分支|branch/);
     expect(api.calls).toEqual([]);
     expect(order).toEqual([]);
   });
@@ -208,7 +237,7 @@ describe("grande_pr_open", () => {
     expect(row?.pathsTouched).toContain(worktree);
   });
 
-  it("S9 onboarding tools 加入后，所有网络工具仍显式 openWorldHint=true，15 个本地工具保持 false", () => {
+  it("所有网络工具显式 openWorldHint=true，task_open fetch 计入后 14 个本地工具保持 false", () => {
     const tools = buildTools(deps);
     expect(
       tools.filter((tool) => tool.annotations.openWorldHint).map((tool) => tool.name).sort(),
@@ -223,8 +252,9 @@ describe("grande_pr_open", () => {
       "grande_pr_open",
       "grande_pr_status",
       "grande_push",
+      "grande_task_open",
     ]);
-    expect(tools.filter((tool) => !tool.annotations.openWorldHint)).toHaveLength(15);
+    expect(tools.filter((tool) => !tool.annotations.openWorldHint)).toHaveLength(14);
     expect(tools.find((tool) => tool.name === "grande_pr_open")?.annotations).toEqual({
       readOnlyHint: false,
       destructiveHint: false,

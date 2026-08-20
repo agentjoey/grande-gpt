@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import type { Layout } from "./layout.ts";
 import { createCheckpoint } from "./checkpoint.ts";
 import { loadCommitIdentity } from "./commit.ts";
+import { assertTaskBranch } from "./commit.ts";
 import { StateError } from "./errors.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
@@ -122,8 +123,9 @@ function mergeCanonical(
  */
 export function syncBase(
   layout: Layout,
-  task: { taskId: string; repoId: string; worktreePath: string; baseCommit: string },
+  task: { taskId: string; repoId: string; branch: string; worktreePath: string; baseCommit: string },
 ): SyncBaseResult {
+  assertTaskBranch(task.worktreePath, task.branch);
   const dirty = git(task.worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
   if (dirty.length > 0) {
     throw new StateError("WORKTREE_DIRTY", "同步 base 前 worktree 必须干净；请先提交或回滚当前改动。 ");

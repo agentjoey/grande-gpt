@@ -55,6 +55,21 @@ function makeTaskContext(db: DatabaseSync, layout: Layout, taskId: string): Task
   }
 }
 
+function activeTaskSummary(task: ReturnType<typeof listActiveTasks>[number]): {
+  taskId: string;
+  branch: string;
+  filesChanged: number | null;
+} {
+  let filesChanged: number | null = null;
+  try {
+    filesChanged = listChangedFiles(task.worktreePath, task.baseCommit).length;
+  } catch {
+    // Error enrichment must never replace the original tool error. A missing
+    // worktree is reported as an unknown count and remains visible by task id.
+  }
+  return { taskId: task.taskId, branch: task.branch, filesChanged };
+}
+
 /**
  * 只读工具（repo_map/repo_search/repo_read）的根目录解析。D18 之前这只需要
  * 在「带 taskId」与「不带 taskId（读固定的那一个 repoId）」之间二选一；
@@ -127,11 +142,7 @@ function wrap(deps: ToolDeps, taskId: string | null, fn: () => unknown): { struc
     const te = toToolError(e);
     te.message = redact(te.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
     if (te.code === "TASK_NOT_FOUND") {
-      te.details.activeTasks = listActiveTasks(deps.db).map((t) => ({
-        taskId: t.taskId,
-        branch: t.branch,
-        filesChanged: listChangedFiles(t.worktreePath, t.baseCommit).length,
-      }));
+      te.details.activeTasks = listActiveTasks(deps.db).map(activeTaskSummary);
     }
     return { structuredContent: err({ ...te, taskId }) };
   }
@@ -384,12 +395,15 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           },
           required: ["taskId", "slug", "repoId"],
         },
-        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: true },
         handler: async (args) =>
           wrap(deps, args.taskId as string, () => {
             const taskId = args.taskId as string;
             const slug = args.slug as string;
             const repoId = args.repoId as string;
+            if (getTask(db, taskId)) {
+              throw new StateError("INVALID_INPUT", `任务 ${taskId} 已存在；taskId 不能重复使用。`);
+            }
             // 与 grande_repo_edit 校验 taskId 存在性的做法一致：先验证前置条件，
             // 验不过的请求连 INTENT 都不留（这不是「执行失败留痕」，是请求本身
             // 就没通过最基本的合法性检查）。openWorktree 内部也会经

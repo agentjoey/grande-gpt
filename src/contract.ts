@@ -91,6 +91,8 @@ export function isTerminalAudit(s: string): boolean {
 export const MCP_WRITE_TOOLS = [
   "grande_task_open", "grande_repo_edit", "grande_run", "grande_task_close",
   "grande_rollback", "grande_commit", "grande_sync_base", "grande_push", "grande_pr_open",
+  "grande_capability_invoke", "grande_pr_merge", "grande_deploy", "grande_deploy_verify",
+  "grande_deploy_rollback", "grande_repo_add_apply",
 ] as const;
 
 /** 控制台经 Gateway 执行的操作（方案 A）。它们同样进账本。 */

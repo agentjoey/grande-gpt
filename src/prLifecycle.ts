@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { getAttestations } from "./attestation.ts";
+import { assertTaskBranch } from "./commit.ts";
 import { beginAudit, type AuditHandle } from "./audit.ts";
 import { refreshCanonical, type CanonicalRefreshResult } from "./canonicalRefresh.ts";
 import { err, ok } from "./envelope.ts";
@@ -161,6 +162,7 @@ async function inspectLifecycle(
 ): Promise<LifecycleState> {
   const task = getTask(deps.db, taskId);
   if (!task) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+  assertTaskBranch(task.worktreePath, task.branch);
 
   let token: string;
   try {

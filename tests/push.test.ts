@@ -112,8 +112,8 @@ describe("grande_push", () => {
 
   it("AC-S3-5a：非 grande/* 分支硬拒绝，bare refs 完全不变", async () => {
     deps.db.prepare("UPDATE task SET branch='production' WHERE taskId=?").run(taskId);
+    safeGit(worktree, "switch", "-q", "-c", "production");
     commitTaskChange();
-    safeGit(worktree, "branch", "production", "HEAD");
     const before = remoteBranches();
 
     const result = await callPush();
@@ -127,6 +127,7 @@ describe("grande_push", () => {
     safeGit(remote, "symbolic-ref", "HEAD", "refs/heads/grande/main");
     safeGit(remote, "update-ref", "refs/heads/grande/main", safeGit(canonical, "rev-parse", "HEAD").trim());
     deps.db.prepare("UPDATE task SET branch='grande/main' WHERE taskId=?").run(taskId);
+    safeGit(worktree, "switch", "-q", "-c", "grande/main");
     commitTaskChange();
 
     const before = safeGit(remote, "rev-parse", "refs/heads/grande/main").trim();
@@ -140,6 +141,20 @@ describe("grande_push", () => {
     const result = await callPush();
     expect(result.ok).toBe(false);
     expect(JSON.stringify(result)).toMatch(/grande_commit|至少一个 commit/);
+  });
+
+  it("worktree 已切到其他分支时拒绝，不能回报一个 HEAD 却推送另一个 task ref", async () => {
+    commitTaskChange();
+    safeGit(worktree, "switch", "-q", "-c", "grande/wrong-branch");
+    writeFileSync(join(worktree, "wrong.txt"), "wrong\n", "utf8");
+    safeGit(worktree, "add", "wrong.txt");
+    safeGit(worktree, "-c", "user.name=GrandeGPT", "-c", "user.email=grande@example.com", "commit", "-q", "-m", "wrong branch");
+
+    const result = await callPush();
+
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).toMatch(/grande\/push-test|分支|branch/);
+    expect(remoteBranches()).not.toContain(`refs/heads/${branch}`);
   });
 
   it("AC-S3-7：没有 origin remote 时拒绝并说清", async () => {
@@ -209,13 +224,13 @@ describe("grande_push", () => {
     expect(row?.pathsTouched).toContain(worktree);
   });
 
-  it("AC-S3-12：grande_push 打开网络面，新增 onboarding tools 后有 15 个本地工具仍禁网", () => {
+  it("AC-S3-12：grande_push 打开网络面，task_open fetch 计入后有 14 个本地工具禁网", () => {
     const tools = buildTools(deps);
     expect(tools.find((candidate) => candidate.name === "grande_push")?.annotations).toEqual({
       readOnlyHint: false,
       destructiveHint: false,
       openWorldHint: true,
     });
-    expect(tools.filter((candidate) => candidate.annotations.openWorldHint === false)).toHaveLength(15);
+    expect(tools.filter((candidate) => candidate.annotations.openWorldHint === false)).toHaveLength(14);
   });
 });

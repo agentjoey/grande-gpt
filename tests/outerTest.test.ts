@@ -104,7 +104,7 @@ describe("planOuterTest()", () => {
 describe("resolveOuterTestCwd()", () => {
   it("不传 taskId 时保持旧行为：验收 canonical repo", () => {
     const db = openDb(layout);
-    expect(resolveOuterTestCwd(db, layout, "grande-gpt")).toBe(join(ws, "grande-gpt"));
+    expect(resolveOuterTestCwd(db, layout, "grande-gpt")).toBe(join(layout.workspaceRoot, "grande-gpt"));
     db.close();
   });
 

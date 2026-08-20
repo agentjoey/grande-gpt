@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -79,6 +79,20 @@ describe("openWorktree()", () => {
     expect(git(repo, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(before);
   });
 
+  it("创建 worktree 时不执行仓库配置的 post-checkout hook", () => {
+    const marker = join(ctrl, "post-checkout-ran");
+    const hooksDir = join(repo, ".githooks");
+    mkdirSync(hooksDir, { recursive: true });
+    const hook = join(hooksDir, "post-checkout");
+    writeFileSync(hook, `#!/bin/sh\nprintf escaped > ${JSON.stringify(marker)}\n`, "utf8");
+    chmodSync(hook, 0o755);
+    git(repo, "config", "core.hooksPath", hooksDir);
+
+    openWorktree(layout, "demo", "hook-safe", "task_abcd");
+
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it("两个任务的 worktree 互相隔离", () => {
     const a = openWorktree(layout, "demo", "one", "task_aaaa");
     const b = openWorktree(layout, "demo", "two", "task_bbbb");
@@ -119,6 +133,30 @@ describe("openWorktree()", () => {
 
   it("canonical 处于 rebase 中时拒绝开新任务", () => {
     mkdirSync(join(repo, ".git", "rebase-merge"), { recursive: true });
+    expect(() => openWorktree(layout, "demo", "s", "task_abcd")).toThrow(
+      expect.objectContaining({ code: "CANONICAL_BUSY" }),
+    );
+  });
+
+  it("canonical 处于真实 revert 冲突中时拒绝开新任务", () => {
+    writeFileSync(join(repo, "a.ts"), "v2\n", "utf8");
+    git(repo, "add", "a.ts");
+    git(repo, "commit", "-q", "-m", "change to revert");
+    const revertedCommit = git(repo, "rev-parse", "HEAD").trim();
+    writeFileSync(join(repo, "a.ts"), "v3\n", "utf8");
+    git(repo, "add", "a.ts");
+    git(repo, "commit", "-q", "-m", "conflicting later change");
+    expect(() => git(repo, "revert", "--no-edit", revertedCommit)).toThrow();
+    expect(existsSync(join(repo, ".git", "REVERT_HEAD"))).toBe(true);
+
+    expect(() => openWorktree(layout, "demo", "s", "task_abcd")).toThrow(
+      expect.objectContaining({ code: "CANONICAL_BUSY" }),
+    );
+    expect(existsSync(join(layout.worktreesRoot, "demo", "task_abcd"))).toBe(false);
+  });
+
+  it("canonical 存在 sequencer 状态时拒绝开新任务", () => {
+    mkdirSync(join(repo, ".git", "sequencer"), { recursive: true });
     expect(() => openWorktree(layout, "demo", "s", "task_abcd")).toThrow(
       expect.objectContaining({ code: "CANONICAL_BUSY" }),
     );
@@ -206,6 +244,22 @@ describe("listChangedFiles() 与 repoDiff()", () => {
     expect(d.files.map((f) => f.path)).toEqual(["a.ts"]);
     expect(d.files[0]!.hunks).toContain("+v2");
     expect(d.files[0]!.hunks).toContain("-v1");
+  });
+
+  it("repoDiff 禁止执行仓库配置的 external diff，同时仍返回内置 diff hunks", () => {
+    const info = openWorktree(layout, "demo", "s", "task_abcd");
+    const marker = join(ctrl, "external-diff-ran");
+    const helper = join(ctrl, "external-diff.sh");
+    writeFileSync(helper, `#!/bin/sh\nprintf invoked > ${JSON.stringify(marker)}\n`, "utf8");
+    chmodSync(helper, 0o755);
+    git(info.worktreePath, "config", "diff.external", helper);
+    writeFileSync(join(info.worktreePath, "a.ts"), "v2\n", "utf8");
+
+    const result = repoDiff(info.worktreePath, info.baseCommit);
+
+    expect(existsSync(marker)).toBe(false);
+    expect(result.files[0]?.hunks).toContain("-v1");
+    expect(result.files[0]?.hunks).toContain("+v2");
   });
 
   it("新增文件的 diff 也含实际内容，不是空字符串（C-1：git diff --no-index 有差异时 exit 1，此前被 catch 吞成空）", () => {

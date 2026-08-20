@@ -12,7 +12,7 @@ import {
 } from "./attestation.ts";
 import { inspectBaseStatus } from "./baseStatus.ts";
 import { assertCommitPolicy } from "./commitPolicy.ts";
-import { commitWorktree } from "./commit.ts";
+import { assertTaskBranch, commitWorktree } from "./commit.ts";
 import { err, ok, type TaskContext } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import { listJobs } from "./jobs.ts";
@@ -77,6 +77,7 @@ function commitTool(deps: ToolDeps): ToolDef {
       try {
         const task = getTask(deps.db, taskId);
         if (!task) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+        assertTaskBranch(task.worktreePath, task.branch);
         audit = beginAudit(deps.db, {
           taskId,
           tool: "grande_commit",

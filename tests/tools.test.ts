@@ -10,6 +10,7 @@ import { getJob } from "../src/jobs.ts";
 import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
 import { buildTools, type ToolDeps } from "../src/tools.ts";
+import { MCP_WRITE_TOOLS } from "../src/contract.ts";
 
 let ws: string, ctrl: string, layout: Layout, deps: ToolDeps;
 let savedWs: string | undefined, savedCtrl: string | undefined;
@@ -108,7 +109,7 @@ const READ_ONLY = [
 ] as const;
 
 const OPEN_WORLD = [
-  "grande_push", "grande_pr_open",
+  "grande_task_open", "grande_push", "grande_pr_open",
   "grande_capability_list", "grande_capability_inspect", "grande_capability_invoke",
   "grande_pr_status", "grande_pr_merge",
   "grande_deploy", "grande_deploy_verify", "grande_deploy_rollback",
@@ -137,6 +138,14 @@ describe("工具注解", () => {
     expect(names.length - READ_ONLY.length).toBe(15);
   });
 
+  it("共享 MCP_WRITE_TOOLS 与运行时全部写工具严格一致，审计/控制台不会漏掉后加工具", () => {
+    const runtimeWriteTools = buildTools(deps)
+      .filter((tool) => !tool.annotations.readOnlyHint)
+      .map((tool) => tool.name)
+      .sort();
+    expect([...MCP_WRITE_TOOLS].sort()).toEqual(runtimeWriteTools);
+  });
+
   it("十个只读工具全部 readOnlyHint: true", () => {
     const tools = buildTools(deps).filter((t) => READ_ONLY.includes(t.name as typeof READ_ONLY[number]));
     expect(tools).toHaveLength(READ_ONLY.length);
@@ -153,7 +162,7 @@ describe("工具注解", () => {
     expect(actual).toEqual([...DESTRUCTIVE].sort());
   });
 
-  it("openWorldHint=true 的工具必须严格等于 Phase 4 的十个触网/外部能力工具", () => {
+  it("openWorldHint=true 的工具必须严格等于当前十一个触网/外部能力工具", () => {
     const tools = buildTools(deps);
     expect(tools.length).toBeGreaterThan(0);
     for (const t of tools) {
@@ -390,6 +399,28 @@ describe("只读工具的 taskId/repoId 参数（BUG 1 关联决定 + D18 扩展
     expect(searchR.error.code).toBe("TASK_NOT_FOUND");
   });
 
+  it("存在 worktree 已丢失的活跃任务时，未知 task 仍返回 TASK_NOT_FOUND 而不是二次崩溃", async () => {
+    createTask(deps.db, {
+      taskId: "task_ghost_active",
+      repoId: "demo",
+      branch: "grande/ghost-active",
+      baseCommit: g(join(layout.workspaceRoot, "demo"), "rev-parse", "HEAD").trim(),
+      worktreePath: join(layout.worktreesRoot, "demo", "missing-task-ghost-active"),
+      state: "READY",
+    });
+
+    const result = JSON.parse(await callTool("grande_repo_read", {
+      taskId: "task_does_not_exist",
+      path: "a.ts",
+    }));
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe("TASK_NOT_FOUND");
+    expect(result.error.details.activeTasks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskId: "task_ghost_active", filesChanged: null }),
+    ]));
+  });
+
   it("显式 repoId（不带 taskId）能浏览到另一个已注册仓库的 canonical——demo 端点的默认仓库不会泄漏进来", async () => {
     const r = JSON.parse(await callTool("grande_repo_read", { path: "b.ts", repoId: "other" }));
     expect(r.ok).toBe(true);
@@ -471,7 +502,7 @@ describe("grande_run / grande_run_result", () => {
 
 describe("工具注解必须逐字匹配当前 contract", () => {
   const SPEC: Record<string, { readOnly: boolean; destructive: boolean; openWorld?: true }> = {
-    grande_task_open:         { readOnly: false, destructive: false },
+    grande_task_open:         { readOnly: false, destructive: false, openWorld: true },
     grande_task_status:       { readOnly: true,  destructive: false },
     grande_repo_map:          { readOnly: true,  destructive: false },
     grande_repo_search:       { readOnly: true,  destructive: false },

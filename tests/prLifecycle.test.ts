@@ -213,6 +213,25 @@ describe("S6 PR lifecycle", () => {
     expect(envelope.data.ci.failed[0].logExcerpt).toContain("stack tail");
   });
 
+  it("pr_status 在 worktree 分支漂移时于任何 GitHub API 调用前拒绝", async () => {
+    git(worktree, "switch", "-q", "-c", "grande/wrong-lifecycle-branch");
+    let apiCreated = false;
+    const tool = createPrStatusTool(deps, {
+      apiFactory: () => {
+        apiCreated = true;
+        return fakeApi();
+      },
+      readRemoteUrl: () => githubUrl,
+      readLocalHead: () => currentCommit,
+    });
+
+    const envelope = (await tool.handler({ taskId })).structuredContent as Record<string, any>;
+
+    expect(envelope.ok).toBe(false);
+    expect(envelope.error.message).toMatch(/grande\/pr-lifecycle|分支|branch/);
+    expect(apiCreated).toBe(false);
+  });
+
   it("CI failed/pending 或 PR head 已不是本地当前 HEAD 时 merge 必须拒绝，且不发 merge 请求", async () => {
     attest(currentCommit);
     for (const api of [

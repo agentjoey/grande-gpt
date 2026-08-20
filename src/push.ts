@@ -3,6 +3,7 @@ import { beginAudit, type AuditHandle } from "./audit.ts";
 import { err, ok } from "./envelope.ts";
 import { StateError, redact, toToolError } from "./errors.ts";
 import { basicCredential, GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
+import { assertTaskBranch } from "./commit.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
@@ -75,6 +76,7 @@ function rethrowRedacted(error: unknown, token: string): never {
 export function pushTask(deps: ToolDeps, taskId: string, git: GithubGit = runGithubGit): PushResult {
   const task = getTask(deps.db, taskId);
   if (!task) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
+  const head = assertTaskBranch(task.worktreePath, task.branch);
 
   let token: string;
   try {
@@ -98,7 +100,6 @@ export function pushTask(deps: ToolDeps, taskId: string, git: GithubGit = runGit
       throw new StateError("POLICY_DENIED", `拒绝 push：目标 ${target} 与任务分支 ${task.branch} 不一致。`);
     }
 
-    const head = git(task.worktreePath, ["rev-parse", "HEAD"], token).trim();
     if (head === task.baseCommit) {
       throw new StateError(
         "INVALID_INPUT",
@@ -127,10 +128,11 @@ export function pushTask(deps: ToolDeps, taskId: string, git: GithubGit = runGit
       );
     }
 
-    // 不提供 --force；显式 source:destination，且两端都是同一个 task.branch。
+    // 不提供 --force；source 固定为刚验证过的 SHA，destination 固定为 task.branch。
+    // 这同时消除 branch guard 与 push 之间发生 HEAD 变化时的 TOCTOU 歧义。
     git(
       task.worktreePath,
-      ["push", "origin", `refs/heads/${target}:refs/heads/${target}`],
+      ["push", "origin", `${head}:refs/heads/${target}`],
       token,
     );
     return { branch: target, commit: head, remoteDefaultBranch };

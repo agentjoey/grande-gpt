@@ -163,6 +163,19 @@ describe("grande_sync_base", () => {
     expect(result.hint).not.toContain("up-to-date");
   });
 
+  it("worktree 已切到其他分支时拒绝同步，不把 canonical 合进错误分支", async () => {
+    git(worktree, "switch", "-q", "-c", "grande/wrong-sync-branch");
+    const before = git(worktree, "rev-parse", "HEAD").trim();
+    commit(canonical, "canonical.txt", "canonical\n", "canonical ahead");
+
+    const result = await sync();
+
+    expect(result.ok).toBe(false);
+    expect(result.error.message).toMatch(/grande\/sync-test|分支|branch/);
+    expect(git(worktree, "rev-parse", "HEAD").trim()).toBe(before);
+    expect(git(worktree, "status", "--porcelain=v1")).toBe("");
+  });
+
   it("工具描述明确 canonical → task，且绝不暗示 task → canonical", () => {
     const tool = buildTools(deps).find((candidate) => candidate.name === "grande_sync_base");
     expect(tool?.description).toContain("canonical HEAD 合入或快进到任务 worktree");

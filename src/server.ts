@@ -419,8 +419,12 @@ export function createApp(cfg: AppConfig): Hono {
         const detail = ok
           ? (sc.truncated === true ? " truncated" : "")
           : ` ${(sc.error as { code?: string } | undefined)?.code ?? "?"}`;
+        // Arguments may contain complete file bodies, PR text, deployment data,
+        // or credentials accidentally supplied to a wrong field. Keep enough
+        // metadata to diagnose tool selection without persisting caller values.
+        const argSummary = JSON.stringify({ keys: Object.keys(args).sort() });
         console.log(
-          `[tool] ${ts()} ${tool.name} ${JSON.stringify(args)} → ${ok ? "ok" : "ERR"}${detail} (${Date.now() - t0}ms)`,
+          `[tool] ${ts()} ${tool.name} ${argSummary} → ${ok ? "ok" : "ERR"}${detail} (${Date.now() - t0}ms)`,
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(sc) }],

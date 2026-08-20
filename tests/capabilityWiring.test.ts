@@ -92,6 +92,7 @@ describe("Phase 4 capability wiring", () => {
       "grande_pr_open",
       "grande_pr_status",
       "grande_push",
+      "grande_task_open",
     ]);
     expect(tools.filter((tool) => tool.annotations.destructiveHint).map((tool) => tool.name).sort()).toEqual([
       "grande_capability_invoke",

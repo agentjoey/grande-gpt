@@ -160,6 +160,19 @@ describe("grande_commit", () => {
     expect(row?.pathsTouched).toContain(worktree);
   });
 
+  it("worktree 已切到别的分支时拒绝提交，避免 task.branch 与实际 commit 漂移", async () => {
+    git(worktree, "switch", "-q", "-c", "grande/not-this-task");
+    writeFileSync(join(worktree, "wrong-branch.txt"), "x\n", "utf8");
+    const before = head();
+
+    const result = await callCommit("must stay task-bound");
+
+    expect(result.ok).toBe(false);
+    expect(JSON.stringify(result)).toMatch(/grande\/commit-test|分支|branch/);
+    expect(head()).toBe(before);
+    expect(listAudit(deps.db, "task_commit").filter((row) => row.tool === "grande_commit")).toEqual([]);
+  });
+
   it("提交 author/email 来自控制平面身份配置", () => {
     writeFileSync(join(worktree, "identity.txt"), "x\n", "utf8");
     const result = commitWorktree(layout, worktree, "task_commit", "identity");

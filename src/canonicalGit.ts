@@ -83,7 +83,15 @@ export function inspectCanonicalGitState(repoRoot: string): CanonicalGitState {
   const gitDir = gitDirProbe.ok
     ? (isAbsolute(gitDirProbe.value) ? gitDirProbe.value : resolve(repoRoot, gitDirProbe.value))
     : join(repoRoot, ".git");
-  const busyReasons = ["rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "index.lock"]
+  const busyReasons = [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "sequencer",
+    "index.lock",
+  ]
     .filter((marker) => existsSync(join(gitDir, marker)));
   const busy = busyReasons.length > 0;
 

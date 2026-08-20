@@ -23,10 +23,14 @@ export interface WorktreeInfo {
   worktreePath: string;
 }
 
-/** git 一律以 argv 数组调用，绝不拼 shell 字符串（铁律二） */
+/** git 一律以 argv 数组调用并禁用仓库 hooks，绝不拼 shell 字符串（铁律二） */
 function git(cwd: string, args: string[]): string {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
   } catch (e) {
     const err = e as { stderr?: Buffer | string; message: string };
     const detail = err.stderr ? String(err.stderr).trim() : err.message;
@@ -43,7 +47,11 @@ function git(cwd: string, args: string[]): string {
  */
 function gitAllowingDiffExit(cwd: string, args: string[]): string {
   try {
-    return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    });
   } catch (e) {
     const err = e as { status?: number; stdout?: string; stderr?: Buffer | string; message: string };
     if (err.status === 1 && typeof err.stdout === "string" && err.stdout.length > 0) return err.stdout;
@@ -248,9 +256,13 @@ export function repoDiff(
     const p = paths[i]!;
     // 对未跟踪文件 `git diff <base> -- <path>` 是空的，用 --no-index 与 /dev/null 比。
     // --no-index 有差异时 exit 1，交给 gitAllowingDiffExit 还原（见其 JSDoc，C-1）。
-    let hunks = git(worktreePath, ["diff", "--no-color", baseCommit, "--", p]);
+    let hunks = git(worktreePath, [
+      "diff", "--no-color", "--no-ext-diff", "--no-textconv", baseCommit, "--", p,
+    ]);
     if (hunks.length === 0) {
-      hunks = gitAllowingDiffExit(worktreePath, ["diff", "--no-color", "--no-index", "--", "/dev/null", p]);
+      hunks = gitAllowingDiffExit(worktreePath, [
+        "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", p,
+      ]);
     }
     const n = hunks.split("\n").length;
     // 至少给出一个文件，否则单个超大文件会导致永远返回空、cursor 原地踏步（I-2）

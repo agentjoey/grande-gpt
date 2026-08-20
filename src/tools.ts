@@ -11,6 +11,7 @@ import { addOnboardingTools } from "./onboardingTools.ts";
 import { addPrLifecycleTools } from "./prLifecycle.ts";
 import { registeredIds } from "./registry.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
+import { getTask } from "./tasks.ts";
 import { stableToolDefinitions, toolsetIdentity } from "./toolsetIdentity.ts";
 import {
   buildTools as buildCoreTools,
@@ -54,6 +55,10 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
         return coreHandler(args);
       }
       if (!registered) return coreHandler(args);
+      // The core handler owns the structured duplicate-id error. Delegate to
+      // it before canonical refresh so a rejected open has zero Git/audit side
+      // effects even when a CLOSED row no longer has a worktree on disk.
+      if (typeof taskId === "string" && getTask(deps.db, taskId)) return coreHandler(args);
 
       // S16：对有 origin 的 repo，在创建 worktree 之前把 canonical 安全 refresh 到 origin
       // 同名 branch。refresh 自己只有 fetch/compare/ff-only；dirty、local-ahead、diverged
@@ -61,8 +66,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       let canonicalRefresh: ReturnType<typeof refreshCanonical>;
       const refreshAudit = beginAudit(deps.db, {
         taskId,
-        tool: "grande_task_open:canonical_refresh",
-        input: { repoId },
+        tool: "grande_task_open",
+        input: { repoId, phase: "canonical_refresh" },
       });
       refreshAudit.allowed();
       if (!refreshAudit.executing()) {

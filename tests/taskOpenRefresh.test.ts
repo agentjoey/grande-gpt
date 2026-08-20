@@ -1,10 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
+import { listAudit } from "../src/audit.ts";
+import { createTask } from "../src/tasks.ts";
 import { buildTools, type ToolDeps } from "../src/tools.ts";
 
 const git = (cwd: string, ...args: string[]) =>
@@ -84,6 +86,11 @@ afterEach(() => {
 });
 
 describe("grande_task_open canonical freshness", () => {
+  it("工具注解如实声明可能通过 origin fetch 触网", () => {
+    const tool = buildTools(deps).find((candidate) => candidate.name === "grande_task_open");
+    expect(tool?.annotations.openWorldHint).toBe(true);
+  });
+
   it("S16 Case A/D：remote main ahead 时先 fast-forward canonical，再从最新 SHA 创建 task", async () => {
     const remoteHead = commit(writer, "remote.txt", "remote\n", "remote ahead");
     git(writer, "push", "-q", "origin", "main");
@@ -96,6 +103,9 @@ describe("grande_task_open canonical freshness", () => {
     expect(result.data.baseCommit).toBe(remoteHead);
     expect(git(canonical, "rev-parse", "HEAD").trim()).toBe(remoteHead);
     expect(git(result.data.worktreePath, "rev-parse", "HEAD").trim()).toBe(remoteHead);
+    const auditTools = listAudit(deps.db, "task_refresh").map((row) => row.tool);
+    expect(auditTools).toHaveLength(2);
+    expect(auditTools.every((tool) => tool === "grande_task_open")).toBe(true);
   });
 
   it("S16 Case B：canonical dirty 时 fail closed，不覆盖本地改动也不开 task", async () => {
@@ -123,5 +133,31 @@ describe("grande_task_open canonical freshness", () => {
     expect(result.error.code).toBe("CANONICAL_DIVERGED");
     expect(git(canonical, "rev-parse", "HEAD").trim()).toBe(localHead);
     expect(git(canonical, "status", "--porcelain=v1")).toBe("");
+  });
+
+  it("重复 taskId 在 canonical refresh、审计、建分支和建 worktree 之前拒绝", async () => {
+    const before = git(canonical, "rev-parse", "HEAD").trim();
+    createTask(deps.db, {
+      taskId: "task_refresh",
+      repoId: "demo",
+      branch: "grande/closed-refresh",
+      baseCommit: before,
+      worktreePath: join(layout.worktreesRoot, "demo", "already-removed"),
+      state: "CLOSED",
+    });
+    commit(writer, "remote.txt", "remote\n", "remote ahead");
+    git(writer, "push", "-q", "origin", "main");
+    const auditBefore = listAudit(deps.db, "task_refresh").length;
+    const expectedWorktree = join(layout.worktreesRoot, "demo", "task_refresh");
+
+    const result = await taskOpen("task_refresh");
+
+    expect(result.ok).toBe(false);
+    expect(result.error.code).toBe("INVALID_INPUT");
+    expect(result.error.message).toMatch(/task_refresh|已存在/);
+    expect(git(canonical, "rev-parse", "HEAD").trim()).toBe(before);
+    expect(listAudit(deps.db, "task_refresh")).toHaveLength(auditBefore);
+    expect(existsSync(expectedWorktree)).toBe(false);
+    expect(git(canonical, "branch", "--list", "grande/refresh-resh").trim()).toBe("");
   });
 });
