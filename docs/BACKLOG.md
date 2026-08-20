@@ -160,6 +160,18 @@
 - **Next**: 当前长任务 binding 回归已通过；只剩和 GG-BL-002 共用的 host acceptance：连续 10 次受控 Gateway restart/activation，并在每次恢复后由同一 ChatGPT 会话继续真实 GrandeGPT probe。不要为了恢复调用降低 `readOnlyHint/destructiveHint/openWorldHint`、绕过 Gateway 或增加第二套执行通道。
 - **Done when**: 修复/规避后用长任务连续验证证明同一会话在多轮 `run → result → edit → verify` 以及至少 10 次受控 Gateway restart/activation 场景中不会被无故 disable。若最终确认完全属于 ChatGPT 平台且 server-side 无可控修复，则必须有经过重复验证的 release/session operational mitigation，并把状态从 OPEN 改为 BLOCKED，而不是静默关闭。
 
+### GG-BL-013 — Host outer-test 自动形成 exact-SHA merge gate
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: verification / reliability / security boundary
+- **Problem**: `grande outer-test --task <id> --run` 当前只能由 Human 在宿主显式执行并打印结果，不会在可信 control plane 生成与当前 task HEAD 绑定的 host verification receipt；`grande_pr_merge` 也只要求当前 SHA 存在某个本机 attestation，并不强制 host outer-test 已对同一 SHA 通过。因此“合并前必须跑 outer-test”仍部分依赖 Human/agent 记忆。
+- **Evidence / Detail**: `src/outerTest.ts` 从 `unit-selfhost` 的 `--exclude tests/...` 反推当前外层测试集合；`src/cli.ts` 的 `cmdOuterTest` 在 task worktree 直接执行 `npx vitest run ...`，成功后只输出“外层测试全部通过”；`src/prLifecycle.ts` 的 merge gate 检查 `attested`，没有 outer-test receipt 条件。outer-test 必须在 sandbox 外执行，因为这些测试包含 nested `sandbox-exec`、真实 job、真实端口/完整闭环，并且历史上已有 sandbox 导致 git hook protection 假阴性的 load-bearing 证据。
+- **Security boundary**: 不允许通过新增通用 `host_exec`、`unsandboxed: true` profile 或直接 MCP `grande_outer_test`，让 ChatGPT/Gateway 在当前用户宿主身份下执行可被 task 修改的 candidate repo code；这会破坏“仓库内容不可信”和“没有通用逃生舱”的既有边界。
+- **Next (Phase 1)**: 保留 Human 对宿主执行的显式触发，但让成功结果自动写入可信 `OuterTestReceipt`（至少绑定 `taskId / repoId / commitSha / startedAt / endedAt / exitCode / files or planDigest / host toolchain`）；HEAD 变化后旧 receipt 自动失效。`grande_pr_merge` 对需要 selfhost outer verification 的 task 必须要求当前 PR head SHA 存在有效 receipt，并在缺失时 fail closed、返回唯一明确的 host command。这样 Human 只负责触发一次，不再负责记忆、复制结果或判断 receipt 是否仍匹配当前 SHA。
+- **Future automation boundary**: 如果以后要做到完全无人值守，只能通过独立隔离 host verifier：不能读取 `~/.grande-control/secrets` / `~/.ssh`，不能写 canonical/control plane，执行目标固定到 exact task/commit，无任意 argv/shell；结果再以受控 receipt 回传。没有该隔离边界前，不做全自动 unsandboxed candidate-code execution。
+- **Done when**: (1) Human 运行一次 host outer-test 后自动产生 exact-SHA receipt；(2) 修改/重新 commit 导致旧 receipt 失效；(3) 缺失/过期 receipt 时 `grande_pr_merge` 对适用 task 明确拒绝，当前 SHA receipt + 既有 CI/attestation 门禁都满足后才允许 merge；(4) load-bearing test/probe 证明移除 receipt gate 会使验收变红；(5) 未新增通用宿主任意执行能力。
+
 ## Observations
 
 ### GG-BL-011 — `grande_repo_search` 的 truncated 信号曾被忽略
