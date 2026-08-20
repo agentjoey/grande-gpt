@@ -62,12 +62,19 @@ function git(cwd: string, args: string[]): string {
 }
 
 /**
- * 判据：把 `git diff HEAD`（已跟踪文件的内容/模式/删除）与全部未跟踪、未忽略文件的
- * 路径和真实字节一起做 sha256。run 启动前记录这个摘要；commit 前重新计算。两者
- * 相等，才认为「将要提交的工作区内容」与那次本机验证看到的内容一致。
+ * 判据：把当前 `HEAD` SHA、`git diff HEAD`（已跟踪文件的内容/模式/删除）与全部未跟踪、
+ * 未忽略文件的路径和真实字节一起做 sha256。run 启动前记录这个摘要；commit/attest 前
+ * 重新计算。两者相等，才认为「当前 base commit + 将要提交的工作区内容」与那次本机验证
+ * 看到的内容一致。HEAD 必须入摘要，否则所有 clean worktree 都会得到同一个 digest，旧
+ * clean HEAD 的验证就可能错误地给后来的 clean HEAD 背书。
  */
 export function workspaceDigest(worktreePath: string): string {
   const hash = createHash("sha256");
+  const head = git(worktreePath, ["rev-parse", "HEAD"]).trim();
+  hash.update("head\0", "utf8");
+  hash.update(head, "utf8");
+  hash.update("\0", "utf8");
+
   const tracked = git(worktreePath, ["diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"]);
   hash.update("tracked\0", "utf8");
   hash.update(tracked, "utf8");

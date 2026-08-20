@@ -17,6 +17,11 @@ export interface CommitIdentity {
   email: string;
 }
 
+export interface WorktreeCommitState {
+  head: string;
+  hasChanges: boolean;
+}
+
 /**
  * S2 的所有 git 调用都从这个 helper 经过。`core.hooksPath=/dev/null` 位于 argv
  * 前缀，因而 status/add/diff/commit/rev-parse 无一例外；这不是只保护 commit
@@ -35,6 +40,13 @@ function git(worktreePath: string, args: string[], config: string[] = []): strin
     const detail = e.stderr ? String(e.stderr).trim() : e.message;
     throw new GitError("GIT_FAILED", `git ${args[0] ?? "命令"} 失败：${detail}`);
   }
+}
+
+/** 读取当前 HEAD 与是否存在未提交改动；不创建 commit。 */
+export function inspectWorktreeCommitState(worktreePath: string): WorktreeCommitState {
+  const status = git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  const head = git(worktreePath, ["rev-parse", "HEAD"]).trim();
+  return { head, hasChanges: status.length > 0 };
 }
 
 /**
@@ -96,9 +108,16 @@ export function commitWorktree(
   attestationId = "none",
 ): CommitResult {
   const identity = loadCommitIdentity(layout);
-  const status = git(worktreePath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
-  if (status.length === 0) {
-    throw new StateError("INVALID_INPUT", `任务 ${taskId} 的 worktree 没有任何改动；拒绝产生空 commit。`);
+  const state = inspectWorktreeCommitState(worktreePath);
+  if (!state.hasChanges) {
+    if (attestationId === "none") {
+      throw new StateError("INVALID_INPUT", `任务 ${taskId} 的 worktree 没有任何改动；拒绝产生空 commit。`);
+    }
+    return {
+      commit: state.head,
+      message: "当前 HEAD 已通过 fresh verification；未创建空 commit。",
+      filesChanged: 0,
+    };
   }
 
   const finalMessage = buildCommitMessage(taskId, message, attestationId);
