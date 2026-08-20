@@ -111,6 +111,15 @@ beforeEach(() => {
   mkdirSync(join(layout.controlRoot, "secrets"), { recursive: true });
   writeFileSync(join(layout.controlRoot, "secrets", "github-token"), `${token}\n`, { mode: 0o600 });
 
+  // S16 后 merge 会 preflight canonical。旧 S6 夹具原本只建 task worktree，没有
+  // canonical repo；补一个无 remote 的本地 canonical，让这些测试仍只关注 PR/CI 门禁。
+  // 真正 fetch+ff 行为由 prMergeCanonicalRefresh.test.ts 的 bare-origin 夹具承重。
+  const canonical = join(layout.workspaceRoot, "demo");
+  mkdirSync(canonical, { recursive: true });
+  git(canonical, "init", "-q", "-b", "main");
+  git(canonical, "-c", "user.name=Human", "-c", "user.email=human@example.com", "commit", "--allow-empty", "-q", "-m", "canonical base");
+  writeFileSync(layout.reposConfig, "repos:\n  - repoId: demo\n    registered: true\n", "utf8");
+
   worktree = join(layout.worktreesRoot, "demo", taskId);
   mkdirSync(worktree, { recursive: true });
   git(worktree, "init", "-q", "-b", branch);

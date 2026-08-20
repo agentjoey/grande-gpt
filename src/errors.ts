@@ -20,11 +20,11 @@ export class StateError extends Error {
   }
 }
 
-/** 规格 §7 的工具错误码，外加 S2 merge 冲突与一个 INTERNAL 兜底 */
+/** 规格 §7 的工具错误码，外加后续 lifecycle/reliability 的 fail-closed 状态码。 */
 export type ToolErrorCode =
   | "INVALID_INPUT" | "UNAUTHORIZED" | "POLICY_DENIED" | "REPO_NOT_REGISTERED"
-  | "TASK_NOT_FOUND" | "STALE_FILE" | "CANONICAL_BUSY" | "WORKTREE_DIRTY"
-  | "PROFILE_NOT_FOUND" | "JOB_TIMEOUT" | "RESOURCE_EXHAUSTED" | "NETWORK_DENIED"
+  | "TASK_NOT_FOUND" | "STALE_FILE" | "CANONICAL_BUSY" | "CANONICAL_DIRTY" | "CANONICAL_DIVERGED"
+  | "WORKTREE_DIRTY" | "PROFILE_NOT_FOUND" | "JOB_TIMEOUT" | "RESOURCE_EXHAUSTED" | "NETWORK_DENIED"
   | "MERGE_CONFLICT" | "INTERNAL";
 
 export interface ToolError {
@@ -34,7 +34,7 @@ export interface ToolError {
   details: Record<string, unknown>;
 }
 
-/** 内部码 → 工具码。规格 §7.1 那张表，外加 S2 的 MERGE_CONFLICT。 */
+/** 内部码 → 工具码。规格 §7.1 那张表，外加后续 lifecycle/reliability 状态。 */
 const MAP: Record<string, { code: ToolErrorCode; retryable: boolean }> = {
   PATH_ESCAPE:            { code: "POLICY_DENIED",       retryable: false },
   POLICY_DENIED:          { code: "POLICY_DENIED",       retryable: false },
@@ -47,6 +47,8 @@ const MAP: Record<string, { code: ToolErrorCode; retryable: boolean }> = {
   FILE_EXISTS:            { code: "INVALID_INPUT",       retryable: false },
   PROFILE_NOT_FOUND:      { code: "PROFILE_NOT_FOUND",   retryable: false },
   CANONICAL_BUSY:         { code: "CANONICAL_BUSY",      retryable: true  },
+  CANONICAL_DIRTY:        { code: "CANONICAL_DIRTY",     retryable: false },
+  CANONICAL_DIVERGED:     { code: "CANONICAL_DIVERGED", retryable: false },
   GIT_FAILED:             { code: "INVALID_INPUT",       retryable: false },
   WORKTREE_EXISTS:        { code: "INVALID_INPUT",       retryable: false },
   WORKTREE_DIRTY:         { code: "WORKTREE_DIRTY",      retryable: false },

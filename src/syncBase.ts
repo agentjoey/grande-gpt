@@ -7,8 +7,11 @@ import { resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
 import { GitError } from "./worktree.ts";
 
+export type SyncBaseRelation = "equal" | "task_ahead" | "canonical_ahead" | "diverged";
+
 export interface SyncBaseResult {
-  action: "up-to-date" | "fast-forward" | "merged";
+  action: "none" | "fast-forward" | "merged";
+  relation: SyncBaseRelation;
   before: string;
   after: string;
   canonicalHead: string;
@@ -47,6 +50,13 @@ function isAncestor(cwd: string, ancestor: string, descendant: string): boolean 
     const detail = e.stderr ? String(e.stderr).trim() : e.message;
     throw new GitError("GIT_FAILED", `git merge-base 失败：${detail}`);
   }
+}
+
+function relationOf(cwd: string, canonical: string, task: string): SyncBaseRelation {
+  if (canonical === task) return "equal";
+  if (isAncestor(cwd, canonical, task)) return "task_ahead";
+  if (isAncestor(cwd, task, canonical)) return "canonical_ahead";
+  return "diverged";
 }
 
 function canonicalHead(canonicalPath: string): string {
@@ -93,7 +103,6 @@ function mergeCanonical(
   } catch (error) {
     const conflicts = splitZ(git(worktreePath, ["diff", "--name-only", "--diff-filter=U", "-z"]));
     if (conflicts.length > 0) {
-      // merge 冲突是一项整体失败：必须先 abort 到操作前状态，再把错误交给模型。
       git(worktreePath, ["merge", "--abort"]);
       throw new StateError(
         "MERGE_CONFLICT",
@@ -107,8 +116,9 @@ function mergeCanonical(
 }
 
 /**
- * 只使用本机 canonical HEAD，不 fetch。开始前要求 worktree 干净并建立 checkpoint；
- * 无任务提交时快进，双方都有提交时 merge。冲突时一定 abort，不把半完成状态留给模型。
+ * 方向固定为 local canonical → task worktree；绝不修改 canonical，也不 fetch。
+ * 开始前要求 task worktree 干净并建立 checkpoint。relation 描述调用前两个 HEAD 的
+ * 图关系；equal/task_ahead 无需操作，canonical_ahead 只 fast-forward，diverged 才 merge。
  */
 export function syncBase(
   layout: Layout,
@@ -122,6 +132,7 @@ export function syncBase(
   const canonicalPath = resolveRepoPath(layout, task.repoId, registeredIds(layout));
   const canonical = canonicalHead(canonicalPath);
   const before = git(task.worktreePath, ["rev-parse", "HEAD"]).trim();
+  const relation = relationOf(task.worktreePath, canonical, before);
   const checkpointId = createCheckpoint(
     layout,
     task.taskId,
@@ -129,22 +140,17 @@ export function syncBase(
     checkpointPaths(task.worktreePath),
   );
 
-  if (isAncestor(task.worktreePath, canonical, before)) {
-    return { action: "up-to-date", before, after: before, canonicalHead: canonical, checkpointId };
+  if (relation === "equal" || relation === "task_ahead") {
+    return { action: "none", relation, before, after: before, canonicalHead: canonical, checkpointId };
   }
 
-  const taskHasOwnCommits = Number.parseInt(
-    git(task.worktreePath, ["rev-list", "--count", `${task.baseCommit}..HEAD`]).trim(),
-    10,
-  ) > 0;
-
-  if (!taskHasOwnCommits) {
+  if (relation === "canonical_ahead") {
     git(task.worktreePath, ["merge", "--ff-only", canonical]);
     const after = git(task.worktreePath, ["rev-parse", "HEAD"]).trim();
-    return { action: "fast-forward", before, after, canonicalHead: canonical, checkpointId };
+    return { action: "fast-forward", relation, before, after, canonicalHead: canonical, checkpointId };
   }
 
   mergeCanonical(layout, task.worktreePath, canonical);
   const after = git(task.worktreePath, ["rev-parse", "HEAD"]).trim();
-  return { action: "merged", before, after, canonicalHead: canonical, checkpointId };
+  return { action: "merged", relation, before, after, canonicalHead: canonical, checkpointId };
 }

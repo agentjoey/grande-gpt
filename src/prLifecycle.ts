@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { getAttestations } from "./attestation.ts";
 import { beginAudit, type AuditHandle } from "./audit.ts";
+import { refreshCanonical, type CanonicalRefreshResult } from "./canonicalRefresh.ts";
 import { err, ok } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import {
@@ -11,6 +12,7 @@ import {
   type GithubLifecycleApi,
 } from "./githubApi.ts";
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
+import type { Layout } from "./layout.ts";
 import { parseGithubRemote, readGithubRemoteUrl } from "./prOpen.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
@@ -71,7 +73,6 @@ export function summarizeCi(checkRuns: GithubCheckRun[], statuses: GithubCommitS
     });
   }
 
-  // GitHub statuses 按最新在前返回；同一个 context 只看第一条，旧失败不能覆盖新成功。
   const seenContexts = new Set<string>();
   for (const status of statuses) {
     if (seenContexts.has(status.context)) continue;
@@ -101,11 +102,13 @@ export function summarizeCi(checkRuns: GithubCheckRun[], statuses: GithubCommitS
 type ApiFactory = (token: string) => GithubLifecycleApi;
 type RemoteReader = (worktreePath: string, token: string) => string;
 type HeadReader = (worktreePath: string) => string;
+type CanonicalRefresher = (layout: Layout, repoId: string, expectedBranch?: string) => CanonicalRefreshResult;
 
 export interface PrLifecycleOptions {
   apiFactory?: ApiFactory;
   readRemoteUrl?: RemoteReader;
   readLocalHead?: HeadReader;
+  canonicalRefresher?: CanonicalRefresher;
 }
 
 function readHead(worktreePath: string): string {
@@ -236,7 +239,8 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
     name: "grande_pr_merge",
     description:
       "合并【当前 task.branch 自己的 PR】。每次调用重新读取 PR/CI，要求本地 HEAD=PR head、当前 SHA 有 attestation、" +
-      "CI 不是 pending/failed、PR 可合并；merge 请求携带 expected head SHA。CI=none 时允许轻量项目在 attestation 门禁下继续。",
+      "CI 不是 pending/failed、PR 可合并；merge 前后安全 refresh local canonical（fixed origin/current base，clean + ff-only）。" +
+      "CI=none 时允许轻量项目在 attestation 门禁下继续。",
     inputSchema: {
       type: "object",
       properties: { taskId: { type: "string", description: "任务ID；不接受 repo/prNumber/branch 参数" } },
@@ -248,8 +252,20 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
       let audit: AuditHandle | undefined;
       try {
         const state = await inspectLifecycle(deps, taskId, options);
+        const canonicalRefresher = options.canonicalRefresher ?? refreshCanonical;
 
         if (state.pr.merged) {
+          audit = beginAudit(deps.db, {
+            taskId,
+            tool: "grande_pr_merge",
+            input: { taskId, prNumber: state.pr.number, existing: true, canonicalRefresh: true },
+          });
+          audit.allowed();
+          if (!audit.executing()) {
+            throw new StateError("STALE_STATE", `任务 ${taskId} 的 canonical refresh 审计句柄无法推进到 EXECUTING。`);
+          }
+          const canonicalRefresh = canonicalRefresher(deps.layout, state.task.repoId, state.pr.baseRef);
+          audit.succeeded([state.task.worktreePath]);
           return {
             structuredContent: ok({
               taskId,
@@ -259,8 +275,9 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
                 prNumber: state.pr.number,
                 headSha: state.pr.headSha,
                 ciState: state.ci.state,
+                canonicalRefresh,
               },
-              hint: `PR #${state.pr.number} 此前已合并（幂等）。`,
+              hint: `PR #${state.pr.number} 此前已合并；local canonical 已重新验证/刷新到 origin/${state.pr.baseRef}。`,
             }),
           };
         }
@@ -316,6 +333,10 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
           throw new StateError("STALE_STATE", `任务 ${taskId} 的 merge 审计句柄无法推进到 EXECUTING。`);
         }
 
+        // 先验证 canonical 当前就是 PR base branch、clean 且可安全追上现有 remote base。
+        // 这一步失败时绝不向 GitHub 发 merge 请求，避免 remote 已变而 local 无法接住。
+        canonicalRefresher(deps.layout, state.task.repoId, state.pr.baseRef);
+
         const merged = await state.api.mergePullRequest(
           state.owner,
           state.repo,
@@ -325,6 +346,25 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
         if (!merged.merged) {
           throw new StateError("INVALID_INPUT", `GitHub 未合并 PR #${state.pr.number}：${merged.message}`);
         }
+
+        let canonicalRefresh: CanonicalRefreshResult;
+        try {
+          canonicalRefresh = canonicalRefresher(deps.layout, state.task.repoId, state.pr.baseRef);
+        } catch (error) {
+          const normalized = normalizedError(error);
+          throw new StateError(
+            normalized.code,
+            `PR #${state.pr.number} 已在 GitHub 成功 merge，但 local canonical refresh 失败：${normalized.message}`,
+          );
+        }
+        if (canonicalRefresh.remoteHead !== null && canonicalRefresh.after !== merged.sha) {
+          throw new StateError(
+            "CANONICAL_DIVERGED",
+            `PR #${state.pr.number} 已 merge 为 ${merged.sha}，但 refresh 后 local canonical=${canonicalRefresh.after}；` +
+              `拒绝把 release 标记为 canonical-fresh。`,
+          );
+        }
+
         audit.succeeded([state.task.worktreePath]);
         return {
           structuredContent: ok({
@@ -336,8 +376,10 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
               headSha: state.pr.headSha,
               mergeSha: merged.sha,
               ciState: state.ci.state,
+              canonicalRefresh,
             },
-            hint: `PR #${state.pr.number} 已合并（head ${state.pr.headSha}，CI=${state.ci.state}）。`,
+            hint: `PR #${state.pr.number} 已合并（head ${state.pr.headSha}，CI=${state.ci.state}）；` +
+              `local canonical 已验证/刷新到 merge SHA ${merged.sha}。`,
           }),
         };
       } catch (error) {

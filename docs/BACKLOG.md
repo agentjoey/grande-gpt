@@ -4,7 +4,7 @@
 >
 > 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md` 中的历史“已知遗留”、`docs/research/**` 的事故记录、PR/TaskBrief 和聊天结论都只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
 
-最后整理：2026-08-19
+最后整理：2026-08-20
 
 ## 维护规范
 
@@ -70,12 +70,12 @@
 ### GG-BL-002 — `grande gateway restart` 非 failure-safe
 
 - **Priority**: P0
-- **Status**: OPEN
+- **Status**: MITIGATED
 - **Category**: production operations
 - **Problem**: `restart` 可先成功 `bootout` 旧 LaunchAgent，再因 `bootstrap` error 5 失败，把 production 留在线下；单独 `gateway start` 才恢复。
-- **Evidence / Detail**: [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md)。plist 当时存在且 `plutil -lint` 为 OK，job 已 unloaded。
-- **Next**: restart sequencing 增加 unloaded 确认、有限 retry/diagnostic、loaded/running + Gateway health 验证；失败时给明确 recovery，不使用 sudo 绕过用户级 LaunchAgent 语义。
-- **Done when**: 行为测试/宿主探针覆盖 bootout→bootstrap race；restart 成功必须验证新 Gateway running，失败不得被误报成功并必须给可执行恢复路径。
+- **Evidence / Detail**: [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md)。plist 当时存在且 `plutil -lint` 为 OK，job 已 unloaded。S17 已把 loaded restart 改为 `kickstart -k`（不再先 `bootout`），unloaded bootstrap 对 error 5 做最多 3 次有限重试，并在 restart 返回成功前等待 Gateway endpoint readiness；2026-08-20 fresh `unit-selfhost` 为 67 files / 628 tests PASS，`typecheck` PASS。当前 production `gatewayBuild=git:5fc26be272e3ece97b4d2e97690c82b454f615a2` 已包含 readiness gate。
+- **Next**: 只剩 host acceptance：连续 10 次受控 production restart，每轮记录 LaunchAgent loaded/running、Gateway endpoint/health 恢复、runtime identity，并在同一 ChatGPT 会话继续做真实 GrandeGPT read probe；任何一轮失败都保持本项未关闭。
+- **Done when**: 行为测试/宿主探针覆盖 bootout→bootstrap race；restart 成功必须验证新 Gateway running，失败不得被误报成功并必须给可执行恢复路径；连续 10 次 production restart/activation 真实探针全绿。
 
 ### GG-BL-003 — `grande_sync_base` 方向与 `up-to-date` 文案误导
 
@@ -149,17 +149,18 @@
 - **Next**: 仅在容易被误当当前规格的入口加 historical/superseded 标记；不大规模重写有价值的历史记录。
 - **Done when**: 当前权威入口不会把读者导向旧能力结论，历史文件保留但明确 superseded。
 
+### GG-BL-010 — 当前会话的 GrandeGPT direct tool execution channel 会被禁用
+
+- **Priority**: P0
+- **Status**: MITIGATED
+- **Category**: reliability / ChatGPT App session binding
+- **Problem**: GrandeGPT App/插件仍显示 installed/enabled、server schema/tool discovery 仍正常时，某个已经运行中的 ChatGPT 会话可能在首次或后续真实 `grande_*` 调用时直接返回 `The GrandeGPT tool has been disabled. Do not send any more messages to GrandeGPT.`；随后该会话无法继续使用 GrandeGPT，只能新建会话或重新绑定。该故障会直接中断长任务，因此已不再是低优先级 platform observation。
+- **Evidence / Detail**: 早期样本见 [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md) 与 [`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)。S17 再次重复出现：受影响会话中 GrandeGPT `installed=true / status=ENABLED`，schema discovery 可发现 25 tools，但第一次真实执行 `grande_task_status(task-p55-20260819-001)` 即收到 tool disabled；本轮在故障前**没有执行任何 Gateway restart/bootout**，因此不能归因于 GG-BL-002/S17-3-2 的 launchd restart race。当前另一会话还观察到 ChatGPT 暴露的 App tool snapshot 为 23 tools，而同一个 production Gateway 通过 `grande_task_status` 报告 `toolsCount=25 / toolsetEpoch=2`，说明 session/app binding 与 server toolset identity 可以发生分叉；这条分叉是否是 disable 的直接触发条件仍需验证，不能先当根因。2026-08-20 Human Owner 报告该 binding 问题已在另一 Work 会话修复；本会话随后做独立复验：production identity 持续为 `gatewayBuild=git:5fc26be272e3ece97b4d2e97690c82b454f615a2 / toolsetEpoch=2 / toolsCount=25 / toolsDigest=sha256:ec07c95e5e537958e49e99e3aaae708348c2f610b6c3c21e0ec5d1f8dcdea804`，并在同一会话连续完成 status、repo read/search/diff、edit、run、run_result、capability discovery 等多轮真实工具调用，未再发生 disabled。
+- **Related**: GG-BL-004（runtime/toolset identity 可观测）与 GG-BL-002（restart reliability）都能提供诊断上下文，但此前证据明确表明本项可以在**没有 restart**时独立发生。
+- **Next**: 当前长任务 binding 回归已通过；只剩和 GG-BL-002 共用的 host acceptance：连续 10 次受控 Gateway restart/activation，并在每次恢复后由同一 ChatGPT 会话继续真实 GrandeGPT probe。不要为了恢复调用降低 `readOnlyHint/destructiveHint/openWorldHint`、绕过 Gateway 或增加第二套执行通道。
+- **Done when**: 修复/规避后用长任务连续验证证明同一会话在多轮 `run → result → edit → verify` 以及至少 10 次受控 Gateway restart/activation 场景中不会被无故 disable。若最终确认完全属于 ChatGPT 平台且 server-side 无可控修复，则必须有经过重复验证的 release/session operational mitigation，并把状态从 OPEN 改为 BLOCKED，而不是静默关闭。
+
 ## Observations
-
-### GG-BL-010 — ChatGPT 既有会话可能不热刷新 GrandeGPT tool binding
-
-- **Priority**: OBS
-- **Status**: OBSERVATION
-- **Category**: external platform / compatibility
-- **Problem**: 已出现“UI 显示 GrandeGPT enabled，但旧会话 runtime 没有/无法调用 `grande_*`；新会话正常”的现象。
-- **Evidence / Detail**: [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md)；[`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)。server-side 已增加 toolset identity，但 **ChatGPT session binding 无法由 server 直接验证**。
-- **Next**: 继续记录重复样本；按 runbook 用新会话、Refresh/Reconnect 和 server identity 做边界定位。不要降低 annotations、绕过 Gateway 或新增第二套 capability framework。
-- **Done when**: 只有在获得稳定可复现且 server-side 可控制的根因后才转成 P1/P2 工程项；否则保留 external observation。
 
 ### GG-BL-011 — `grande_repo_search` 的 truncated 信号曾被忽略
 
