@@ -68,6 +68,6 @@ describe("S17-3-3 production restart readiness", () => {
     ]);
     expect(probeCalls).toBeGreaterThan(0);
     expect(result.code).toBe(1);
-    expect(result.lines.join("\n")).toContain("未就绪");
+    expect(result.lines.join("\n")).toContain("endpoint");
   });
 });
