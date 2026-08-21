@@ -178,8 +178,8 @@ features:
         deps: [binding-a-4-jobwait]
       - id: binding-a-6-gates
         owner: w1
-        status: in_progress
+        status: awaiting_review
         reviewer: rev
         spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
-        evidence: null
+        evidence: Local/code review approved; exact candidate host boundary 5 files/160 tests passed at 7b98f7d; targeted 205/205, full 850/850, typecheck passed. External deployment/selfcheck/Web+iOS gates pending and GG-BL-010 remains OPEN.
         deps: [binding-a-5-budgets]
