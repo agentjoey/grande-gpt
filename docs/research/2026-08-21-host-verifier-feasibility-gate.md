@@ -24,3 +24,22 @@ The real-host iterations also established the final macOS runtime details withou
 - exact loopback/network and sensitive-path denies remain unchanged.
 
 **Slice C2 host gate: PASS.** C3 merge-gate/manual-fallback integration is unblocked. `hostVerification.mode` remains `manual`; this evidence does not activate automatic production mode.
+
+## Slice C3 real-host merge-gate/manual-fallback gate — PASS
+
+The Owner executed the trusted manual outer-test path against exact clean C3 commit:
+
+`3dbc0bb74eb4eae430aa55ee4bf2d10b42b9c725`
+
+Result:
+
+- Test Files: **9 passed / 9**
+- Tests: **170 passed / 170**
+- outer-test exit: **0**
+- `tests/host/verifier-runtime.host.test.ts`: **3 / 3 PASS**, including the real auto-safe full suite at exact SHA and detached process-group timeout/RSS cleanup;
+- `tests/host/runner.host.test.ts`: **28 / 28 PASS**;
+- `tests/host/tools.host.test.ts`: **52 / 52 PASS**;
+- the trusted manual path recorded a transitional exact-SHA host receipt for `3dbc0bb74eb4eae430aa55ee4bf2d10b42b9c725`;
+- no background merge and no production auto-mode activation occurred.
+
+**Slice C3 host gate: PASS.** Slice D recovery/reconciliation work is unblocked. `hostVerification.mode` remains `manual` pending the approved activation/soak gate.
