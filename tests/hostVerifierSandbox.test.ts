@@ -32,7 +32,8 @@ describe("host verifier sandbox plan", () => {
     expect(plan.profile).not.toContain('(allow file-write* (subpath "/private/tmp/grande-verifier/source"))');
     expect(plan.profile).toContain('(allow file-write* (subpath "/private/tmp/grande-verifier/job"))');
     expect(plan.profile).toContain('(allow network-outbound (remote ip "localhost:*"))');
-    expect(plan.profile).toContain('(deny network-outbound (remote ip "localhost:8787"))');
+    expect(plan.profile).toContain('(deny network-outbound (remote tcp "localhost:8787"))');
+    expect(plan.profile).not.toContain('(deny network-outbound (remote ip "localhost:8787"))');
     expect(plan.profile).not.toContain("(allow network*)");
   });
 

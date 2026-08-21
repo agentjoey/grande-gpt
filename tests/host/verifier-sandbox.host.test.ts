@@ -174,11 +174,11 @@ describe("load-bearing host verifier feasibility", () => {
 
     const script = String.raw`
       const { spawnSync } = require("node:child_process");
-      const [allowed, blocked] = process.argv.slice(2);
+      const [allowed, blocked, cat] = process.argv.slice(2);
       const q = (v) => v.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
       const inner = '(version 1)\n(allow default)\n(deny file-read* (literal "' + q(blocked) + '"))';
-      const ok = spawnSync('/usr/bin/sandbox-exec', ['-p', inner, '/bin/cat', allowed], {encoding:'utf8'});
-      const denied = spawnSync('/usr/bin/sandbox-exec', ['-p', inner, '/bin/cat', blocked], {encoding:'utf8'});
+      const ok = spawnSync('/usr/bin/sandbox-exec', ['-p', inner, cat, allowed], {encoding:'utf8'});
+      const denied = spawnSync('/usr/bin/sandbox-exec', ['-p', inner, cat, blocked], {encoding:'utf8'});
       process.stdout.write(JSON.stringify({
         okStatus: ok.status,
         okText: (ok.stdout || '').trim(),
@@ -188,7 +188,7 @@ describe("load-bearing host verifier feasibility", () => {
         deniedPermission: /Operation not permitted|Permission denied/.test(denied.stderr || ''),
       }));
     `;
-    const result = runVerifierNode(fixture, "nested.cjs", script, [allowed, blocked]);
+    const result = runVerifierNode(fixture, "nested.cjs", script, [allowed, blocked, realpathSync("/bin/cat")]);
     expect(result.status, result.stderr).toBe(0);
     const observed = JSON.parse(result.stdout) as {
       okStatus: number | null;
