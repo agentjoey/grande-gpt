@@ -32,7 +32,7 @@ A minimal regression test was added requiring `(allow sysctl-read)` while still 
 
 The failure signature changed: Node now started normally (`status=1` instead of `null`) but reported `MODULE_NOT_FOUND` for probe scripts under `/var/folders/...`.
 
-Root cause: `tmpdir()` produced `/var/...` paths, while the verifier policy was deliberately constructed from `realpathSync(...)` paths under `/private/var/...`. Seatbelt matches runtime path spelling against profile paths; the probe passed the non-canonical `/var/...` script path to Node while only `/private/var/...` was allowed.
+Root cause: `tmpdir()` produced `/var/...` paths, while the verifier policy was deliberately constructed from `realpathSync(...)` paths under `/private/var/...`. Seatbelt matches the path spelling used at runtime against profile paths; the probe passed the non-canonical `/var/...` script path to Node while only `/private/var/...` was allowed.
 
 The probe fixture was corrected to canonicalize source/dependency/job-temp paths immediately after creation and to use those exact paths for policy construction, cwd, script argv, and probe files. No file-read or execution permission was broadened. That correction was committed as `f2e718ebf1b396c1b11007361b8d6d0ebcb99038`.
 
@@ -79,25 +79,39 @@ The approved design and executable plan are:
 - `docs/superpowers/specs/2026-08-21-grande-gpt-reliability-host-verifier-platform-amendment.md`
 - `docs/superpowers/plans/2026-08-21-host-verifier-platform-amendment.md`
 
+### Amended B2R implementation evidence
+
+The approved amendment is now implemented at the unit/type boundary pending fresh real-host proof:
+
+- `TRUSTED_HOST_MANIFEST` now records `execution: "auto" | "manualOnly"`; recursive-Seatbelt/runner/e2e/verifier-feasibility adapters are manual-only, while the real Git-hook proof is split into a dedicated auto-safe host file. The planning helper fails closed to `full + manualOnlyRequired` for sandbox/SBPL/verifier-policy surfaces. RED was observed in `job_e899e4c8-1792-406a-acaa-2851acaa4e48`; GREEN reached 78 files / 729 tests in `job_bc9027da-9f03-4be9-aa61-314cb414c275`.
+- `HOST_VERIFIER_POLICY_VERSION` is now `2`. The verifier profile no longer contains broad `localhost:*`; trusted internal input supplies at most eight unique exact IPv4 loopback ports, rejects invalid/duplicate/production-port entries, and emits bind/inbound/outbound allows only for `127.0.0.1:<trusted-port>`. RED was observed in `job_ccddf90e-7bb6-420f-a2b4-6c3177b11953`; GREEN reached 78 files / 730 tests in `job_05bb3362-f7af-4259-8827-4a23d2e4ed3e`.
+- The real-host feasibility harness now allocates a loopback port on the trusted host before constructing the profile. Its inheritance probe starts one outer verifier Seatbelt and then an ordinary child Node process; the child must retain allowed fixture/job-temp behavior while DB and LAN access remain denied. The network probe binds/connects only the trusted exact port, while LAN and production Gateway destinations remain unlisted and therefore denied by default.
+- The scrubbed verifier environment exposes only the already-validated trusted allocation through `GRANDE_VERIFIER_LOOPBACK_PORTS`; it is not inherited from the host and cannot introduce a port not already present in the Seatbelt profile. The corresponding RED was `job_0ba33710-b235-4062-a97b-574c3d441972`; after adding the trusted env projection, `unit-selfhost` passed 78 files / 730 tests in `job_cf4005da-d039-42fc-a2e1-a37ca2ee7f4c` and typecheck passed in `job_df552a4d-42c0-4c45-a86d-ed4b9830cddb`.
+- A security review identified that the future auto-safe server listener harness currently uses a legacy fixed port. The C2 amendment now explicitly requires auto-safe listener cases to consume only `GRANDE_VERIFIER_LOOPBACK_PORTS` from the trusted parent allocation; this is a Slice C orchestrator integration requirement and does not weaken the B feasibility gate.
+
+No generic host execution, arbitrary argv/cwd/env input, directory-wide process-exec, broad signal permission, inherited credential/proxy state, broad localhost rule, or production-port allow was introduced by B2R.
+
 ## Current gate state
 
-The previous design-level blocker is **resolved by Owner approval**, but Slice B is **not yet PASS**. Implementation and fresh real-host proof of the amended criteria are still required.
+The previous design-level blocker is **resolved by Owner approval** and the amended implementation is **unit/type GREEN**, but Slice B is **not yet PASS** until the clean exact-SHA real-host run succeeds.
 
 Already proven and retained:
 
-- Safe Git hook suppression: PASS;
-- remote LAN/non-loopback deny under deny-default: PASS;
-- sensitive control/workspace/canonical/task/DB/credential/env isolation: PASS;
-- timeout process-group cleanup with no residual orphan: PASS;
-- Node/V8 startup under the verifier sandbox: PASS.
+- Safe Git hook suppression: PASS on prior host runs; now isolated into its own trusted host case for fresh rerun;
+- remote LAN/non-loopback deny under deny-default: PASS on prior host runs;
+- sensitive control/workspace/canonical/task/DB/credential/env isolation: PASS on prior host runs;
+- timeout process-group cleanup with no residual orphan: PASS on prior host runs;
+- Node/V8 startup under the verifier sandbox: PASS on prior host runs.
 
-Required before Slice C:
+Required on the next clean exact SHA before Slice C:
 
-- policy v2 uses only trusted exact loopback ports and no broad localhost;
+- policy v2 exact trusted loopback allocation PASS with no broad localhost;
 - child inheritance/non-escape probe PASS;
 - exact allocated loopback port PASS, LAN peer DENY, production port DENY;
-- recursive-Seatbelt cases are trusted `manualOnly` and excluded from auto-safe receipt coverage;
-- fresh `unit-selfhost`, `typecheck`, clean exact-SHA attestation, and trusted host suite evidence all PASS.
+- dedicated raw-hook/Safe-Git host case PASS;
+- sensitive path/env and process-group cleanup PASS;
+- manual-only manifest contract PASS;
+- exact-SHA outer-test receipt issued only after the worktree is clean.
 
 Until those amended requirements pass:
 

@@ -1,6 +1,6 @@
 import { dirname, isAbsolute, sep } from "node:path";
 
-export const HOST_VERIFIER_POLICY_VERSION = 1;
+export const HOST_VERIFIER_POLICY_VERSION = 2;
 
 export interface HostVerifierSandboxPaths {
   verifierWorktree: string;
@@ -14,6 +14,7 @@ export interface HostVerifierSandboxPaths {
   toolchainReadRoots: readonly string[];
   executableFiles: readonly string[];
   productionPort: number;
+  loopbackPorts: readonly number[];
 }
 
 export interface HostVerifierSandboxPlan {
@@ -36,6 +37,12 @@ function overlaps(a: string, b: string): boolean {
 
 function assertAbsolute(label: string, value: string): void {
   if (!isAbsolute(value)) throw new Error(`${label} must be absolute: ${value}`);
+}
+
+function validatePort(label: string, port: number): void {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`${label} out of range: ${port}`);
+  }
 }
 
 function ancestors(path: string): string[] {
@@ -66,8 +73,16 @@ function validatePaths(input: HostVerifierSandboxPaths): void {
   if (input.dependencyRoots.length === 0) throw new Error("dependencyRoots must not be empty");
   if (input.toolchainReadRoots.length === 0) throw new Error("toolchainReadRoots must not be empty");
   if (input.executableFiles.length === 0) throw new Error("executableFiles must not be empty");
-  if (!Number.isInteger(input.productionPort) || input.productionPort < 1 || input.productionPort > 65_535) {
-    throw new Error(`production port out of range: ${input.productionPort}`);
+  validatePort("production port", input.productionPort);
+  if (input.loopbackPorts.length > 8) throw new Error(`too many verifier loopback ports: ${input.loopbackPorts.length}`);
+  const seenPorts = new Set<number>();
+  for (const port of input.loopbackPorts) {
+    validatePort("verifier loopback port", port);
+    if (port === input.productionPort) {
+      throw new Error(`verifier loopback port must not equal production port: ${port}`);
+    }
+    if (seenPorts.has(port)) throw new Error(`duplicate verifier loopback port: ${port}`);
+    seenPorts.add(port);
   }
 
   if (overlaps(input.verifierWorktree, input.jobTmp)) {
@@ -161,11 +176,12 @@ export function buildHostVerifierSandboxPlan(input: HostVerifierSandboxPaths): H
     ";; Exact executable allowlist: process-fork permits child creation, not arbitrary exec targets.",
     ...input.executableFiles.map((path) => `(allow process-exec (literal "${q(path)}"))`),
     "",
-    ";; Loopback only. Production Gateway TCP port stays denied even though other ephemeral localhost is allowed.",
-    '(allow network-bind (local ip "localhost:*"))',
-    '(allow network-inbound (local ip "localhost:*"))',
-    '(allow network-outbound (remote ip "localhost:*"))',
-    `(deny network-outbound (remote tcp "localhost:${input.productionPort}"))`,
+    ";; Trusted parent allocates exact IPv4 loopback ports before sandbox launch; all others remain denied.",
+    ...input.loopbackPorts.flatMap((port) => [
+      `(allow network-bind (local ip "127.0.0.1:${port}"))`,
+      `(allow network-inbound (local ip "127.0.0.1:${port}"))`,
+      `(allow network-outbound (remote ip "127.0.0.1:${port}"))`,
+    ]),
     "",
   ].join("\n");
 
@@ -176,6 +192,7 @@ export function buildHostVerifierSandboxPlan(input: HostVerifierSandboxPaths): H
     TMPDIR: `${input.jobTmp}/tmp`,
     XDG_CACHE_HOME: `${input.jobTmp}/cache`,
     CI: "1",
+    GRANDE_VERIFIER_LOOPBACK_PORTS: input.loopbackPorts.join(","),
   });
 
   return { policyVersion: HOST_VERIFIER_POLICY_VERSION, profile, env };

@@ -1,10 +1,19 @@
 export type HostVerificationLevel = "none" | "smoke" | "full";
 export type RunnableHostVerificationLevel = Exclude<HostVerificationLevel, "none">;
+export type HostManifestExecution = "auto" | "manualOnly";
 
 export interface HostManifestEntry {
   file: string;
   reason: string;
   levels: readonly RunnableHostVerificationLevel[];
+  execution: HostManifestExecution;
+}
+
+export interface HostVerificationPlan {
+  level: HostVerificationLevel;
+  autoFiles: string[];
+  manualOnlyFiles: string[];
+  manualOnlyRequired: boolean;
 }
 
 export const LEGACY_HOST_ADAPTERS = {
@@ -18,33 +27,45 @@ export const LEGACY_HOST_ADAPTERS = {
 export const TRUSTED_HOST_MANIFEST: readonly HostManifestEntry[] = [
   {
     file: "tests/host/sandbox.host.test.ts",
-    reason: "Exercises real macOS Seatbelt behavior and nested process policy.",
+    reason: "Exercises real macOS Seatbelt behavior that requires its own sandbox boundary.",
     levels: ["full"],
+    execution: "manualOnly",
   },
   {
     file: "tests/host/runner.host.test.ts",
     reason: "Exercises real sandboxed jobs, process groups, timeouts, and orphan cleanup.",
     levels: ["full"],
+    execution: "manualOnly",
   },
   {
     file: "tests/host/server.host.test.ts",
     reason: "Exercises Gateway lifecycle and real loopback listener behavior.",
     levels: ["smoke", "full"],
+    execution: "auto",
   },
   {
     file: "tests/host/tools.host.test.ts",
     reason: "Exercises tool handlers that start real jobs through the host sandbox boundary.",
     levels: ["smoke", "full"],
+    execution: "manualOnly",
   },
   {
     file: "tests/host/e2e.host.test.ts",
-    reason: "Exercises the complete request-to-run loop with real host resources.",
+    reason: "Exercises the complete request-to-run loop with real sandboxed host resources.",
     levels: ["full"],
+    execution: "manualOnly",
+  },
+  {
+    file: "tests/host/git-hook.host.test.ts",
+    reason: "Proves a real Git hook executes normally and Safe Git suppresses it without creating a second Seatbelt boundary.",
+    levels: ["full"],
+    execution: "auto",
   },
   {
     file: "tests/host/verifier-sandbox.host.test.ts",
-    reason: "Proves verifier Seatbelt nesting, hook suppression, loopback isolation, sensitive-path denial, and process-group cleanup on the real host.",
+    reason: "Feasibility-proves the verifier Seatbelt itself from the unsandboxed trusted host layer.",
     levels: ["full"],
+    execution: "manualOnly",
   },
 ] as const;
 
@@ -71,6 +92,17 @@ const FULL_SOURCE_BASENAMES = new Set([
   "prLifecycle.ts",
   "profiles.ts",
   "deployment.ts",
+  "tools.ts",
+]);
+
+const MANUAL_ONLY_SOURCE_BASENAMES = new Set([
+  "sandbox.ts",
+  "sbpl.ts",
+  "runner.ts",
+  "jobs.ts",
+  "hostVerification.ts",
+  "hostVerifierSandbox.ts",
+  "profiles.ts",
   "tools.ts",
 ]);
 
@@ -105,6 +137,16 @@ function isOrdinaryProduction(file: string): boolean {
   return false;
 }
 
+function requiresManualOnly(file: string): boolean {
+  if (file.startsWith("tests/host/")) {
+    const entry = TRUSTED_HOST_MANIFEST.find((candidate) => candidate.file === file);
+    return entry?.execution === "manualOnly";
+  }
+  if (file === "vitest.host.config.ts") return true;
+  if (!file.startsWith("src/")) return false;
+  return MANUAL_ONLY_SOURCE_BASENAMES.has(file.slice("src/".length));
+}
+
 export function classifyHostVerification(changedFiles: readonly string[]): HostVerificationLevel {
   let level: HostVerificationLevel = "none";
   for (const raw of changedFiles) {
@@ -135,15 +177,38 @@ export function validateHostManifest(manifest: readonly HostManifestEntry[]): vo
       throw new Error(`invalid host manifest levels: ${entry.file}`);
     }
     if (!levels.has("full")) throw new Error(`host manifest full level required: ${entry.file}`);
+    if (entry.execution !== "auto" && entry.execution !== "manualOnly") {
+      throw new Error(`host manifest execution required: ${entry.file}`);
+    }
   }
 }
 
-export function hostFilesForLevel(level: HostVerificationLevel): string[] {
+export function hostFilesForLevel(
+  level: HostVerificationLevel,
+  execution: HostManifestExecution | "all" = "all",
+): string[] {
   if (level === "none") return [];
   validateHostManifest(TRUSTED_HOST_MANIFEST);
   return TRUSTED_HOST_MANIFEST
     .filter((entry) => entry.levels.includes(level))
+    .filter((entry) => execution === "all" || entry.execution === execution)
     .map((entry) => entry.file);
+}
+
+export function planHostVerification(changedFiles: readonly string[]): HostVerificationPlan {
+  const level = classifyHostVerification(changedFiles);
+  if (level === "none") {
+    return { level, autoFiles: [], manualOnlyFiles: [], manualOnlyRequired: false };
+  }
+  const manualOnlyRequired = changedFiles
+    .map(normalizePath)
+    .some(requiresManualOnly);
+  return {
+    level,
+    autoFiles: hostFilesForLevel(level, "auto"),
+    manualOnlyFiles: manualOnlyRequired ? hostFilesForLevel(level, "manualOnly") : [],
+    manualOnlyRequired,
+  };
 }
 
 export function validateHostCoverage(input: {

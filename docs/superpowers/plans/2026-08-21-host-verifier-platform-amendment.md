@@ -51,10 +51,11 @@
 - Validate ports: integer `1..65535`, unique, bounded count, and none equals `productionPort`.
 - Emit bind/inbound/outbound allow rules only for exact `127.0.0.1:<port>` values. No `localhost:*`, no range, no narrow production-port deny; deny-default protects all unlisted destinations.
 - The sandbox builder still accepts no candidate argv/cwd/env/profile input.
+- The scrubbed verifier environment may expose the trusted allocated list as `GRANDE_VERIFIER_LOOPBACK_PORTS`; this value is produced only from the already-validated parent allocation and is not inherited or candidate supplied.
 
-- [ ] Add RED tests requiring policy version 2, exact allow rules, rejection of duplicate/invalid/production ports, and absence of `localhost:*`/broad network rules.
+- [ ] Add RED tests requiring policy version 2, exact allow rules, rejection of duplicate/invalid/production ports, absence of `localhost:*`/broad network rules, and trusted-port-only environment exposure.
 - [ ] Run `unit-selfhost` and record RED against the current broad-localhost policy.
-- [ ] Implement minimal validation/profile changes; retain exact executable allowlist, `process-fork`, `sysctl-read`, sensitive path denies, scrubbed env, and job-temp-only writes.
+- [ ] Implement minimal validation/profile/env changes; retain exact executable allowlist, `process-fork`, `sysctl-read`, sensitive path denies, scrubbed env, and job-temp-only writes.
 - [ ] Re-run targeted tests GREEN.
 
 ## Task B2R-3: Real-host inheritance/non-escape and exact-port feasibility probes
@@ -97,15 +98,17 @@
 
 **Files:**
 - Modify when C starts: `src/hostVerification.ts`, `src/prLifecycle.ts`, `src/cli.ts`, `src/outerTest.ts`
+- Modify host harness only as needed to consume trusted runtime allocation: `tests/server.test.ts` / trusted host adapters.
 - Test: focused unit/CLI/merge-gate tests.
 
 **Interfaces:**
 - Auto-safe tasks use the restricted one-shot verifier orchestrator.
+- The trusted parent allocates exact loopback ports before sandbox launch and injects only that validated allocation into the verifier scrubbed env. Auto-safe host cases that need listeners consume `GRANDE_VERIFIER_LOOPBACK_PORTS` rather than choosing `listen(0)` or an unlisted fixed port; absence/invalid trusted allocation fails closed in auto mode.
 - If the trusted plan says `manualOnlyRequired`, `grande_pr_merge` must not start an auto verifier that pretends to cover the missing recursive-Seatbelt case. It returns a predefined Human Gate/next action.
 - The manual-only exception is Human Owner initiated, exact-SHA, and limited to the existing trusted manual host path. It is never exposed as MCP host-exec and never auto-triggered by Gateway.
 - A manual-only exact-SHA receipt can satisfy the gate only if its trusted suite/plan includes the required manual-only files; an auto-safe receipt cannot.
 
-- [ ] Add RED tests proving an auto receipt cannot satisfy a manual-only plan and that ordinary smoke/full auto-safe tasks remain zero-extra-confirmation.
+- [ ] Add RED tests proving an auto receipt cannot satisfy a manual-only plan, auto-safe server/listener cases use only parent-allocated ports, and ordinary smoke/full auto-safe tasks remain zero-extra-confirmation.
 - [ ] Keep the existing destructive merge recheck and no-background-merge semantics unchanged.
 
 ---

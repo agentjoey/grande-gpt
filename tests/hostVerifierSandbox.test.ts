@@ -21,19 +21,26 @@ const paths = {
     "/opt/trusted-node/bin/node",
   ],
   productionPort: 8787,
+  loopbackPorts: [49173, 49174],
 } as const;
 
 describe("host verifier sandbox plan", () => {
-  it("is fixed-policy, read-only source, temp-only writes, and loopback-only network", () => {
+  it("uses policy v2 exact trusted loopback ports with no broad localhost capability", () => {
     const plan = buildHostVerifierSandboxPlan(paths);
-    expect(HOST_VERIFIER_POLICY_VERSION).toBeGreaterThan(0);
+    expect(HOST_VERIFIER_POLICY_VERSION).toBe(2);
+    expect(plan.policyVersion).toBe(2);
     expect(plan.profile).toContain("(deny default)");
     expect(plan.profile).toContain('(allow file-read* (subpath "/private/tmp/grande-verifier/source"))');
     expect(plan.profile).not.toContain('(allow file-write* (subpath "/private/tmp/grande-verifier/source"))');
     expect(plan.profile).toContain('(allow file-write* (subpath "/private/tmp/grande-verifier/job"))');
-    expect(plan.profile).toContain('(allow network-outbound (remote ip "localhost:*"))');
-    expect(plan.profile).toContain('(deny network-outbound (remote tcp "localhost:8787"))');
-    expect(plan.profile).not.toContain('(deny network-outbound (remote ip "localhost:8787"))');
+    for (const port of paths.loopbackPorts) {
+      expect(plan.profile).toContain(`(allow network-bind (local ip "127.0.0.1:${port}"))`);
+      expect(plan.profile).toContain(`(allow network-inbound (local ip "127.0.0.1:${port}"))`);
+      expect(plan.profile).toContain(`(allow network-outbound (remote ip "127.0.0.1:${port}"))`);
+    }
+    expect(plan.profile).not.toContain("localhost:*");
+    expect(plan.profile).not.toContain("127.0.0.1:8787");
+    expect(plan.profile).not.toContain('(deny network-outbound (remote tcp "localhost:8787"))');
     expect(plan.profile).not.toContain("(allow network*)");
   });
 
@@ -67,13 +74,14 @@ describe("host verifier sandbox plan", () => {
     }
   });
 
-  it("constructs a fresh minimal environment instead of inheriting credentials/proxies/DYLD/Git/SSH state", () => {
+  it("constructs a fresh minimal environment and only exposes trusted allocated ports", () => {
     const plan = buildHostVerifierSandboxPlan(paths);
     expect(Object.keys(plan.env).sort()).toEqual([
-      "CI", "HOME", "LANG", "PATH", "TMPDIR", "XDG_CACHE_HOME",
+      "CI", "GRANDE_VERIFIER_LOOPBACK_PORTS", "HOME", "LANG", "PATH", "TMPDIR", "XDG_CACHE_HOME",
     ]);
     expect(plan.env.PATH).toBe("/usr/bin:/bin:/opt/trusted-node/bin");
     expect(plan.env.HOME).toBe(`${paths.jobTmp}/home`);
+    expect(plan.env.GRANDE_VERIFIER_LOOPBACK_PORTS).toBe("49173,49174");
     for (const forbidden of [
       "GITHUB_TOKEN", "OPENAI_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
       "SSH_AUTH_SOCK", "DYLD_INSERT_LIBRARIES", "GIT_CONFIG_GLOBAL", "GIT_ASKPASS",
@@ -82,7 +90,15 @@ describe("host verifier sandbox plan", () => {
     }
   });
 
-  it("rejects relative paths, writable/source overlap, sensitive-root overlap, and invalid port", () => {
+  it("rejects invalid or unsafe trusted loopback allocations", () => {
+    expect(() => buildHostVerifierSandboxPlan({ ...paths, loopbackPorts: [8787] })).toThrow(/production|port/i);
+    expect(() => buildHostVerifierSandboxPlan({ ...paths, loopbackPorts: [49173, 49173] })).toThrow(/duplicate|unique/i);
+    expect(() => buildHostVerifierSandboxPlan({ ...paths, loopbackPorts: [0] })).toThrow(/port/i);
+    expect(() => buildHostVerifierSandboxPlan({ ...paths, loopbackPorts: [65536] })).toThrow(/port/i);
+    expect(() => buildHostVerifierSandboxPlan({ ...paths, loopbackPorts: [1,2,3,4,5,6,7,8,9] })).toThrow(/too many|limit|port/i);
+  });
+
+  it("rejects relative paths, writable/source overlap, sensitive-root overlap, and invalid production port", () => {
     expect(() => buildHostVerifierSandboxPlan({ ...paths, verifierWorktree: "relative/source" })).toThrow(/absolute/i);
     expect(() => buildHostVerifierSandboxPlan({ ...paths, jobTmp: paths.verifierWorktree })).toThrow(/overlap|source/i);
     expect(() => buildHostVerifierSandboxPlan({ ...paths, jobTmp: paths.workspaceRoot })).toThrow(/overlap|workspace/i);
