@@ -938,7 +938,7 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
       expect(result).not.toHaveProperty("structuredContent");
       expect(envelope).toMatchObject({
         ok: false,
-        taskId: null,
+        taskId: TASK,
         error: { code: "RESOURCE_EXHAUSTED" },
       });
       expect(envelope.error?.message).toMatch(/smaller (?:page|line range)/i);

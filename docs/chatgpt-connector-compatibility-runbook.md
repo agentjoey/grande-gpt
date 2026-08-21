@@ -136,11 +136,27 @@ Production App 只在这种正式 tool-contract release 时更新工具 snapshot
 
 切换代码前，必须先从 production `selfcheck` 捕获并保留当前
 `gatewayBuild`、`toolsetEpoch`、`toolsCount`、`toolsDigest`，不得用 candidate 或历史值代填。
-只有 production `toolsDigest` 精确等于
-`sha256:62c1d93894112442740f01ec30aeefdea0229ef7fc6db583eb63c06c0aef46a1`
-时，才允许按 epoch 2 / no-refresh patch 路径继续。若 digest 不一致，立即停止（abort）：
-先对账/reconcile production contract 与 candidate，或取得 owner 对正式 contract release
-的明确授权；不得在快照已分叉时仍以 epoch 2 无刷新方式覆盖。
+随后在**同一 production state** 上执行 candidate-on-production-state identity 计算，并逐项比较
+candidate 与 production 的 `toolsetEpoch`、`toolsCount`、`toolsDigest`。三项必须精确相等，才允许按
+epoch 2 / no-refresh patch 路径继续；`gatewayBuild` 可以因代码切换而变化。测试 fixture 的 digest
+不能充当 production 放行值。任一项不一致，立即停止（abort）：先对账/reconcile production contract
+与 candidate，或取得 owner 对正式 contract release 的明确授权；不得在快照已分叉时仍以 epoch 2
+无刷新方式覆盖。
+
+candidate-on-production-state 命令（在 candidate checkout 执行，仅读 production state DB）：
+
+```bash
+GRANDE_WORKSPACE=/Users/xtation/AgentWorks/GPT_Workspace \
+node --disable-warning=ExperimentalWarning --input-type=module -e '
+import { DatabaseSync } from "node:sqlite";
+import { loadLayout } from "./src/layout.ts";
+import { buildTools, toolsetIdentity } from "./src/tools.ts";
+const layout = loadLayout();
+const db = new DatabaseSync(layout.stateDb, { readOnly: true });
+try { console.log(JSON.stringify(toolsetIdentity(buildTools({ db, layout }), "candidate-predeploy"))); }
+finally { db.close(); }
+'
+```
 
 发布后：
 

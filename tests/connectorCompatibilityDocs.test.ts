@@ -42,7 +42,6 @@ describe("ChatGPT connector compatibility operational contract", () => {
     const backlog = read("docs/BACKLOG.md");
     const runbook = read("docs/chatgpt-connector-compatibility-runbook.md");
     const candidateCommit = "7b98f7dce2f0b10723b29be64ca28e1438f1a779";
-    const pinnedDigest = "sha256:62c1d93894112442740f01ec30aeefdea0229ef7fc6db583eb63c06c0aef46a1";
 
     for (const text of [backlog, runbook]) {
       expect(text).toContain(candidateCommit);
@@ -50,7 +49,9 @@ describe("ChatGPT connector compatibility operational contract", () => {
     }
 
     expect(runbook).toMatch(/切换代码前[\s\S]{0,500}gatewayBuild[\s\S]{0,300}toolsetEpoch[\s\S]{0,300}toolsCount[\s\S]{0,300}toolsDigest/);
-    expect(runbook).toContain(pinnedDigest);
+    expect(runbook).toContain("candidate-on-production-state");
+    expect(runbook).toMatch(/candidate[\s\S]{0,240}production[\s\S]{0,240}(?:toolsetEpoch|toolsCount|toolsDigest)/i);
+    expect(runbook).not.toMatch(/只有 production `toolsDigest` 精确等于/);
     expect(runbook).toMatch(/不一致[\s\S]{0,300}(?:停止|abort)[\s\S]{0,300}(?:reconcile|对账|授权)/i);
     expect(runbook).toContain("JSON.stringify(toMcpTextResult(envelope))");
     expect(runbook).toMatch(/SDK-generated[\s\S]{0,160}outputBytes=unknown/i);

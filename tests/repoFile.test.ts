@@ -212,8 +212,21 @@ describe("repoRead()", () => {
   it("lineRange 取指定行区间（1 基、闭区间）", () => {
     file("a.ts", "l1\nl2\nl3\nl4\nl5\n");
     const r = repoRead(root, "a.ts", { lineRange: [2, 4] });
-    expect(r.content).toBe("l2\nl3\nl4");
+    expect(r.content).toBe("l2\nl3\nl4\n");
     expect(r.sha256).toBe(sha("l1\nl2\nl3\nl4\nl5\n"));
+  });
+
+  it("lineRange 的 nextLine 续页保留区间末行后的源换行", () => {
+    const full = "l1\nl2\nl3\n";
+    file("range-continuation.ts", full);
+
+    const first = repoRead(root, "range-continuation.ts", { lineRange: [1, 2] });
+    const second = repoRead(root, "range-continuation.ts", { lineRange: [first.nextLine!, 3] });
+
+    expect(first.content).toBe("l1\nl2\n");
+    expect(first.nextLine).toBe(3);
+    expect(second.content).toBe("l3\n");
+    expect(first.content + second.content).toBe(full);
   });
 
   it("lineRange 覆盖到文件真实末尾（含末尾换行）时不误标 truncated", () => {
@@ -221,7 +234,7 @@ describe("repoRead()", () => {
     // 最后一行」时，若拿幻影行的下标去比较，会把「已经给了整份文件」误判成截断。
     file("a.ts", "l1\nl2\nl3\n");
     const r = repoRead(root, "a.ts", { lineRange: [1, 3] });
-    expect(r.content).toBe("l1\nl2\nl3");
+    expect(r.content).toBe("l1\nl2\nl3\n");
     expect(r.truncated).toBe(false);
   });
 

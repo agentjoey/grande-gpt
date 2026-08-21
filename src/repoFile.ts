@@ -119,7 +119,11 @@ export function repoRead(
     }
     startLine = from;
     endLine = Math.min(to, actualTotalLines);
-    body = lines.slice(from - 1, to).join("\n");
+    const hasSelectedLines = from <= endLine;
+    body = lines.slice(from - 1, endLine).join("\n");
+    // A continuation starts at the following line, so this page must keep the
+    // source delimiter after its final selected line when one exists.
+    if (hasSelectedLines && (endLine < actualTotalLines || full.endsWith("\n"))) body += "\n";
     // full.split("\n") 在文件以换行结尾时会多出一个幻影空行（"a\n".split("\n") ===
     // ["a", ""]）；不扣掉它，读到真正的文件末尾也会被误判成 truncated。
     truncated = from > 1 || to < actualTotalLines;

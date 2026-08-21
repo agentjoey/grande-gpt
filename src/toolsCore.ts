@@ -396,6 +396,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           if (args.taskId !== undefined) continuationArgs.taskId = args.taskId;
           else if (args.repoId !== undefined) continuationArgs.repoId = args.repoId;
           return ok({
+            taskId: (args.taskId as string) ?? null,
             data: r,
             hint: r.nextLine !== null
               ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），内容未完整返回（本页 ${returnedBytes} 字节）` +
