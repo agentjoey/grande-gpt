@@ -36,10 +36,10 @@ describe("host verifier sandbox plan", () => {
     expect(plan.profile).not.toContain("(allow network*)");
   });
 
-  it("allows Node/V8 startup sysctl reads without adding fork or broad signal privileges", () => {
+  it("allows Node/V8 startup and child creation without broad signal privileges", () => {
     const profile = buildHostVerifierSandboxPlan(paths).profile;
     expect(profile).toContain("(allow sysctl-read)");
-    expect(profile).not.toContain("(allow process-fork)");
+    expect(profile).toContain("(allow process-fork)");
     expect(profile).not.toContain("(allow signal)");
   });
 

@@ -31,11 +31,20 @@ The failure signature changed: Node now started normally (`status=1` instead of 
 
 Root cause: `tmpdir()` produced `/var/...` paths, while the verifier policy was deliberately constructed from `realpathSync(...)` paths under `/private/var/...`. Seatbelt matches runtime path spelling against profile paths; the probe passed the non-canonical `/var/...` script path to Node while only `/private/var/...` was allowed.
 
-The probe fixture was corrected to canonicalize source/dependency/job-temp paths immediately after creation and to use those exact paths for policy construction, cwd, script argv, and probe files. No file-read or execution permission was broadened.
+The probe fixture was corrected to canonicalize source/dependency/job-temp paths immediately after creation and to use those exact paths for policy construction, cwd, script argv, and probe files. No file-read or execution permission was broadened. That correction was committed as `f2e718ebf1b396c1b11007361b8d6d0ebcb99038`.
+
+### Third real-host run
+
+The canonical-path correction worked: the sensitive-path/environment probe passed, and the remaining failures were reduced to two actual policy/probe semantics.
+
+1. The nested Seatbelt script entered Node successfully, but its inner `spawnSync()` produced no child stdout. The verifier policy allowed exact executable targets but still denied `process-fork`; child creation is required both by the nested probe and by the eventual fixed Vitest runner. A RED unit contract requiring `process-fork` was observed in `job_4896bd22-d492-44a0-9bb8-64741f19dbd9`. The implementation now permits `process-fork` while retaining exact-file `process-exec` and still denying broad signal permission. Fresh selfhost after the change is `78 files / 726 tests PASS` (`job_63e1cb33-0a49-405e-ba11-6f3055dd015d`); typecheck PASS is `job_1b46b0bd-4f7a-4e1a-8e3e-138d060c3af1`.
+2. The network probe connected successfully to the machine's own non-loopback interface address. That destination is still the local machine and therefore is not a valid proof of reaching an external LAN peer under Seatbelt's `localhost` semantics. The probe now derives a same-subnet IPv4 address that is neither loopback nor any local interface address and requires that connection attempt to fail with a Seatbelt permission error. Loopback success and the explicit production-port deny remain separate assertions.
+
+No generic host execution, directory-wide process-exec, broad signal permission, arbitrary argv/cwd, or wider filesystem/network rule was added by these changes.
 
 ## Current gate state
 
-The four real-host properties are **not yet claimed PASS** after the canonical-path fix. A fresh trusted-host run against the new clean exact SHA is still required. Until that run passes:
+The four real-host properties are **not yet claimed PASS** after the fork/network-probe corrections. A fresh trusted-host run against the next clean exact SHA is still required. Until that run passes:
 
 - Slice C must not start;
 - merge must not occur;

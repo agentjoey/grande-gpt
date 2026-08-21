@@ -12,7 +12,6 @@ import {
 } from "node:fs";
 import { homedir, networkInterfaces, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { createServer } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { safeGit } from "../../src/gitExec.ts";
 import { buildHostVerifierSandboxPlan } from "../../src/hostVerifierSandbox.ts";
@@ -112,10 +111,39 @@ function rawGit(cwd: string, ...args: string[]): string {
   });
 }
 
-function nonLoopbackIpv4(): string | undefined {
+function ipv4ToUint32(value: string): number | undefined {
+  const parts = value.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return undefined;
+  return (((parts[0]! << 24) >>> 0) + (parts[1]! << 16) + (parts[2]! << 8) + parts[3]!) >>> 0;
+}
+
+function uint32ToIpv4(value: number): string {
+  const n = value >>> 0;
+  return [n >>> 24, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff].join(".");
+}
+
+function nonLoopbackLanPeer(): string | undefined {
+  const local = new Set<string>();
+  const candidates: Array<{ address: string; netmask: string }> = [];
   for (const values of Object.values(networkInterfaces())) {
     for (const entry of values ?? []) {
-      if (entry.family === "IPv4" && !entry.internal) return entry.address;
+      if (entry.family !== "IPv4" || entry.internal) continue;
+      local.add(entry.address);
+      candidates.push({ address: entry.address, netmask: entry.netmask });
+    }
+  }
+
+  for (const entry of candidates) {
+    const ip = ipv4ToUint32(entry.address);
+    const mask = ipv4ToUint32(entry.netmask);
+    if (ip === undefined || mask === undefined) continue;
+    const network = (ip & mask) >>> 0;
+    const broadcast = (network | ((~mask) >>> 0)) >>> 0;
+    if (broadcast <= network + 2) continue; // /31 and /32 have no distinct ordinary peer address.
+    for (const candidate of [network + 1, network + 2, broadcast - 1]) {
+      if (candidate <= network || candidate >= broadcast) continue;
+      const address = uint32ToIpv4(candidate);
+      if (!local.has(address)) return address;
     }
   }
   return undefined;
@@ -153,9 +181,11 @@ describe("load-bearing host verifier feasibility", () => {
       const denied = spawnSync('/usr/bin/sandbox-exec', ['-p', inner, '/bin/cat', blocked], {encoding:'utf8'});
       process.stdout.write(JSON.stringify({
         okStatus: ok.status,
-        okText: ok.stdout.trim(),
+        okText: (ok.stdout || '').trim(),
+        okError: ok.error && ok.error.code || null,
         deniedStatus: denied.status,
-        deniedPermission: /Operation not permitted|Permission denied/.test(denied.stderr),
+        deniedError: denied.error && denied.error.code || null,
+        deniedPermission: /Operation not permitted|Permission denied/.test(denied.stderr || ''),
       }));
     `;
     const result = runVerifierNode(fixture, "nested.cjs", script, [allowed, blocked]);
@@ -163,13 +193,15 @@ describe("load-bearing host verifier feasibility", () => {
     const observed = JSON.parse(result.stdout) as {
       okStatus: number | null;
       okText: string;
+      okError: string | null;
       deniedStatus: number | null;
+      deniedError: string | null;
       deniedPermission: boolean;
     };
-    expect(observed.okStatus).toBe(0);
+    expect(observed.okStatus, JSON.stringify(observed)).toBe(0);
     expect(observed.okText).toBe("allowed");
     expect(observed.deniedStatus).not.toBe(0);
-    expect(observed.deniedPermission).toBe(true);
+    expect(observed.deniedPermission, JSON.stringify(observed)).toBe(true);
   });
 
   it("proves a real Git hook executes normally and Safe Git suppresses it", () => {
@@ -192,51 +224,38 @@ describe("load-bearing host verifier feasibility", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("allows ephemeral loopback but denies LAN/non-loopback and the production Gateway port", async () => {
-    const lanAddress = nonLoopbackIpv4();
-    expect(lanAddress, "real-host LAN address is required for the load-bearing deny probe").toBeDefined();
+  it("allows ephemeral loopback but denies LAN/non-loopback and the production Gateway port", () => {
+    const lanPeer = nonLoopbackLanPeer();
+    expect(lanPeer, "a distinct same-subnet LAN peer address is required for the load-bearing deny probe").toBeDefined();
 
-    const lanServer = createServer((socket) => socket.end("lan"));
-    await new Promise<void>((resolve, reject) => {
-      lanServer.once("error", reject);
-      lanServer.listen(0, "0.0.0.0", () => resolve());
-    });
-    try {
-      const address = lanServer.address();
-      if (address === null || typeof address === "string") throw new Error("LAN probe did not get a TCP port");
-      const fixture = makeVerifierFixture();
-      const productionPort = Number(process.env.PORT ?? "8787");
-      const script = String.raw`
-        const net = require('node:net');
-        const [lanHost, lanPort, productionPort] = process.argv.slice(2);
-        const connect = (host, port) => new Promise((resolve) => {
-          const socket = net.connect({host, port: Number(port)});
-          const timer = setTimeout(() => { socket.destroy(); resolve('TIMEOUT'); }, 1500);
-          socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve('CONNECTED'); });
-          socket.once('error', (error) => { clearTimeout(timer); resolve(error.code || 'ERROR'); });
-        });
-        (async () => {
-          const server = net.createServer((socket) => socket.end('loopback'));
-          await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-          const localPort = server.address().port;
-          const loopback = await connect('127.0.0.1', localPort);
-          server.close();
-          const lan = await connect(lanHost, lanPort);
-          const production = await connect('127.0.0.1', productionPort);
-          process.stdout.write(JSON.stringify({loopback, lan, production}));
-        })().catch((error) => { console.error(error && error.stack || error); process.exit(2); });
-      `;
-      const result = runVerifierNode(fixture, "network.cjs", script, [
-        lanAddress!, String(address.port), String(productionPort),
-      ]);
-      expect(result.status, result.stderr).toBe(0);
-      const observed = JSON.parse(result.stdout) as { loopback: string; lan: string; production: string };
-      expect(observed.loopback).toBe("CONNECTED");
-      expect(permissionDenied(observed.lan), `LAN result was ${observed.lan}`).toBe(true);
-      expect(permissionDenied(observed.production), `production-port result was ${observed.production}`).toBe(true);
-    } finally {
-      lanServer.close();
-    }
+    const fixture = makeVerifierFixture();
+    const productionPort = Number(process.env.PORT ?? "8787");
+    const script = String.raw`
+      const net = require('node:net');
+      const [lanHost, productionPort] = process.argv.slice(2);
+      const connect = (host, port) => new Promise((resolve) => {
+        const socket = net.connect({host, port: Number(port)});
+        const timer = setTimeout(() => { socket.destroy(); resolve('TIMEOUT'); }, 1500);
+        socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve('CONNECTED'); });
+        socket.once('error', (error) => { clearTimeout(timer); resolve(error.code || 'ERROR'); });
+      });
+      (async () => {
+        const server = net.createServer((socket) => socket.end('loopback'));
+        await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+        const localPort = server.address().port;
+        const loopback = await connect('127.0.0.1', localPort);
+        server.close();
+        const lan = await connect(lanHost, localPort);
+        const production = await connect('127.0.0.1', productionPort);
+        process.stdout.write(JSON.stringify({loopback, lan, production}));
+      })().catch((error) => { console.error(error && error.stack || error); process.exit(2); });
+    `;
+    const result = runVerifierNode(fixture, "network.cjs", script, [lanPeer!, String(productionPort)]);
+    expect(result.status, result.stderr).toBe(0);
+    const observed = JSON.parse(result.stdout) as { loopback: string; lan: string; production: string };
+    expect(observed.loopback).toBe("CONNECTED");
+    expect(permissionDenied(observed.lan), `LAN peer ${lanPeer} result was ${observed.lan}`).toBe(true);
+    expect(permissionDenied(observed.production), `production-port result was ${observed.production}`).toBe(true);
   });
 
   it("denies real control/workspace/canonical/task/db/credential paths and inherited secret state", () => {
