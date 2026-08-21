@@ -58,21 +58,45 @@ function extractJsonRpc(body: string): unknown {
 
 function parseServerIdentity(body: string): ServerIdentity | null {
   const rpc = extractJsonRpc(body) as {
-    result?: { structuredContent?: { ok?: unknown; data?: Record<string, unknown> } };
+    result?: {
+      content?: unknown;
+      structuredContent?: unknown;
+    };
   };
-  const data = rpc.result?.structuredContent?.data;
-  if (rpc.result?.structuredContent?.ok !== true || !data) return null;
+  const result = rpc.result;
+  if (!result) return null;
+
+  let envelope: unknown;
+  const textBlock = Array.isArray(result.content)
+    ? result.content.find((block) => (
+      typeof block === "object" && block !== null &&
+      (block as Record<string, unknown>).type === "text"
+    ))
+    : undefined;
+  if (textBlock !== undefined) {
+    const text = (textBlock as Record<string, unknown>).text;
+    if (typeof text !== "string") return null;
+    envelope = JSON.parse(text);
+  } else {
+    envelope = result.structuredContent;
+  }
+
+  if (typeof envelope !== "object" || envelope === null || Array.isArray(envelope)) return null;
+  const record = envelope as Record<string, unknown>;
+  const data = record.data;
+  if (record.ok !== true || typeof data !== "object" || data === null || Array.isArray(data)) return null;
+  const identity = data as Record<string, unknown>;
   if (
-    typeof data.gatewayBuild !== "string" ||
-    typeof data.toolsetEpoch !== "number" ||
-    typeof data.toolsCount !== "number" ||
-    typeof data.toolsDigest !== "string"
+    typeof identity.gatewayBuild !== "string" ||
+    typeof identity.toolsetEpoch !== "number" ||
+    typeof identity.toolsCount !== "number" ||
+    typeof identity.toolsDigest !== "string"
   ) return null;
   return {
-    gatewayBuild: data.gatewayBuild,
-    toolsetEpoch: data.toolsetEpoch,
-    toolsCount: data.toolsCount,
-    toolsDigest: data.toolsDigest,
+    gatewayBuild: identity.gatewayBuild,
+    toolsetEpoch: identity.toolsetEpoch,
+    toolsCount: identity.toolsCount,
+    toolsDigest: identity.toolsDigest,
   };
 }
 

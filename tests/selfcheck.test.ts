@@ -1,5 +1,10 @@
-import { describe, expect, it } from "vitest";
-import { renderSelfCheck, type SelfCheckResult } from "../src/selfcheck.ts";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { openDb } from "../src/db.ts";
+import type { Layout } from "../src/layout.ts";
+import { renderSelfCheck, selfCheck, type SelfCheckResult } from "../src/selfcheck.ts";
 
 /**
  * 遗留 #4 下半的渲染层。
@@ -26,6 +31,109 @@ const base = {
 } as SelfCheckResult;
 
 const text = (r: SelfCheckResult) => renderSelfCheck(r).join("\n");
+
+const identity = {
+  ok: true,
+  data: {
+    gatewayBuild: "build-from-wire",
+    toolsetEpoch: 2,
+    toolsCount: 1,
+    toolsDigest: "sha256:wire",
+  },
+};
+
+const toolsList = {
+  jsonrpc: "2.0",
+  id: 1,
+  result: {
+    tools: [{
+      name: "grande_task_status",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      inputSchema: { type: "object", properties: {}, required: [] },
+    }],
+  },
+};
+
+const cleanup: Array<() => void> = [];
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  while (cleanup.length > 0) cleanup.pop()!();
+});
+
+async function runSelfCheckWith(callResult: Record<string, unknown>): Promise<SelfCheckResult> {
+  const root = mkdtempSync(join(tmpdir(), "selfcheck-wire-"));
+  const controlRoot = join(root, "control");
+  const secrets = join(controlRoot, "secrets");
+  mkdirSync(secrets, { recursive: true });
+  const derivedRoot = join(root, "workspace", ".grande-work");
+  const layout: Layout = {
+    workspaceRoot: join(root, "workspace"),
+    controlRoot,
+    stateDb: join(controlRoot, "state", "grande.db"),
+    configDir: join(controlRoot, "config"),
+    reposConfig: join(controlRoot, "config", "repos.yaml"),
+    artifactsDir: join(controlRoot, "artifacts"),
+    derivedRoot,
+    worktreesRoot: join(derivedRoot, "worktrees"),
+  };
+  const db = openDb(layout);
+  cleanup.push(() => rmSync(root, { recursive: true, force: true }), () => db.close());
+
+  const responses = [toolsList, { jsonrpc: "2.0", id: 2, result: callResult }];
+  vi.stubGlobal("fetch", vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+    expect(init?.headers).toMatchObject({ authorization: expect.stringMatching(/^Bearer /) });
+    const next = responses.shift();
+    if (!next) throw new Error("unexpected selfcheck request");
+    return new Response(JSON.stringify(next), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }));
+
+  return await selfCheck({
+    issuer: "https://grande.example.test",
+    baseUrl: "https://gateway.example.test",
+    db,
+    keyPath: join(secrets, "oauth-key"),
+  });
+}
+
+describe("selfcheck tool-result compatibility", () => {
+  it("prefers the canonical text-content envelope when structuredContent is absent", async () => {
+    const result = await runSelfCheckWith({
+      content: [{ type: "text", text: JSON.stringify(identity) }],
+    });
+
+    expect(result.gatewayBuild).toBe("build-from-wire");
+    expect(result.toolsetEpoch).toBe(2);
+    expect(result.toolsCount).toBe(1);
+    expect(result.toolsDigest).toBe("sha256:wire");
+    expect(result.identityError).toBeUndefined();
+  });
+
+  it("falls back to a legacy structuredContent envelope", async () => {
+    const result = await runSelfCheckWith({ structuredContent: identity });
+
+    expect(result.gatewayBuild).toBe("build-from-wire");
+    expect(result.identityError).toBeUndefined();
+  });
+
+  it.each([
+    ["malformed", "{not-json"],
+    ["non-envelope", JSON.stringify({ data: identity.data })],
+  ])("fails closed on %s text instead of falling back to legacy structuredContent", async (_case, wireText) => {
+    const result = await runSelfCheckWith({
+      content: [{ type: "text", text: wireText }],
+      structuredContent: identity,
+    });
+
+    expect(result.gatewayBuild).toBeNull();
+    expect(result.toolsetEpoch).toBeNull();
+    expect(result.toolsDigest).toBeNull();
+    expect(result.identityError).toBeTruthy();
+  });
+});
 
 describe("自检输出必须能直接支撑 2026-07-29 那次排查", () => {
   it("按 readOnlyHint 分两组——那正是当时唯一的变量", () => {

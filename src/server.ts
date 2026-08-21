@@ -19,6 +19,7 @@ import {
   requestCorrelation,
   type McpCallMetrics,
 } from "./mcpTelemetry.ts";
+import { toMcpTextResult } from "./mcpToolResult.ts";
 
 export interface AppConfig {
   issuer: string;
@@ -438,12 +439,8 @@ export function createApp(cfg: AppConfig): Hono {
         try {
           const result = await tool.handler(args as Record<string, unknown>);
           const sc = result.structuredContent as Record<string, unknown>;
-          const serialized = JSON.stringify(sc);
           logTool(jsonByteLength(sc), sc.ok === true ? "ok" : "error");
-          return {
-            content: [{ type: "text" as const, text: serialized }],
-            structuredContent: sc,
-          };
+          return toMcpTextResult(sc);
         } catch (error) {
           // Preserve the SDK's existing tool-error response by rethrowing. The
           // callback nevertheless executed, so leave exactly one safe line.

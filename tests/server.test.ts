@@ -878,6 +878,52 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
     } finally { restore(); }
   });
 
+  it("authenticated tools/call exposes one canonical envelope copy in decoded JSON-RPC", async () => {
+    const marker = "AUTHENTICATED_MCP_SINGLE_ENVELOPE_MARKER";
+    const envelope = {
+      ok: true,
+      data: { nested: { marker, source: "real tools/call" } },
+      hint: "",
+    };
+    const buildToolsSpy = vi.spyOn(toolsModule, "buildTools").mockReturnValue([{
+      name: "grande_single_envelope",
+      description: "test-only canonical result tool",
+      inputSchema: { type: "object", properties: {} },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      handler: async () => ({ structuredContent: envelope }),
+    }]);
+    const token = await mintToken(app);
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 85, method: "tools/call",
+          params: { name: "grande_single_envelope", arguments: {} },
+        }),
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      const data = body.trim().startsWith("{")
+        ? body.trim()
+        : body.split("\n").filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim()).join("");
+      const rpc = JSON.parse(data) as {
+        result?: { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
+      };
+
+      expect(JSON.stringify(rpc.result).split(marker)).toHaveLength(2);
+      expect(rpc.result).not.toHaveProperty("structuredContent");
+      expect(JSON.parse(rpc.result?.content?.[0]?.text ?? "null")).toEqual(envelope);
+    } finally {
+      buildToolsSpy.mockRestore();
+    }
+  });
+
   it("tools/call does not log a real repo-edit body", async () => {
     const token = await mintToken(app);
     const [text, restore] = captureLog();
