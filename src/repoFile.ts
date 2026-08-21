@@ -20,6 +20,8 @@ export class EditError extends Error {
 
 export interface ReadResult {
   truncated: boolean;
+  nextLine: number | null;
+  lastLineTruncated: boolean;
   path: string;
   sha256: string;
   bytes: number;
@@ -105,23 +107,38 @@ export function repoRead(
   const full = raw.toString("utf8");
   const digest = sha256OfBuffer(raw);
   const lines = full.split("\n");
+  const actualTotalLines = lines.length - (full.endsWith("\n") ? 1 : 0);
 
   let body = full;
   let truncated = false;
+  let startLine = 1;
+  let endLine = actualTotalLines;
   if (opts?.lineRange) {
     const [from, to] = opts.lineRange;
     if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) {
       throw new EditError("INVALID_INPUT", `lineRange 非法：[${from}, ${to}]`);
     }
+    startLine = from;
+    endLine = Math.min(to, actualTotalLines);
     body = lines.slice(from - 1, to).join("\n");
     // full.split("\n") 在文件以换行结尾时会多出一个幻影空行（"a\n".split("\n") ===
     // ["a", ""]）；不扣掉它，读到真正的文件末尾也会被误判成 truncated。
-    truncated = from > 1 || to < lines.length - (full.endsWith("\n") ? 1 : 0);
+    truncated = from > 1 || to < actualTotalLines;
   }
 
   const capped = truncateText(body, maxBytes);
+  const returnedNewlines = capped.text.match(/\n/g)?.length ?? 0;
+  const returnedBytes = Buffer.byteLength(capped.text, "utf8");
+  const nextSourceByte = Buffer.from(body, "utf8")[returnedBytes];
+  const lastLineTruncated = capped.truncated && !capped.text.endsWith("\n") && nextSourceByte !== 0x0a;
+  const nextCandidate = capped.truncated
+    ? startLine + returnedNewlines + (capped.text.endsWith("\n") ? 0 : 1)
+    : endLine + 1;
+  const nextLine = nextCandidate <= actualTotalLines ? nextCandidate : null;
   return {
     truncated: truncated || capped.truncated,
+    nextLine,
+    lastLineTruncated,
     path: relativePath,
     sha256: digest,
     bytes: raw.byteLength,

@@ -9,7 +9,7 @@ import { createTask, getTask } from "../src/tasks.ts";
 import { createJob, finishJob, getJob } from "../src/jobs.ts";
 import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
-import { buildTools, TOOLSET_EPOCH, type ToolDeps } from "../src/tools.ts";
+import { buildTools, TOOLSET_EPOCH, toolsetIdentity, type ToolDef, type ToolDeps } from "../src/tools.ts";
 import { MCP_WRITE_TOOLS } from "../src/contract.ts";
 
 let ws: string, ctrl: string, layout: Layout, deps: ToolDeps;
@@ -184,15 +184,31 @@ describe("工具注解", () => {
     const tools = buildTools(deps);
     const read = tools.find((t) => t.name === "grande_repo_read")!;
     const search = tools.find((t) => t.name === "grande_repo_search")!;
-    const readLimit = read.inputSchema.properties.maxBytes as { description?: string };
-    const searchLimit = search.inputSchema.properties.maxMatches as { description?: string };
 
-    expect(`${read.description} ${readLimit.description ?? ""}`).toMatch(/16\s*KiB.*24\s*KiB/s);
-    expect(`${search.description} ${searchLimit.description ?? ""}`).toMatch(/20.*25.*16\s*KiB/s);
+    expect(read.description).toMatch(/16\s*KiB.*24\s*KiB/s);
+    expect(search.description).toMatch(/20.*25.*16\s*KiB/s);
     expect(TOOLSET_EPOCH).toBe(2);
   });
 
-  it("repo_read 截断时给出保留 taskId、path、maxBytes 的下一次 lineRange 精确调用", async () => {
+  it("Task 5 head 与 db5d020 base 的工具 contract digest 相同（只改顶层描述与运行时行为）", () => {
+    const head = buildTools(deps);
+    const base = head.map((tool): ToolDef => ({
+      ...tool,
+      inputSchema: structuredClone(tool.inputSchema),
+      annotations: { ...tool.annotations },
+    }));
+    const baseRead = base.find((tool) => tool.name === "grande_repo_read")!;
+    const baseSearch = base.find((tool) => tool.name === "grande_repo_search")!;
+    (baseRead.inputSchema.properties.maxBytes as { description: string }).description =
+      "最大返回字节数（默认64KB）";
+    (baseSearch.inputSchema.properties.maxMatches as { description: string }).description =
+      "单次返回的最大匹配数（默认50）";
+
+    expect(toolsetIdentity(head, "head").toolsDigest)
+      .toBe(toolsetIdentity(base, "db5d020").toolsDigest);
+  });
+
+  it("repo_read 用 nextLine 给出精确续读调用，续读到 EOF 后即使 truncated=true 也不再提示调用", async () => {
     const worktree = join(layout.worktreesRoot, "demo", "task_abcd");
     const full = Array.from({ length: 300 }, (_, i) => `${String(i + 1).padStart(3, "0")}:${"x".repeat(96)}`).join("\n");
     writeFileSync(join(worktree, "budget.ts"), full, "utf8");
@@ -201,9 +217,29 @@ describe("工具注解", () => {
 
     expect(r.ok).toBe(true);
     expect(r.truncated).toBe(true);
+    expect(r.data.lastLineTruncated).toBe(true);
+    expect(r.data.nextLine).toBe(164);
     expect(r.hint).toContain(
-      'grande_repo_read({"path":"budget.ts","lineRange":[163,300],"maxBytes":16384,"taskId":"task_abcd"})',
+      'grande_repo_read({"path":"budget.ts","lineRange":[164,300],"maxBytes":16384,"taskId":"task_abcd"})',
     );
+
+    const last = JSON.parse(await callTool("grande_repo_read", {
+      path: "budget.ts", lineRange: [164, 300], taskId: "task_abcd",
+    }));
+    expect(last.ok).toBe(true);
+    expect(last.truncated).toBe(true);
+    expect(last.data.nextLine).toBeNull();
+    expect(last.hint).not.toContain("grande_repo_read(");
+    expect(last.hint).toMatch(/文件末尾|EOF/);
+
+    writeFileSync(join(worktree, "one-long-line.ts"), "x".repeat(20 * 1024), "utf8");
+    const oneLine = JSON.parse(await callTool("grande_repo_read", {
+      path: "one-long-line.ts", taskId: "task_abcd",
+    }));
+    expect(oneLine.data.lastLineTruncated).toBe(true);
+    expect(oneLine.data.nextLine).toBeNull();
+    expect(oneLine.hint).toMatch(/仅返回前缀/);
+    expect(oneLine.hint).not.toContain("grande_repo_read(");
   });
 
   it("repo_read/repo_search 对越过硬上限的调用返回 INVALID_INPUT，不静默钳制", async () => {

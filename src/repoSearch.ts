@@ -1,5 +1,6 @@
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, sep } from "node:path";
+import { truncateText } from "./envelope.ts";
 
 export class SearchError extends Error {
   readonly code: string;
@@ -16,6 +17,7 @@ export interface SearchMatch {
   text: string;
   before: string[];
   after: string[];
+  contentTruncated: boolean;
 }
 
 export interface SearchResult {
@@ -34,6 +36,47 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 export const DEFAULT_SEARCH_MATCHES = 20;
 export const MAX_SEARCH_MATCHES = 25;
 export const MAX_SEARCH_RESULT_BYTES = 16 * 1024;
+const MAX_SEARCH_MATCH_BYTES = 8 * 1024;
+
+interface ParsedCursor {
+  fileIndex: number;
+  offset: number;
+  versioned: boolean;
+}
+
+function parseCursor(raw: string | null | undefined): ParsedCursor {
+  if (raw === undefined || raw === null || raw === "") return { fileIndex: 0, offset: 0, versioned: false };
+  if (/^\d+$/.test(raw)) return { fileIndex: 0, offset: Number(raw), versioned: false };
+  const match = /^v1:(\d+):(\d+)$/.exec(raw);
+  if (!match) throw new SearchError("INVALID_INPUT", `cursor 格式无效，收到：${raw}`);
+  const fileIndex = Number(match[1]);
+  const offset = Number(match[2]);
+  if (!Number.isSafeInteger(fileIndex) || !Number.isSafeInteger(offset)) {
+    throw new SearchError("INVALID_INPUT", `cursor 超出安全整数范围，收到：${raw}`);
+  }
+  return { fileIndex, offset, versioned: true };
+}
+
+function versionedCursor(fileIndex: number, offset: number): string {
+  return `v1:${fileIndex}:${offset}`;
+}
+
+function boundedMatch(match: Omit<SearchMatch, "contentTruncated">): SearchMatch {
+  const out: SearchMatch = { ...match, contentTruncated: false };
+  while (Buffer.byteLength(JSON.stringify(out), "utf8") > MAX_SEARCH_MATCH_BYTES) {
+    const fields = [
+      { value: out.text, set: (value: string) => { out.text = value; } },
+      ...out.before.map((value, index) => ({ value, set: (next: string) => { out.before[index] = next; } })),
+      ...out.after.map((value, index) => ({ value, set: (next: string) => { out.after[index] = next; } })),
+    ].sort((a, b) => Buffer.byteLength(JSON.stringify(b.value)) - Buffer.byteLength(JSON.stringify(a.value)));
+    const largest = fields[0];
+    if (!largest || largest.value.length === 0) break;
+    const bytes = Buffer.byteLength(largest.value, "utf8");
+    largest.set(truncateText(largest.value, Math.floor(bytes / 2)).text);
+    out.contentTruncated = true;
+  }
+  return out;
+}
 
 function listFiles(root: string, dir: string, out: string[], stats: { skippedOversized: number }): void {
   // 根目录读不到是调用方的错，要报出来；子目录读不到（权限/竞态删除）不该让
@@ -115,10 +158,8 @@ export function repoSearch(
     );
   }
   const budgetMs = opts?.budgetMs ?? 4000;
-  const offset = opts?.cursor ? Number.parseInt(opts.cursor, 10) : 0;
-  if (!Number.isInteger(offset) || offset < 0) {
-    throw new SearchError("INVALID_INPUT", `cursor 必须是非负整数，收到：${opts?.cursor}`);
-  }
+  const cursor = parseCursor(opts?.cursor);
+  const { fileIndex: startFileIndex, offset } = cursor;
   if (pattern.length === 0) throw new SearchError("INVALID_INPUT", "pattern 不能为空");
 
   // pattern 恒按字面量处理：escapeRegExp 把每个正则特殊字符都转义掉，理论上不应该
@@ -143,11 +184,14 @@ export function repoSearch(
 
   const found: SearchMatch[] = [];
   let timedOut = false;
+  let nextFileIndex = startFileIndex;
 
   // 需要收集 offset + maxMatches + 1 条才能既跳过已给出的、又判断还有没有更多
   const need = offset + maxMatches + 1;
 
-  outer: for (const abs of files) {
+  outer: for (let fileIndex = startFileIndex; fileIndex < files.length; fileIndex++) {
+    const abs = files[fileIndex]!;
+    nextFileIndex = fileIndex + 1;
     let content: string;
     try {
       content = readFileSync(abs, "utf8");
@@ -162,13 +206,13 @@ export function repoSearch(
     const rel = relative(root, abs).split(sep).join("/");
     for (let i = 0; i < lines.length; i++) {
       if (!re.test(lines[i]!)) continue;
-      found.push({
+      found.push(boundedMatch({
         path: rel,
         line: i + 1,
         text: lines[i]!,
         before: lines.slice(Math.max(0, i - CONTEXT_LINES), i),
         after: lines.slice(i + 1, i + 1 + CONTEXT_LINES),
-      });
+      }));
       if (found.length >= need) break outer;
     }
 
@@ -177,8 +221,10 @@ export function repoSearch(
     //    毫秒边界 —— 实测 100 次里有 8 次「还没超预算」，是一条会随机变红的测试；
     // ② 到点时已找到的结果留在 found 里，这才是「已找到的结果不丢」。
     if (Date.now() - started >= budgetMs) {
-      timedOut = true;
-      break;
+      if (nextFileIndex < files.length) {
+        timedOut = true;
+        break;
+      }
     }
   }
 
@@ -186,9 +232,21 @@ export function repoSearch(
   for (;;) {
     const consumed = offset + slice.length;
     const truncated = timedOut || consumed < found.length;
+    let nextCursor: string | null = null;
+    if (truncated) {
+      if (timedOut) {
+        nextCursor = consumed < found.length
+          ? versionedCursor(startFileIndex, consumed)
+          : versionedCursor(nextFileIndex, 0);
+      } else {
+        nextCursor = cursor.versioned
+          ? versionedCursor(startFileIndex, consumed)
+          : String(consumed);
+      }
+    }
     const result: SearchResult = {
       truncated,
-      nextCursor: truncated ? String(consumed) : null,
+      nextCursor,
       timedOut,
       skippedOversized: stats.skippedOversized,
       matches: slice,

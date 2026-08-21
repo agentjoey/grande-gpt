@@ -106,6 +106,31 @@ describe("repoRead()", () => {
     expect(r.sha256).toBe(sha(full));
     expect(r.bytes).toBe(Buffer.byteLength(full, "utf8"));
     expect(r.totalLines).toBe(300);
+    expect(r.lastLineTruncated).toBe(true);
+    expect(r.nextLine).toBe(164);
+
+    const last = repoRead(root, "budget.ts", { lineRange: [r.nextLine!, 300] });
+    expect(last.content).toMatch(/^164:/);
+    expect(last.content).toMatch(/300:x+$/);
+    expect(last.truncated).toBe(true); // 前缀未返回，但本次已经读到 EOF。
+    expect(last.lastLineTruncated).toBe(false);
+    expect(last.nextLine).toBeNull();
+  });
+
+  it("单行超过字节预算时只返回该行前缀并明确跳到下一行，不用同一 lineRange 原地重试", () => {
+    file("long-line.ts", `${"x".repeat(20 * 1024)}\nSECOND\n`);
+
+    const first = repoRead(root, "long-line.ts");
+
+    expect(first.truncated).toBe(true);
+    expect(first.lastLineTruncated).toBe(true);
+    expect(first.nextLine).toBe(2);
+    expect(Buffer.byteLength(first.content, "utf8")).toBe(16 * 1024);
+
+    const second = repoRead(root, "long-line.ts", { lineRange: [first.nextLine!, 2] });
+    expect(second.content).toBe("SECOND");
+    expect(second.lastLineTruncated).toBe(false);
+    expect(second.nextLine).toBeNull();
   });
 
   it("显式 24 KiB 上限被接受且不会把调用方请求静默压回默认 16 KiB", () => {

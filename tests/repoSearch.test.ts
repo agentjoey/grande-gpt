@@ -146,6 +146,22 @@ describe("repoSearch()", () => {
     expect(second.matches[0]!.path).toBe(`src/large-${first.matches.length}.ts`);
   });
 
+  it("单个匹配本身超过 16 KiB 时返回有损标记的有界表示，游标不会停在空页原地循环", () => {
+    const sourceLine = `NEEDLE-${"界".repeat(20_000)}`;
+    file("src/one-huge-match.ts", `${sourceLine}\n`);
+
+    const result = repoSearch(root, "NEEDLE");
+
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(16 * 1024);
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0]!.path).toBe("src/one-huge-match.ts");
+    expect(result.matches[0]!.text).toContain("NEEDLE");
+    expect(result.matches[0]!.text).not.toBe(sourceLine);
+    expect(result.matches[0]!.contentTruncated).toBe(true);
+    expect(result.truncated).toBe(false);
+    expect(result.nextCursor).toBeNull();
+  });
+
   it("顺序确定且是全局字典序（跨目录也成立）", () => {
     // 只在一个目录里放文件的话，DFS 顺序碰巧等于全局字典序，这条断言就抓不到东西。
     // src/ 与 src.ts 才是分水岭："." (0x2E) < "/" (0x2F)。
@@ -156,19 +172,23 @@ describe("repoSearch()", () => {
     expect(a).toEqual([...a].sort());
   });
 
-  it("时间预算到点即返回，标记 timedOut，且【已找到的结果不丢】、仍可续取", () => {
+  it("时间预算到点后用版本化游标从下一文件继续，连续页面有进展且不重不漏", () => {
     // budgetMs=0 保证第一次检查就超预算。关键断言是 timedOut 为 true 而不是抛错——
     // 撞上 ChatGPT 那个不可配置的 ~60s 超时的后果，比返回部分结果糟糕得多。
     for (let i = 0; i < 50; i++) file(`src/f${String(i).padStart(2, "0")}.ts`, "NEEDLE\n");
-    const r = repoSearch(root, "NEEDLE", { budgetMs: 0 });
-    expect(r.timedOut).toBe(true);
-    expect(r.truncated).toBe(true);
-    expect(r.matches).toHaveLength(1); // 已找到的不丢
-    expect(r.matches[0]!.path).toBe("src/f00.ts");
-    expect(r.nextCursor).toBe("1"); // 可续取
+    const first = repoSearch(root, "NEEDLE", { budgetMs: 0 });
+    const second = repoSearch(root, "NEEDLE", { budgetMs: 0, cursor: first.nextCursor });
+    const third = repoSearch(root, "NEEDLE", { budgetMs: 0, cursor: second.nextCursor });
 
-    const rest = repoSearch(root, "NEEDLE", { cursor: r.nextCursor, maxMatches: 25 });
-    expect(rest.matches.map((m) => m.path)).not.toContain("src/f00.ts");
+    for (const page of [first, second, third]) {
+      expect(page.timedOut).toBe(true);
+      expect(page.truncated).toBe(true);
+      expect(page.matches).toHaveLength(1);
+    }
+    expect([first, second, third].flatMap((page) => page.matches.map((m) => m.path)))
+      .toEqual(["src/f00.ts", "src/f01.ts", "src/f02.ts"]);
+    expect(first.nextCursor).toMatch(/^v1:/);
+    expect(new Set([first.nextCursor, second.nextCursor, third.nextCursor]).size).toBe(3);
   });
 
   it("超过大小上限的文件被跳过，但计数体现在 skippedOversized 里而不是静默消失", () => {

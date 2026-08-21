@@ -869,7 +869,7 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
       expect(line).toMatch(/\[tool\].*grande_repo_read/);
       expect(line).toMatch(/correlation=mcp:[0-9a-f]{12}/);
       expect(line).toContain("inputBytes=31");
-      expect(line).toContain("outputBytes=282");
+      expect(line).toContain("outputBytes=324");
       expect(line).toMatch(/argKeys=\[path,repoId\]/);
       expect(line).toMatch(/result=ok/);
       expect(line).toMatch(/durationMs=\d+/);
