@@ -69,7 +69,7 @@ export interface TrustedFinalizedHostVerifierJob extends OuterTestPlanDigestInpu
   hostToolchain: HostToolchainIdentity;
 }
 
-export interface TrustedHostVerifierSummary extends OuterTestPlanDigestInput {
+export interface TrustedHostVerifierSummary extends OuterTestPlanDigestInput, Record<string, unknown> {
   kind: "host-verifier-v2";
   mode: "manual" | "auto";
   repoId: string;

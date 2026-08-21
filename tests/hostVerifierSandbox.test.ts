@@ -62,6 +62,13 @@ describe("host verifier sandbox plan", () => {
     expect(profile).not.toContain('(allow process-exec)');
   });
 
+  it("may allow one trusted exact executable under writable job temp without allowing the directory", () => {
+    const hook = `${paths.jobTmp}/git-hook-probe/.git/hooks/pre-commit`;
+    const profile = buildHostVerifierSandboxPlan({ ...paths, executableFiles: [...paths.executableFiles, hook] }).profile;
+    expect(profile).toContain(`(allow process-exec (literal "${hook}"))`);
+    expect(profile).not.toContain(`(allow process-exec (subpath "${paths.jobTmp}"))`);
+  });
+
   it("explicitly denies trusted control/workspace/canonical/task/db paths", () => {
     const profile = buildHostVerifierSandboxPlan(paths).profile;
     for (const path of [

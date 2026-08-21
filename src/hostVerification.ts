@@ -39,7 +39,13 @@ export const TRUSTED_HOST_MANIFEST: readonly HostManifestEntry[] = [
   },
   {
     file: "tests/host/server.host.test.ts",
-    reason: "Exercises Gateway lifecycle and real loopback listener behavior.",
+    reason: "Retains the complete legacy Gateway host regression suite; some cases are not safe inside a second verifier boundary.",
+    levels: ["full"],
+    execution: "manualOnly",
+  },
+  {
+    file: "tests/host/server-auto.host.test.ts",
+    reason: "Auto-safe Gateway lifecycle smoke that consumes only the trusted parent loopback allocation.",
     levels: ["smoke", "full"],
     execution: "auto",
   },
@@ -67,6 +73,12 @@ export const TRUSTED_HOST_MANIFEST: readonly HostManifestEntry[] = [
     levels: ["full"],
     execution: "manualOnly",
   },
+  {
+    file: "tests/host/verifier-runtime.host.test.ts",
+    reason: "Validates the one-shot verifier from the trusted host layer, including exact-SHA execution and timeout/RSS process-group cleanup.",
+    levels: ["full"],
+    execution: "manualOnly",
+  },
 ] as const;
 
 const FULL_SOURCE_BASENAMES = new Set([
@@ -86,6 +98,8 @@ const FULL_SOURCE_BASENAMES = new Set([
   "server.ts",
   "main.ts",
   "hostVerification.ts",
+  "hostVerifier.ts",
+  "hostVerifierRuntime.ts",
   "hostVerifierSandbox.ts",
   "outerTest.ts",
   "outerTestReceipt.ts",
@@ -101,6 +115,8 @@ const MANUAL_ONLY_SOURCE_BASENAMES = new Set([
   "runner.ts",
   "jobs.ts",
   "hostVerification.ts",
+  "hostVerifier.ts",
+  "hostVerifierRuntime.ts",
   "hostVerifierSandbox.ts",
   "profiles.ts",
   "tools.ts",

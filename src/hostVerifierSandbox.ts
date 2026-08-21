@@ -116,8 +116,10 @@ function validatePaths(input: HostVerifierSandboxPaths): void {
   }
 
   for (const executable of input.executableFiles) {
-    if (!input.toolchainReadRoots.some((root) => isUnder(root, executable))) {
-      throw new Error(`executable is outside trusted toolchain read roots: ${executable}`);
+    const trustedToolchain = input.toolchainReadRoots.some((root) => isUnder(root, executable));
+    const trustedJobExact = isUnder(input.jobTmp, executable);
+    if (!trustedToolchain && !trustedJobExact) {
+      throw new Error(`executable is outside trusted toolchain/job temp roots: ${executable}`);
     }
   }
 }

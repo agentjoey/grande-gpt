@@ -28,11 +28,14 @@ describe("host verification classifier", () => {
       "src/githubAuth.ts",
       "src/server.ts",
       "src/hostVerification.ts",
+      "src/hostVerifier.ts",
+      "src/hostVerifierRuntime.ts",
       "src/hostVerifierSandbox.ts",
       "src/outerTestReceipt.ts",
       "src/prLifecycle.ts",
       "src/profiles.ts",
       "tests/host/verifier-sandbox.host.test.ts",
+      "tests/host/verifier-runtime.host.test.ts",
     ]) {
       expect(classifyHostVerification([file]), file).toBe("full");
     }
@@ -80,16 +83,20 @@ describe("host verification classifier", () => {
       "src/runner.ts",
       "src/jobs.ts",
       "src/hostVerification.ts",
+      "src/hostVerifier.ts",
+      "src/hostVerifierRuntime.ts",
       "src/hostVerifierSandbox.ts",
       "src/tools.ts",
       "tests/host/sandbox.host.test.ts",
       "tests/host/verifier-sandbox.host.test.ts",
+      "tests/host/verifier-runtime.host.test.ts",
     ]) {
       const plan = planHostVerification([file]);
       expect(plan.level, file).toBe("full");
       expect(plan.manualOnlyRequired, file).toBe(true);
       expect(plan.manualOnlyFiles.length, file).toBeGreaterThan(0);
       expect(plan.autoFiles, file).not.toContain("tests/host/sandbox.host.test.ts");
+      expect(plan.autoFiles, file).not.toContain("tests/host/verifier-runtime.host.test.ts");
     }
   });
 });
@@ -107,18 +114,20 @@ describe("trusted host manifest", () => {
     }
   });
 
-  it("marks host cases that would create a second Seatbelt boundary manual-only", () => {
+  it("marks host cases that would create or validate the verifier boundary manual-only", () => {
     const byFile = new Map(TRUSTED_HOST_MANIFEST.map((entry) => [entry.file, entry]));
     for (const file of [
       "tests/host/sandbox.host.test.ts",
       "tests/host/runner.host.test.ts",
+      "tests/host/server.host.test.ts",
       "tests/host/tools.host.test.ts",
       "tests/host/e2e.host.test.ts",
       "tests/host/verifier-sandbox.host.test.ts",
+      "tests/host/verifier-runtime.host.test.ts",
     ]) {
       expect(byFile.get(file)?.execution, file).toBe("manualOnly");
     }
-    expect(byFile.get("tests/host/server.host.test.ts")?.execution).toBe("auto");
+    expect(byFile.get("tests/host/server-auto.host.test.ts")?.execution).toBe("auto");
     expect(byFile.get("tests/host/git-hook.host.test.ts")?.execution).toBe("auto");
   });
 
@@ -139,13 +148,17 @@ describe("trusted host manifest", () => {
     const full = hostFilesForLevel("full");
     const auto = hostFilesForLevel("full", "auto");
     const manualOnly = hostFilesForLevel("full", "manualOnly");
-    expect(auto).toContain("tests/host/server.host.test.ts");
+    expect(auto).toContain("tests/host/server-auto.host.test.ts");
     expect(auto).toContain("tests/host/git-hook.host.test.ts");
+    expect(auto).not.toContain("tests/host/server.host.test.ts");
     expect(auto).not.toContain("tests/host/sandbox.host.test.ts");
     expect(auto).not.toContain("tests/host/verifier-sandbox.host.test.ts");
+    expect(auto).not.toContain("tests/host/verifier-runtime.host.test.ts");
+    expect(manualOnly).toContain("tests/host/server.host.test.ts");
     expect(manualOnly).toContain("tests/host/sandbox.host.test.ts");
     expect(manualOnly).toContain("tests/host/runner.host.test.ts");
     expect(manualOnly).toContain("tests/host/verifier-sandbox.host.test.ts");
+    expect(manualOnly).toContain("tests/host/verifier-runtime.host.test.ts");
     expect(new Set([...auto, ...manualOnly])).toEqual(new Set(full));
   });
 

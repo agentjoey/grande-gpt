@@ -8,7 +8,16 @@ import { safeGit } from "../../src/gitExec.ts";
 let root: string;
 
 beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), "grande-host-git-hook-probe-"));
+  if (process.env.GRANDE_VERIFIER_LOOPBACK_PORTS !== undefined) {
+    // The restricted verifier must know every executable path before Seatbelt starts.
+    // Use a deterministic path under its trusted TMPDIR so the parent can allow only
+    // this exact hook literal rather than granting process-exec to a writable directory.
+    root = join(tmpdir(), "git-hook-probe");
+    rmSync(root, { recursive: true, force: true });
+    mkdirSync(root, { recursive: true });
+  } else {
+    root = mkdtempSync(join(tmpdir(), "grande-host-git-hook-probe-"));
+  }
 });
 
 afterEach(() => {
