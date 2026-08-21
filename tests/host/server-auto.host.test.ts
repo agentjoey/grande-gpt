@@ -53,6 +53,9 @@ describe("auto-safe Gateway loopback smoke", () => {
     process.env.PORT = String(trustedPort());
     const layout = loadLayout();
     ensureLayout(layout);
+    // Production provisioners own the real control-plane secrets directory. This
+    // isolated host fixture must create its own fake equivalent before OAuth startup.
+    mkdirSync(join(layout.controlRoot, "secrets"), { recursive: true });
     const db = openDb(layout);
     const config: AppConfig = {
       issuer: "https://verifier.invalid",

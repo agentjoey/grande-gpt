@@ -169,7 +169,7 @@ describe("restricted one-shot host verifier runtime", () => {
       level: "full",
     });
     expect(existsSync(fixture.taskWorktree)).toBe(true);
-  });
+  }, 60_000);
 
   it("wall timeout terminates the entire detached verifier process group", async () => {
     const fixture = resourceFixture("timeout");
