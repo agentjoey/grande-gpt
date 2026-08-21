@@ -367,7 +367,8 @@ describe("E2E：完整工具闭环", () => {
       expect(Buffer.byteLength(JSON.stringify(data), "utf8")).toBeLessThanOrEqual(16 * 1024);
       seen.push(...data.matches.map((match) => match.path));
       if (!data.truncated) break;
-      expect(data.nextCursor).toBe(String(seen.length));
+      expect(data.nextCursor).toMatch(/^v2:/);
+      expect(data.nextCursor).not.toBe(cursor);
       cursor = data.nextCursor;
     }
 

@@ -9,7 +9,7 @@ import { createTask, getTask } from "../src/tasks.ts";
 import { createJob, finishJob, getJob } from "../src/jobs.ts";
 import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
-import { buildTools, TOOLSET_EPOCH, toolsetIdentity, type ToolDef, type ToolDeps } from "../src/tools.ts";
+import { buildTools, TOOLSET_EPOCH, toolsetIdentity, type ToolDeps } from "../src/tools.ts";
 import { MCP_WRITE_TOOLS } from "../src/contract.ts";
 
 let ws: string, ctrl: string, layout: Layout, deps: ToolDeps;
@@ -190,22 +190,32 @@ describe("工具注解", () => {
     expect(TOOLSET_EPOCH).toBe(2);
   });
 
-  it("Task 5 head 与 db5d020 base 的工具 contract digest 相同（只改顶层描述与运行时行为）", () => {
-    const head = buildTools(deps);
-    const base = head.map((tool): ToolDef => ({
+  it("assembled tool contract 保持 db5d020 在固定 gateway build 下的历史 digest", () => {
+    const assembled = buildTools(deps);
+    const pinnedDigest = "sha256:62c1d93894112442740f01ec30aeefdea0229ef7fc6db583eb63c06c0aef46a1";
+    expect(toolsetIdentity(assembled, "db5d020-test-build")).toEqual({
+      gatewayBuild: "db5d020-test-build",
+      toolsetEpoch: 2,
+      toolsCount: 25,
+      toolsDigest: pinnedDigest,
+    });
+
+    const schemaDrift = assembled.map((tool) => ({
       ...tool,
       inputSchema: structuredClone(tool.inputSchema),
       annotations: { ...tool.annotations },
     }));
-    const baseRead = base.find((tool) => tool.name === "grande_repo_read")!;
-    const baseSearch = base.find((tool) => tool.name === "grande_repo_search")!;
-    (baseRead.inputSchema.properties.maxBytes as { description: string }).description =
-      "最大返回字节数（默认64KB）";
-    (baseSearch.inputSchema.properties.maxMatches as { description: string }).description =
-      "单次返回的最大匹配数（默认50）";
+    const read = schemaDrift.find((tool) => tool.name === "grande_repo_read")!;
+    (read.inputSchema.properties.maxBytes as { description: string }).description += " drift";
+    expect(toolsetIdentity(schemaDrift, "db5d020-test-build").toolsDigest).not.toBe(pinnedDigest);
 
-    expect(toolsetIdentity(head, "head").toolsDigest)
-      .toBe(toolsetIdentity(base, "db5d020").toolsDigest);
+    const annotationDrift = assembled.map((tool) => ({
+      ...tool,
+      inputSchema: structuredClone(tool.inputSchema),
+      annotations: { ...tool.annotations },
+    }));
+    annotationDrift[0]!.annotations.readOnlyHint = !annotationDrift[0]!.annotations.readOnlyHint;
+    expect(toolsetIdentity(annotationDrift, "db5d020-test-build").toolsDigest).not.toBe(pinnedDigest);
   });
 
   it("repo_read 用 nextLine 给出精确续读调用，续读到 EOF 后即使 truncated=true 也不再提示调用", async () => {
