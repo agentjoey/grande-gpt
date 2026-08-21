@@ -239,11 +239,14 @@ describe("load-bearing host verifier feasibility", () => {
       const connect = (host, port) => new Promise((resolve) => {
         const socket = net.connect({host, port: Number(port)});
         const timer = setTimeout(() => { socket.destroy(); resolve('TIMEOUT'); }, 1500);
-        socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve('CONNECTED'); });
+        socket.once('connect', () => { clearTimeout(timer); socket.end(); resolve('CONNECTED'); });
         socket.once('error', (error) => { clearTimeout(timer); resolve(error.code || 'ERROR'); });
       });
       (async () => {
-        const server = net.createServer((socket) => socket.end('loopback'));
+        const server = net.createServer((socket) => {
+          socket.on('error', () => {});
+          socket.end('loopback');
+        });
         await new Promise((resolve, reject) => { server.once('error', reject); server.listen(Number(trustedPort), '127.0.0.1', resolve); });
         const loopback = await connect('127.0.0.1', trustedPort);
         const lan = await connect(lanHost, trustedPort);

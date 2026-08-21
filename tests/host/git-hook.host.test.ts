@@ -9,9 +9,6 @@ let root: string;
 
 beforeEach(() => {
   if (process.env.GRANDE_VERIFIER_LOOPBACK_PORTS !== undefined) {
-    // The restricted verifier must know every executable path before Seatbelt starts.
-    // Use a deterministic path under its trusted TMPDIR so the parent can allow only
-    // this exact hook literal rather than granting process-exec to a writable directory.
     root = join(tmpdir(), "git-hook-probe");
     rmSync(root, { recursive: true, force: true });
     mkdirSync(root, { recursive: true });
@@ -42,6 +39,7 @@ describe("load-bearing Safe Git hook suppression", () => {
     rawGit(repo, "config", "user.email", "verifier@example.invalid");
     const gitDir = rawGit(repo, "rev-parse", "--git-dir").trim();
     const hook = join(repo, gitDir, "hooks", "pre-commit");
+    mkdirSync(join(repo, gitDir, "hooks"), { recursive: true });
     writeFileSync(hook, `#!/bin/sh\nprintf hook > ${JSON.stringify(marker)}\n`, "utf8");
     chmodSync(hook, 0o755);
 
