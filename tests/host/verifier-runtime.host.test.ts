@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDb } from "../../src/db.ts";
 import { buildHostVerifierStaticPlan, type HostVerifierRequest, type HostVerifierStaticPlan } from "../../src/hostVerifier.ts";
 import { createDefaultHostVerifierRuntimeAdapter, createHostVerifierLauncher } from "../../src/hostVerifierRuntime.ts";
-import { getJob } from "../../src/jobs.ts";
+import { getJob, type JobRow } from "../../src/jobs.ts";
 import { ensureLayout, loadLayout, type Layout } from "../../src/layout.ts";
 import { getOuterTestReceipt } from "../../src/outerTestReceipt.ts";
 import { saveRegistry } from "../../src/registry.ts";
@@ -138,6 +138,20 @@ async function waitForGroupGone(pgid: number): Promise<boolean> {
   return false;
 }
 
+function jobDiagnostic(job: JobRow): string {
+  let artifactTail = "<no artifact>";
+  if (job.artifactPath && existsSync(job.artifactPath)) {
+    const artifact = readFileSync(job.artifactPath, "utf8");
+    artifactTail = artifact.slice(-16_000);
+  }
+  return [
+    `nested verifier state=${job.state} exitCode=${String(job.exitCode)} pgid=${String(job.pgid)}`,
+    `summary=${JSON.stringify(job.summary)}`,
+    "--- nested artifact tail ---",
+    artifactTail,
+  ].join("\n");
+}
+
 afterEach(() => {
   for (const fixture of fixtures.splice(0)) {
     try { fixture.db.close(); } catch { /* already closed */ }
@@ -158,7 +172,7 @@ describe("restricted one-shot host verifier runtime", () => {
     await started.settled;
 
     const job = getJob(fixture.db, started.jobId)!;
-    expect(job.state).toBe("passed");
+    expect(job.state, jobDiagnostic(job)).toBe("passed");
     expect(job.exitCode).toBe(0);
     expect(job.pgid).toBeGreaterThan(0);
     expect(job.artifactPath).toBeTruthy();
