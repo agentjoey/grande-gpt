@@ -1,45 +1,42 @@
 # Host Verifier Feasibility Gate — 2026-08-21
 
-## Scope
+Task: `task-reliability-hostverifier-20260821-001`
 
-This evidence belongs to `task-reliability-hostverifier-20260821-001`, Slice B2 of the approved Reliability & Automated Host Verifier plan. It records what has and has not been proven. It is intentionally not an activation record.
+## Gate purpose
 
-## Code-layer evidence
+Slice B requires real trusted-host evidence for four load-bearing properties before Slice C is allowed:
 
-The restricted verifier policy builder and the trusted real-host probe suite are implemented. The builder has no argv/cwd/profile/environment escape hatch, separates readable toolchain roots from exact executable files, keeps candidate source/dependencies read-only, limits writes to per-job temp, constructs a fresh environment, allows loopback only, and explicitly denies the production Gateway port and real trusted roots.
+1. nested Seatbelt produces a true inner allow/deny result;
+2. a real Git hook executes without Safe Git overrides and is suppressed by Safe Git;
+3. ephemeral loopback works while LAN/non-loopback and the production Gateway port are denied;
+4. timeout kills the whole process group with no residual orphan.
 
-TDD evidence for the current B2 work:
+The trusted host suite also contains negative probes for control/workspace/canonical/task/DB/credential-store reads and inherited credential/proxy/SSH state.
 
-- RED: `job_a53078a0-7c05-444a-942e-66f957259849` — `unit-selfhost` failed because `src/hostVerifierSandbox.ts` did not yet exist.
-- GREEN: `job_f50be8b6-5ea8-49de-981d-0e82e2a26ea0` — `unit-selfhost`, 78 files / 725 tests passed.
-- GREEN: `job_debb6213-9237-4be1-ad54-bc52084755b1` — `typecheck` passed.
+## Evidence history
 
-The trusted host manifest now includes `tests/host/verifier-sandbox.host.test.ts`. That file contains the required real-host probes:
+### Initial real-host run
 
-1. nested Seatbelt: outer verifier policy allows both fixture files while an inner Seatbelt policy allows one and denies the other;
-2. Git hook marker: a real pre-commit hook must execute under raw Git, then the same marker must not execute through `safeGit.local`;
-3. network isolation: an ephemeral loopback listener/connect must succeed, a connection to this host's non-loopback LAN address must be denied, and `127.0.0.1:<production-port>` must be denied;
-4. process-group cleanup: a sandboxed orphan child is created, timeout kills the detached process group, and the child PID must no longer exist.
+The existing host suites passed, but three new `runVerifierNode()` probes failed before their assertions ran. All three returned `status=null` with:
 
-The same host file also checks denial of the real control root, workspace root, canonical repository, current task worktree, state DB, another real workspace repository, at least one real SSH/keychain credential-store path, and inherited secret/proxy/SSH-agent state. Probe output is boolean/status-only; it does not print secrets or trusted absolute paths.
+`[low_level_alloc.cc : 437] RAW: Check sum >= a failed: LowLevelAlloc arithmetic overflow`
 
-## Human Gate status
+The common path was the new verifier SBPL launching Node. The established sandbox profile already allowed `sysctl-read`, and prior Seatbelt research records that Node/V8 startup uses sysctl reads and can otherwise fail with misleading startup errors.
 
-**REAL-HOST EVIDENCE: NOT YET PROVEN.**
+A minimal regression test was added requiring `(allow sysctl-read)` while still forbidding `process-fork` and broad signal permissions. RED was observed in `job_93fc0b9a-c066-4af5-b56d-4bea1719a97b`; adding only `sysctl-read` restored `unit-selfhost` and `typecheck` and was committed as `9506e33f3c0cea5b4e2a894c9130ff6b08cfa878`.
 
-The current ChatGPT/GrandeGPT connector exposes sandboxed `grande_run` profiles but no trusted-host `outer-test --run` execution capability. Running these probes through `unit-selfhost` would be invalid evidence because the outer sandbox can neutralize exactly the properties under test. No PASS is claimed for any of the four load-bearing real-host probes.
+### Second real-host run
 
-Per the approved plan, Slice C MUST NOT start until the real trusted host run passes all four load-bearing probes.
+The failure signature changed: Node now started normally (`status=1` instead of `null`) but reported `MODULE_NOT_FOUND` for probe scripts under `/var/folders/...`.
 
-The unique Owner action is to run the following from the task worktree on the real host and return the complete bounded test summary:
+Root cause: `tmpdir()` produced `/var/...` paths, while the verifier policy was deliberately constructed from `realpathSync(...)` paths under `/private/var/...`. Seatbelt matches runtime path spelling against profile paths; the probe passed the non-canonical `/var/...` script path to Node while only `/private/var/...` was allowed.
 
-```bash
-cd /Users/xtation/AgentWorks/GPT_Workspace/.grande-work/worktrees/grande-gpt/task-reliability-hostverifier-20260821-001
-GRANDE_WORKSPACE=/Users/xtation/AgentWorks/GPT_Workspace \
-node --disable-warning=ExperimentalWarning src/cli.ts \
-  outer-test --task task-reliability-hostverifier-20260821-001 --run
-```
+The probe fixture was corrected to canonicalize source/dependency/job-temp paths immediately after creation and to use those exact paths for policy construction, cwd, script argv, and probe files. No file-read or execution permission was broadened.
 
-Required outcome: all trusted host files pass, including all cases in `tests/host/verifier-sandbox.host.test.ts`, and the CLI records a host outer-test receipt for the exact current task HEAD.
+## Current gate state
 
-Until that evidence exists, `hostVerification.mode` remains manual and no Slice C/D automation or production activation is permitted.
+The four real-host properties are **not yet claimed PASS** after the canonical-path fix. A fresh trusted-host run against the new clean exact SHA is still required. Until that run passes:
+
+- Slice C must not start;
+- merge must not occur;
+- `hostVerification.mode` remains `manual`.

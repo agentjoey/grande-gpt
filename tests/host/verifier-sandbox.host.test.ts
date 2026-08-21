@@ -35,12 +35,27 @@ function permissionDenied(code: unknown): boolean {
 
 function makeVerifierFixture() {
   const layout = loadLayout();
-  const source = join(root, "source");
-  const deps = join(root, "deps");
-  const jobTmp = join(root, "job");
-  for (const dir of [source, deps, jobTmp, join(jobTmp, "home"), join(jobTmp, "tmp"), join(jobTmp, "cache")]) {
+  const rawSource = join(root, "source");
+  const rawDeps = join(root, "deps");
+  const rawJobTmp = join(root, "job");
+  for (const dir of [
+    rawSource,
+    rawDeps,
+    rawJobTmp,
+    join(rawJobTmp, "home"),
+    join(rawJobTmp, "tmp"),
+    join(rawJobTmp, "cache"),
+  ]) {
     mkdirSync(dir, { recursive: true });
   }
+
+  // macOS exposes /var and /tmp as symlink aliases of /private/var and /private/tmp.
+  // Seatbelt matches the path spelling used at runtime against profile literals/subpaths;
+  // the verifier plan is intentionally built from real paths, so the argv/cwd used by
+  // the probe must use those same canonical spellings rather than the tmpdir() alias.
+  const source = realpathSync(rawSource);
+  const deps = realpathSync(rawDeps);
+  const jobTmp = realpathSync(rawJobTmp);
   const node = realpathSync(process.execPath);
   const toolchainReadRoots = [...new Set([dirname(node), "/usr/bin", "/bin"])]
     .map((path) => realpathSync(path));
@@ -51,9 +66,9 @@ function makeVerifierFixture() {
     realpathSync("/bin/cat"),
   ])];
   const plan = buildHostVerifierSandboxPlan({
-    verifierWorktree: realpathSync(source),
-    dependencyRoots: [realpathSync(deps)],
-    jobTmp: realpathSync(jobTmp),
+    verifierWorktree: source,
+    dependencyRoots: [deps],
+    jobTmp,
     controlRoot: layout.controlRoot,
     workspaceRoot: layout.workspaceRoot,
     canonicalRepo: realpathSync(join(layout.workspaceRoot, "grande-gpt")),
