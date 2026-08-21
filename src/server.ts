@@ -14,6 +14,11 @@ import { buildTools, type ToolDef } from "./tools.ts";
 import { createAccessGate, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
 import { assertDistinctAudience } from "./consoleAuth.ts";
 import { mountConsoleRoutes } from "./consoleRoutes.ts";
+import {
+  jsonByteLength,
+  requestCorrelation,
+  type McpCallMetrics,
+} from "./mcpTelemetry.ts";
 
 export interface AppConfig {
   issuer: string;
@@ -395,6 +400,10 @@ export function createApp(cfg: AppConfig): Hono {
     const modernFallback = await modernDiscoverFallback(c);
     if (modernFallback) return modernFallback;
 
+    // Keep this per-request value outside the SDK callback. The helper reads
+    // only Mcp-Session-Id; Authorization and the raw request body never enter
+    // telemetry or its digest.
+    const correlation = requestCorrelation(c.req.raw.headers);
     const transport = new WebStandardStreamableHTTPServerTransport();
     const mcpServer = new McpServer(
       { name: "grande-gpt", version: "0.0.0" },
@@ -416,15 +425,19 @@ export function createApp(cfg: AppConfig): Hono {
         const result = await tool.handler(args as Record<string, unknown>);
         const sc = result.structuredContent as Record<string, unknown>;
         const ok = sc.ok === true;
-        const detail = ok
-          ? (sc.truncated === true ? " truncated" : "")
-          : ` ${(sc.error as { code?: string } | undefined)?.code ?? "?"}`;
         // Arguments may contain complete file bodies, PR text, deployment data,
         // or credentials accidentally supplied to a wrong field. Keep enough
         // metadata to diagnose tool selection without persisting caller values.
-        const argSummary = JSON.stringify({ keys: Object.keys(args).sort() });
+        const metrics: McpCallMetrics = {
+          correlation,
+          inputBytes: jsonByteLength(args),
+          outputBytes: jsonByteLength(sc),
+        };
+        const argKeys = Object.keys(args).sort().join(",");
         console.log(
-          `[tool] ${ts()} ${tool.name} ${argSummary} → ${ok ? "ok" : "ERR"}${detail} (${Date.now() - t0}ms)`,
+          `[tool] ${ts()} ${tool.name} correlation=${metrics.correlation} inputBytes=${metrics.inputBytes} ` +
+          `outputBytes=${metrics.outputBytes} argKeys=[${argKeys}] result=${ok ? "ok" : "error"} ` +
+          `durationMs=${Date.now() - t0}`,
         );
         return {
           content: [{ type: "text" as const, text: JSON.stringify(sc) }],

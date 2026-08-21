@@ -840,24 +840,66 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
     } finally { restore(); }
   });
 
-  it("工具日志只记安全元数据，不回显文件路径、内容或其他任意参数值", async () => {
+  it("tools/call 记录可关联的大小与状态元数据，但绝不回显请求秘密", async () => {
     const token = await mintToken(app);
     const [text, restore] = captureLog();
-    const secret = "SECRET_TOOL_ARGUMENT_MUST_NOT_REACH_LOGS";
+    const fileContentMarker = "FILE_CONTENT_MARKER_MUST_NOT_REACH_LOGS";
+    const rawSessionMarker = "RAW_SESSION_MARKER_MUST_NOT_REACH_LOGS";
     try {
       const response = await app.request("/mcp", {
         method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-session-id": rawSessionMarker,
+        },
         body: JSON.stringify({
           jsonrpc: "2.0", id: 81, method: "tools/call",
-          params: { name: "grande_repo_read", arguments: { path: secret } },
+          params: {
+            name: "grande_repo_read",
+            arguments: { repoId: REPO, path: fileContentMarker },
+          },
         }),
       });
       await response.text();
       const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
-      expect(toolLines.join("\n")).toContain("grande_repo_read");
-      expect(toolLines.join("\n")).toContain("path");
-      expect(toolLines.join("\n")).not.toContain(secret);
+      expect(toolLines).toHaveLength(1);
+      const line = toolLines[0];
+      expect(line).toMatch(/\[tool\].*grande_repo_read/);
+      expect(line).toMatch(/correlation=mcp:[0-9a-f]{12}/);
+      expect(line).toMatch(/inputBytes=\d+/);
+      expect(line).toMatch(/outputBytes=\d+/);
+      expect(line).toMatch(/argKeys=\[path,repoId\]/);
+      expect(line).toMatch(/result=error/);
+      expect(line).toMatch(/durationMs=\d+/);
+      expect(line).not.toContain(token);
+      expect(line).not.toContain(fileContentMarker);
+      expect(line).not.toContain(rawSessionMarker);
+    } finally { restore(); }
+  });
+
+  it("tools/call without an MCP session logs correlation=none", async () => {
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 82, method: "tools/call",
+          params: { name: "grande_repo_read", arguments: { repoId: REPO, path: "a.ts" } },
+        }),
+      });
+      await response.text();
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain("correlation=none");
+      expect(toolLines[0]).not.toMatch(/correlation=(?!none)/);
     } finally { restore(); }
   });
 
