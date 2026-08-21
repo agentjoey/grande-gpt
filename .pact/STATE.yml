@@ -150,7 +150,7 @@ features:
         evidence: TDD RED observed; GREEN: tests/guidance.test.ts 4/4 passed; commit 2217bc7; independent review found no issues.
       - id: binding-a-2-telemetry
         owner: w1
-        status: awaiting_review
+        status: accepted
         reviewer: rev
         spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
         evidence: TDD RED observed; GREEN after fix round 1: mcpTelemetry+server 47/47 and typecheck passed; commits 94fce35,5b61314; all three review findings addressed.
