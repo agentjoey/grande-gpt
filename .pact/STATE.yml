@@ -144,7 +144,7 @@ features:
     tasks:
       - id: binding-a-1-docs
         owner: w1
-        status: assigned
+        status: in_progress
         reviewer: rev
         spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
         evidence: null
