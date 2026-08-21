@@ -40,7 +40,9 @@ GrandeGPT 定位于个人开发者、小团队和中小型项目。它不是通�
 
 ### 2.5 不把等待包装成同步长调用
 
-host verification、CI 和 deployment verify 以异步 job 表达。MCP 调用不得同步阻塞几十秒到数分钟；agent 通过现有 status/result 工具继续轮询并推进，不需要用户介入。
+host verification、CI 和 deployment verify 以异步 job 表达，异步 job 仍保持异步。MCP 调用不得同步阻塞几十秒到数分钟；job 创建后立即返回 `jobId` 和下一步提示。客户端收到提示后只发起一次 `grande_run_result`；result handler 可以在一个短、有界的 interval 内等待终态，若仍未完成则再次返回 `running` 与下一步提示。status/result 轮询必须有界并合并（coalesced）：同一逻辑状态不重复请求或重复传输，等待中的 agent 可推进独立工作，不需要用户介入。
+
+每个会话都受 conversation/output budget 约束：source、search 和 diff 使用分页或行范围；有紧凑操作可用时不传整文件重写；同一逻辑 payload 只能存在于 MCP `content` 或 `structuredContent` 之一，绝不在两者重复返回。该约束减少可控的上下文压力；观察到的调用次数是调查样本，不是固定配额结论。
 
 ## 3. 目标与非目标
 
@@ -78,7 +80,8 @@ host verification、CI 和 deployment verify 以异步 job 表达。MCP 调用�
        └─ receipt 缺失
             → Gateway 调度 host verifier job
             → tool 返回 VERIFYING + jobId，不阻塞 MCP
-            → agent 通过 status/result 等待
+            → client 按提示发起一次 result 请求；handler 短暂有界等待
+            → 未终态则返回 coalesced running 状态与下一步提示，agent 推进独立工作
             → verifier pass：Gateway 签发 exact-SHA receipt
             → agent 再次调用 grande_pr_merge
   → canonical safe refresh
