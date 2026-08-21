@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { getAttestations } from "./attestation.ts";
 import { listAudit } from "./audit.ts";
+import { safeGit } from "./gitExec.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
 import type { TaskRow } from "./tasks.ts";
 
@@ -49,11 +49,7 @@ interface ReceiptProjection {
 const ACTIVE_PROGRESS = new Set<ProgressState>(["running"]);
 
 function git(worktreePath: string, args: string[]): string {
-  return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-    cwd: worktreePath,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
+  return safeGit.local(worktreePath, args).trim();
 }
 
 function defaultReadHead(worktreePath: string): string {
@@ -61,7 +57,7 @@ function defaultReadHead(worktreePath: string): string {
 }
 
 function defaultFilesChanged(task: TaskRow): number {
-  const output = git(task.worktreePath, ["diff", "--name-only", task.baseCommit, "--"]);
+  const output = safeGit.diff(task.worktreePath, ["diff", "--name-only", task.baseCommit, "--"]).trim();
   const committedOrTracked = output ? output.split("\n").filter(Boolean) : [];
   const untracked = git(task.worktreePath, ["ls-files", "--others", "--exclude-standard"]);
   const untrackedPaths = untracked ? untracked.split("\n").filter(Boolean) : [];

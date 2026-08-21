@@ -1,11 +1,10 @@
-import { execFileSync } from "node:child_process";
 import { getAttestations } from "./attestation.ts";
 import { beginAudit, type AuditHandle } from "./audit.ts";
 import { err, ok } from "./envelope.ts";
 import { StateError, redact, toToolError } from "./errors.ts";
 import { createGithubApi, GithubApiError, type GithubApi } from "./githubApi.ts";
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
-import { githubGitArgv } from "./push.ts";
+import { safeGit } from "./gitExec.ts";
 import { assertTaskBranch } from "./commit.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
@@ -23,14 +22,9 @@ export interface PrOpenToolOptions {
 
 function git(worktreePath: string, args: string[], token: string): string {
   try {
-    return execFileSync("git", githubGitArgv(args, token), {
-      cwd: worktreePath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    return safeGit.github(worktreePath, args, token);
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    const detail = redactToken(e.stderr ? String(e.stderr).trim() : e.message, token);
+    const detail = redactToken(error instanceof Error ? error.message : String(error), token);
     throw new StateError("INVALID_INPUT", `git ${args[0] ?? "命令"} 失败：${detail}`);
   }
 }
@@ -193,7 +187,6 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
           .find((candidate) => candidate.commit === remote.commit)?.attestationId ?? "none";
         const trustedBody = buildPullRequestBody(body, taskId, attestationId, remote.commit);
 
-        // S6：非 Draft 是固定策略，不读取调用方 draft 参数；旧 S3 的人工 Ready 断点在此被移除。
         const created = await api.createPullRequest({
           owner,
           repo,

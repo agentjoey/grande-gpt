@@ -10,6 +10,7 @@ import { addLocalLoopTools } from "./localLoopTools.ts";
 import { addOnboardingTools } from "./onboardingTools.ts";
 import { addPrLifecycleTools } from "./prLifecycle.ts";
 import { registeredIds } from "./registry.ts";
+import { withRepoWriteLock } from "./repoWriteLock.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
 import { getTask } from "./tasks.ts";
 import { stableToolDefinitions, toolsetIdentity } from "./toolsetIdentity.ts";
@@ -27,6 +28,39 @@ export {
   toolsetIdentity,
   type ToolsetIdentity,
 } from "./toolsetIdentity.ts";
+
+const TASK_SCOPED_REPO_WRITES = new Set([
+  "grande_commit",
+  "grande_sync_base",
+  "grande_push",
+  "grande_pr_merge",
+  "grande_deploy",
+  "grande_deploy_rollback",
+  "grande_task_close",
+]);
+
+/**
+ * 给已有 task-scoped repo 写操作套一层进程内 repo mutex。这里只按 taskId 反查可信
+ * repoId；不存在的 task 仍交给原 handler 生成既有 TASK_NOT_FOUND 信封。
+ *
+ * task_open 没有既存 task，单独在 buildTools 中处理。pr_merge 只读取一次当前 PR/CI
+ * 状态并立即返回或执行 destructive merge，不做 CI/verifier 轮询；因此可以与其
+ * merge 前后 canonical refresh 一起保持为一个短生命周期写临界区。pr_status 不占锁。
+ */
+function withTaskRepoWriteLocks(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
+  for (const tool of tools) {
+    if (!TASK_SCOPED_REPO_WRITES.has(tool.name)) continue;
+    const inner = tool.handler;
+    tool.handler = async (args) => {
+      const taskId = typeof args.taskId === "string" ? args.taskId : null;
+      if (!taskId) return inner(args);
+      const task = getTask(deps.db, taskId);
+      if (!task) return inner(args);
+      return withRepoWriteLock(task.repoId, () => inner(args));
+    };
+  }
+  return tools;
+}
 
 /**
  * 生产工具列表的唯一组装点。Task 始终是中心：
@@ -56,60 +90,65 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       }
       if (!registered) return coreHandler(args);
       // The core handler owns the structured duplicate-id error. Delegate to
-      // it before canonical refresh so a rejected open has zero Git/audit side
-      // effects even when a CLOSED row no longer has a worktree on disk.
+      // it before canonical refresh so a rejected open has zero Git/audit/branch/worktree
+      // side effects. The same check is repeated after waiting for the repo lock because
+      // another concurrent task_open may have created this task while we waited.
       if (typeof taskId === "string" && getTask(deps.db, taskId)) return coreHandler(args);
 
-      // S16：对有 origin 的 repo，在创建 worktree 之前把 canonical 安全 refresh 到 origin
-      // 同名 branch。refresh 自己只有 fetch/compare/ff-only；dirty、local-ahead、diverged
-      // 一律 fail closed。作为 task_open 的前置写操作单独记 audit，避免 canonical 变化无账。
-      let canonicalRefresh: ReturnType<typeof refreshCanonical>;
-      const refreshAudit = beginAudit(deps.db, {
-        taskId,
-        tool: "grande_task_open",
-        input: { repoId, phase: "canonical_refresh" },
-      });
-      refreshAudit.allowed();
-      if (!refreshAudit.executing()) {
-        const error = new StateError("STALE_STATE", `任务 ${taskId} 的 canonical refresh 审计句柄无法推进到 EXECUTING。`);
-        refreshAudit.failed(error.message);
-        const toolError = toToolError(error);
-        return { structuredContent: err({ ...toolError, taskId }) };
-      }
-      try {
-        canonicalRefresh = refreshCanonical(deps.layout, repoId);
-        refreshAudit.succeeded([]);
-      } catch (error) {
-        refreshAudit.failed(error instanceof Error ? error.message : String(error));
-        const toolError = toToolError(error);
-        toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
-        return { structuredContent: err({ ...toolError, taskId }) };
-      }
+      return withRepoWriteLock(repoId, async () => {
+        if (typeof taskId === "string" && getTask(deps.db, taskId)) return coreHandler(args);
 
-      let guidance: string | undefined;
-      try {
-        guidance = loadGuidance(deps.layout, repoId);
-      } catch (error) {
-        const toolError = toToolError(error);
-        toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
-        return {
-          structuredContent: err({
-            ...toolError,
-            taskId: typeof args.taskId === "string" ? args.taskId : null,
-          }),
+        // S16：对有 origin 的 repo，在创建 worktree 之前把 canonical 安全 refresh 到 origin
+        // 同名 branch。refresh 自己只有 fetch/compare/ff-only；dirty、local-ahead、diverged
+        // 一律 fail closed。作为 task_open 的前置写操作单独记 audit，避免 canonical 变化无账。
+        let canonicalRefresh: ReturnType<typeof refreshCanonical>;
+        const refreshAudit = beginAudit(deps.db, {
+          taskId,
+          tool: "grande_task_open",
+          input: { repoId, phase: "canonical_refresh" },
+        });
+        refreshAudit.allowed();
+        if (!refreshAudit.executing()) {
+          const error = new StateError("STALE_STATE", `任务 ${taskId} 的 canonical refresh 审计句柄无法推进到 EXECUTING。`);
+          refreshAudit.failed(error.message);
+          const toolError = toToolError(error);
+          return { structuredContent: err({ ...toolError, taskId }) };
+        }
+        try {
+          canonicalRefresh = refreshCanonical(deps.layout, repoId);
+          refreshAudit.succeeded([]);
+        } catch (error) {
+          refreshAudit.failed(error instanceof Error ? error.message : String(error));
+          const toolError = toToolError(error);
+          toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+          return { structuredContent: err({ ...toolError, taskId }) };
+        }
+
+        let guidance: string | undefined;
+        try {
+          guidance = loadGuidance(deps.layout, repoId);
+        } catch (error) {
+          const toolError = toToolError(error);
+          toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+          return {
+            structuredContent: err({
+              ...toolError,
+              taskId: typeof args.taskId === "string" ? args.taskId : null,
+            }),
+          };
+        }
+
+        const result = await coreHandler(args);
+        const envelope = result.structuredContent as {
+          ok?: unknown;
+          data?: Record<string, unknown>;
         };
-      }
-
-      const result = await coreHandler(args);
-      const envelope = result.structuredContent as {
-        ok?: unknown;
-        data?: Record<string, unknown>;
-      };
-      if (envelope.ok === true && envelope.data) {
-        envelope.data.canonicalRefresh = canonicalRefresh;
-        if (guidance !== undefined) envelope.data.guidance = guidance;
-      }
-      return result;
+        if (envelope.ok === true && envelope.data) {
+          envelope.data.canonicalRefresh = canonicalRefresh;
+          if (guidance !== undefined) envelope.data.guidance = guidance;
+        }
+        return result;
+      });
     };
   }
 
@@ -127,8 +166,11 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
   const capabilityTools = withCapabilities.slice(withDeployment.length);
   deploymentDeps.push(...capabilityTools);
 
+  // repo write lock 只包既有写 handler；arg check 仍然是最外层输入门禁，因此非法参数
+  // 不会占锁。handler wrapping 不进入 toolset digest，不改变公开 schema/annotations。
+  const serialized = withTaskRepoWriteLocks(deps, withCapabilities);
   // 最后一层只规范化 tools/list 可见的顺序/对象键，不改变 handler wiring 或契约含义。
-  return stableToolDefinitions(withToolsetIdentity(withArgCheck(deps, withCapabilities)));
+  return stableToolDefinitions(withToolsetIdentity(withArgCheck(deps, serialized)));
 }
 
 /**

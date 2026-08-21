@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
 import type { DatabaseSync } from "node:sqlite";
 import { StateError } from "./errors.ts";
+import { GitExecError, safeGit } from "./gitExec.ts";
 import { getTask } from "./tasks.ts";
 
 export interface OuterTestReceipt {
@@ -49,24 +49,17 @@ function assertTaskWorktree(db: DatabaseSync, taskId: string, worktreePath: stri
   }
 }
 
+function gitDetail(error: unknown): string {
+  if (error instanceof GitExecError) return error.message.replace(/^git failed:\s*/u, "");
+  return error instanceof Error ? error.message : String(error);
+}
+
 function readCleanHead(taskId: string, worktreePath: string): string {
   let status: string;
   try {
-    status = execFileSync(
-      "git",
-      ["-c", "core.hooksPath=/dev/null", "status", "--porcelain=v1", "--untracked-files=all"],
-      {
-        cwd: worktreePath,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    status = safeGit.local(worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]);
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    throw new StateError(
-      "INVALID_INPUT",
-      `检查 outer-test task worktree 失败：${e.stderr ? String(e.stderr).trim() : e.message}`,
-    );
+    throw new StateError("INVALID_INPUT", `检查 outer-test task worktree 失败：${gitDetail(error)}`);
   }
   if (status.trim().length > 0) {
     throw new StateError(
@@ -76,17 +69,9 @@ function readCleanHead(taskId: string, worktreePath: string): string {
   }
 
   try {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"], {
-      cwd: worktreePath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    return safeGit.local(worktreePath, ["rev-parse", "HEAD"]).trim();
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    throw new StateError(
-      "INVALID_INPUT",
-      `读取 outer-test task HEAD 失败：${e.stderr ? String(e.stderr).trim() : e.message}`,
-    );
+    throw new StateError("INVALID_INPUT", `读取 outer-test task HEAD 失败：${gitDetail(error)}`);
   }
 }
 

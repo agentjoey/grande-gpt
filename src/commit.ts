@@ -1,9 +1,9 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import type { Layout } from "./layout.ts";
 import { StateError } from "./errors.ts";
+import { GitExecError, safeGit } from "./gitExec.ts";
 import { GitError } from "./worktree.ts";
 
 export interface CommitResult {
@@ -31,20 +31,18 @@ export interface WorktreeCommitState {
 export function assertTaskBranch(worktreePath: string, expectedBranch: string): string {
   let actualBranch: string;
   try {
-    actualBranch = execFileSync(
-      "git",
-      ["-c", "core.hooksPath=/dev/null", "symbolic-ref", "-q", "--short", "HEAD"],
-      { cwd: worktreePath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    actualBranch = safeGit.local(
+      worktreePath,
+      ["symbolic-ref", "-q", "--short", "HEAD"],
     ).trim();
   } catch (error) {
-    const e = error as { status?: number; stderr?: Buffer | string; message: string };
-    if (e.status === 1) {
+    if (error instanceof GitExecError && error.status === 1) {
       throw new StateError(
         "STALE_STATE",
         `任务 worktree 处于 detached HEAD；期望分支 ${expectedBranch}，拒绝继续。`,
       );
     }
-    const detail = e.stderr ? String(e.stderr).trim() : e.message;
+    const detail = error instanceof Error ? error.message : String(error);
     throw new GitError("GIT_FAILED", `git symbolic-ref 失败：${detail}`);
   }
   if (actualBranch !== expectedBranch) {
@@ -57,21 +55,14 @@ export function assertTaskBranch(worktreePath: string, expectedBranch: string): 
 }
 
 /**
- * S2 的所有 git 调用都从这个 helper 经过。`core.hooksPath=/dev/null` 位于 argv
- * 前缀，因而 status/add/diff/commit/rev-parse 无一例外；这不是只保护 commit
- * 那一条，而是把本模块整个 git 能力面都固定为「绝不执行仓库 hook」。
+ * S2 的所有 git 调用都从 Safe Git local mode 经过。`core.hooksPath=/dev/null`
+ * 由统一执行边界固定注入，status/add/diff/commit/rev-parse 无一例外。
  */
 function git(worktreePath: string, args: string[], config: string[] = []): string {
-  const argv = ["-c", "core.hooksPath=/dev/null", ...config, ...args];
   try {
-    return execFileSync("git", argv, {
-      cwd: worktreePath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    return safeGit.local(worktreePath, [...config, ...args]);
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    const detail = e.stderr ? String(e.stderr).trim() : e.message;
+    const detail = error instanceof Error ? error.message : String(error);
     throw new GitError("GIT_FAILED", `git ${args[0] ?? "命令"} 失败：${detail}`);
   }
 }

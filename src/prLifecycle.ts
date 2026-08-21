@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { getAttestations } from "./attestation.ts";
 import { assertTaskBranch } from "./commit.ts";
 import { beginAudit, type AuditHandle } from "./audit.ts";
@@ -13,6 +12,7 @@ import {
   type GithubLifecycleApi,
 } from "./githubApi.ts";
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
+import { GitExecError, safeGit } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
 import { hasCurrentOuterTestReceipt } from "./outerTestReceipt.ts";
 import { parseGithubRemote, readGithubRemoteUrl } from "./prOpen.ts";
@@ -115,14 +115,12 @@ export interface PrLifecycleOptions {
 
 function readHead(worktreePath: string): string {
   try {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", "rev-parse", "HEAD"], {
-      cwd: worktreePath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim();
+    return safeGit.local(worktreePath, ["rev-parse", "HEAD"]).trim();
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    throw new StateError("INVALID_INPUT", `读取任务 HEAD 失败：${e.stderr ? String(e.stderr).trim() : e.message}`);
+    const detail = error instanceof GitExecError
+      ? error.message.replace(/^git failed:\s*/u, "")
+      : error instanceof Error ? error.message : String(error);
+    throw new StateError("INVALID_INPUT", `读取任务 HEAD 失败：${detail}`);
   }
 }
 

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { inspectCanonicalGitState, type CanonicalGitState } from "./canonicalGit.ts";
+import { GitExecError, safeGit, type SafeGitOptions } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
 import { assertTaskId, assertValidId, resolveRepoPath } from "./paths.ts";
 import { loadDepDirs } from "./profiles.ts";
@@ -23,40 +24,30 @@ export interface WorktreeInfo {
   worktreePath: string;
 }
 
+function gitDetail(error: unknown): string {
+  if (error instanceof GitExecError) return error.message.replace(/^git failed:\s*/u, "");
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** git 一律以 argv 数组调用并禁用仓库 hooks，绝不拼 shell 字符串（铁律二） */
-function git(cwd: string, args: string[]): string {
+function git(cwd: string, args: string[], options: SafeGitOptions = {}): string {
   try {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (e) {
-    const err = e as { stderr?: Buffer | string; message: string };
-    const detail = err.stderr ? String(err.stderr).trim() : err.message;
-    throw new GitError("GIT_FAILED", `git ${args[0]} 失败：${detail}`);
+    return safeGit.local(cwd, args, options);
+  } catch (error) {
+    throw new GitError("GIT_FAILED", `git ${args[0]} 失败：${gitDetail(error)}`);
   }
 }
 
 /**
  * `git diff` 家族在「有差异」时以 **exit 1** 退出——那是它的正常成功路径，不是错误。
- * `execFileSync` 对任何非零退出都抛异常，所以这里必须把 exit 1 + 非空 stdout 还原成
- * 正常返回。原先那句 `catch { hunks = "" }` 把 exit 1 一律当失败吞掉，结果是**每个新增
- * 文件的 diff 内容全部丢失**（实测：hunkBytes 全为 0），而模型看到的是「文件变了但没有
- * 任何改动」。真正的错误（例如路径不存在）stdout 为空，仍然抛出。（C-1）
+ * Safe Git 的 diff mode 把 --no-index 的 exit 1 + stdout 还原成正常返回，同时固定
+ * --no-ext-diff / --no-textconv，避免仓库配置执行外部 helper。（C-1）
  */
-function gitAllowingDiffExit(cwd: string, args: string[]): string {
+function gitDiff(cwd: string, args: string[]): string {
   try {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-  } catch (e) {
-    const err = e as { status?: number; stdout?: string; stderr?: Buffer | string; message: string };
-    if (err.status === 1 && typeof err.stdout === "string" && err.stdout.length > 0) return err.stdout;
-    const detail = err.stderr ? String(err.stderr).trim() : err.message;
-    throw new GitError("GIT_FAILED", `git ${args[0]} 失败：${detail}`);
+    return safeGit.diff(cwd, args);
+  } catch (error) {
+    throw new GitError("GIT_FAILED", `git diff 失败：${gitDetail(error)}`);
   }
 }
 
@@ -83,7 +74,7 @@ function assertCanonicalReady(repoRoot: string): CanonicalGitState {
       `${repoRoot} 正处于 ${marker} 状态。请先在你自己的 checkout 里处理完，再开新任务。`,
     );
   }
-  if (state.detached) {
+  if (state.detached || state.branch === null) {
     throw new GitError(
       "CANONICAL_BUSY",
       `${repoRoot} 处于 detached HEAD（不在任何分支上）。请先在你自己的 checkout 里切回一个分支，再开新任务。`,
@@ -126,6 +117,7 @@ export function openWorktree(
   }
 
   const baseCommit = canonical.headSha!;
+  const canonicalBranch = canonical.branch!;
   // 后缀取 taskId 的**末 4 位字母数字**，而不是裸 `slice(-4)`：`TASK_ID_RE` 允许 taskId
   // 里带 `-`/`_`，生产实测 `task-ub-probe-20260729-001` 的末 4 位是 `-001`，拼在
   // `${slug}-` 后面就成了 `grande/ub-probe--001` 的双连字符。滤掉分隔符后既不会与前面
@@ -133,7 +125,10 @@ export function openWorktree(
   // 字母数字，所以匹配结果至少有一个元素）。
   const suffix = (taskId.match(/[A-Za-z0-9]/g) ?? []).slice(-4).join("");
   const branch = `grande/${slug}-${suffix}`;
-  git(repoRoot, ["worktree", "add", "-b", branch, dir, baseCommit]);
+  git(repoRoot, ["worktree", "add", "-b", branch, dir, baseCommit], {
+    expectedBranch: canonicalBranch,
+    expectedHead: baseCommit,
+  });
 
   cloneDepDirs(layout, repoId, repoRoot, dir);
 
@@ -217,7 +212,7 @@ const splitZ = (s: string): string[] => s.split("\0").filter((x) => x.length > 0
  * 以 NUL 分隔，顺带也解决了文件名里含换行的情况。（C-1）
  */
 export function listChangedFiles(worktreePath: string, baseCommit: string): string[] {
-  const tracked = splitZ(git(worktreePath, ["diff", "--name-only", "-z", baseCommit]));
+  const tracked = splitZ(gitDiff(worktreePath, ["diff", "--name-only", "-z", baseCommit]));
   const untracked = splitZ(git(worktreePath, ["ls-files", "-z", "--others", "--exclude-standard"]));
   return [...new Set([...tracked, ...untracked])].sort();
 }
@@ -255,13 +250,11 @@ export function repoDiff(
   for (; i < paths.length; i++) {
     const p = paths[i]!;
     // 对未跟踪文件 `git diff <base> -- <path>` 是空的，用 --no-index 与 /dev/null 比。
-    // --no-index 有差异时 exit 1，交给 gitAllowingDiffExit 还原（见其 JSDoc，C-1）。
-    let hunks = git(worktreePath, [
-      "diff", "--no-color", "--no-ext-diff", "--no-textconv", baseCommit, "--", p,
-    ]);
+    // --no-index 有差异时 exit 1，Safe Git diff mode 会把它还原为正常 diff 输出。（C-1）
+    let hunks = gitDiff(worktreePath, ["diff", "--no-color", baseCommit, "--", p]);
     if (hunks.length === 0) {
-      hunks = gitAllowingDiffExit(worktreePath, [
-        "diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-index", "--", "/dev/null", p,
+      hunks = gitDiff(worktreePath, [
+        "diff", "--no-color", "--no-index", "--", "/dev/null", p,
       ]);
     }
     const n = hunks.split("\n").length;

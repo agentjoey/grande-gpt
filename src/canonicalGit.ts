@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { GitExecError, safeGit } from "./gitExec.ts";
 
 export interface CanonicalGitState {
   repository: boolean;
@@ -21,25 +21,34 @@ interface GitProbe {
   detail: string;
 }
 
+function detailFromGitError(error: unknown, fallback: string): { status: number | null; detail: string } {
+  if (error instanceof GitExecError) {
+    return {
+      status: error.status,
+      detail: error.message.replace(/^git failed:\s*/u, ""),
+    };
+  }
+  return {
+    status: null,
+    detail: error instanceof Error ? error.message : fallback,
+  };
+}
+
 function probeGit(repoRoot: string, args: string[]): GitProbe {
   try {
     return {
       ok: true,
-      value: execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-        cwd: repoRoot,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim(),
+      value: safeGit.local(repoRoot, args).trim(),
       status: 0,
       detail: "",
     };
   } catch (error) {
-    const err = error as { status?: unknown; stderr?: Buffer | string; message?: string };
+    const failure = detailFromGitError(error, `git ${args[0]} failed`);
     return {
       ok: false,
       value: "",
-      status: typeof err.status === "number" ? err.status : null,
-      detail: err.stderr ? String(err.stderr).trim() : (err.message ?? `git ${args[0]} failed`),
+      status: failure.status,
+      detail: failure.detail,
     };
   }
 }

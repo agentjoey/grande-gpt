@@ -4,7 +4,7 @@
 >
 > 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md` 中的历史“已知遗留”、`docs/research/**` 的事故记录、PR/TaskBrief 和聊天结论都只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
 
-最后整理：2026-08-20
+最后整理：2026-08-21
 
 ## 维护规范
 
@@ -172,6 +172,17 @@
 - **Next (Phase 1)**: 保留 Human 对宿主执行的显式触发，但让成功结果自动写入可信 `OuterTestReceipt`（至少绑定 `taskId / repoId / commitSha / startedAt / endedAt / exitCode / files or planDigest / host toolchain`）；HEAD 变化后旧 receipt 自动失效。`grande_pr_merge` 对需要 selfhost outer verification 的 task 必须要求当前 PR head SHA 存在有效 receipt，并在缺失时 fail closed、返回唯一明确的 host command。这样 Human 只负责触发一次，不再负责记忆、复制结果或判断 receipt 是否仍匹配当前 SHA。
 - **Future automation boundary**: 如果以后要做到完全无人值守，只能通过独立隔离 host verifier：不能读取 `~/.grande-control/secrets` / `~/.ssh`，不能写 canonical/control plane，执行目标固定到 exact task/commit，无任意 argv/shell；结果再以受控 receipt 回传。没有该隔离边界前，不做全自动 unsandboxed candidate-code execution。
 - **Done when**: (1) Human 运行一次 host outer-test 后自动产生 exact-SHA receipt；(2) 修改/重新 commit 导致旧 receipt 失效；(3) 缺失/过期 receipt 时 `grande_pr_merge` 对适用 task 明确拒绝，当前 SHA receipt + 既有 CI/attestation 门禁都满足后才允许 merge；(4) load-bearing test/probe 证明移除 receipt gate 会使验收变红；(5) 未新增通用宿主任意执行能力。
+
+### GG-BL-014 — 长任务可能在只读分析后静默停滞
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: agent execution / continuity
+- **Problem**: 长时间开发任务在 task 仍为 `READY`、`blocker=null`、没有运行中 job、也没有需要 Human Gate 的情况下，agent 可能在完成一次只读 search/inspection 后不再发出下一笔 edit/run/tool call；UI 停留在最后一条“searched/inspected”进度，看起来像仍在执行，实际没有任何后台工作。
+- **Evidence / Detail**: 2026-08-21 `task-reliability-hostverifier-20260821-001` 的 Slice A/A1：`job_a7b944e8-c162-455a-a251-56b5346a0fe3` 已以 73 files / 703 tests PASS 结束，随后完成 production `execFileSync("git", ...)` 枚举；之后 task 长时间保持 3 changed files、无新增 job/commit/edit，直到 Human Owner 指出停滞。恢复后立即迁移 `src/commit.ts`、`src/push.ts`、`src/prOpen.ts`，changed files 3→6，并得到新 job `job_cf470d0b-02bc-425c-88a6-ef89a4e2f86d` 73 files / 703 tests PASS，证明当时不是代码、Git base 或测试 blocker。当前只有这一份明确样本，不能据此断言根因在模型、ChatGPT harness 或 GrandeGPT Gateway。
+- **Related**: GG-BL-010 会中断工具调用通道，但本次没有 tool-disabled/error，且恢复后同一会话继续成功调用 GrandeGPT，因此目前不合并为同一根因。
+- **Next**: 先建立可观测性而不是猜根因：为长任务记录最近一次“有副作用或 job 状态推进”的 progress timestamp/phase/next action，并在 `READY + blocker=null + no running job` 且超过合理 inactivity window 时给出显式 stalled/needs-resume 状态或提示；同时收集下一次复现时的 ChatGPT-dispatched call、Gateway `/mcp/[rpc]/[tool]`、task audit/job timeline，区分“模型未发调用”“平台未派发”“Gateway 未执行”。不要新增 daemon、通用自动执行器或绕过 Human Gate。
+- **Done when**: 至少一个真实长任务复现/回归证明静默停滞能被明确检测并报告唯一 next action，不再把无后台活动显示成持续执行；恢复路径不需要重建 task、不丢 worktree 改动、不降低工具安全边界，并有测试钉住 task liveness/status 语义。
 
 ## Observations
 

@@ -1,6 +1,6 @@
-import { execFileSync } from "node:child_process";
 import { inspectCanonicalGitState } from "./canonicalGit.ts";
 import { StateError } from "./errors.ts";
+import { GitExecError, safeGit, type SafeGitOptions } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
@@ -17,16 +17,24 @@ export interface CanonicalRefreshResult {
   remoteHead: string | null;
 }
 
-function git(cwd: string, args: string[]): string {
+function detailFromGitError(error: unknown): { status: number | null; detail: string } {
+  if (error instanceof GitExecError) {
+    return {
+      status: error.status,
+      detail: error.message.replace(/^git failed:\s*/u, ""),
+    };
+  }
+  return {
+    status: null,
+    detail: error instanceof Error ? error.message : String(error),
+  };
+}
+
+function git(cwd: string, args: string[], options: SafeGitOptions = {}): string {
   try {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    return safeGit.local(cwd, args, options);
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    const detail = e.stderr ? String(e.stderr).trim() : e.message;
+    const detail = detailFromGitError(error).detail;
     throw new GitError("GIT_FAILED", `git ${args[0] ?? "命令"} 失败：${detail}`);
   }
 }
@@ -35,27 +43,25 @@ function tryGit(cwd: string, args: string[]): { ok: true; value: string } | { ok
   try {
     return {
       ok: true,
-      value: execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-        cwd,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim(),
+      value: safeGit.local(cwd, args).trim(),
     };
   } catch (error) {
-    const e = error as { status?: unknown; stderr?: Buffer | string; message?: string };
+    const failure = detailFromGitError(error);
     return {
       ok: false,
-      status: typeof e.status === "number" ? e.status : null,
-      detail: e.stderr ? String(e.stderr).trim() : (e.message ?? `git ${args[0]} failed`),
+      status: failure.status,
+      detail: failure.detail,
     };
   }
 }
 
 function isAncestor(cwd: string, ancestor: string, descendant: string): boolean {
-  const result = tryGit(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
-  if (result.ok) return true;
-  if (result.status === 1) return false;
-  throw new GitError("GIT_FAILED", `git merge-base 失败：${result.detail}`);
+  try {
+    return safeGit.tryRelation(cwd, ancestor, descendant);
+  } catch (error) {
+    const detail = detailFromGitError(error).detail;
+    throw new GitError("GIT_FAILED", `git merge-base 失败：${detail}`);
+  }
 }
 
 /**
@@ -106,10 +112,11 @@ export function refreshCanonical(
   }
 
   // 不接受调用方 ref/remote；只取当前 canonical branch 的同名 origin ref。
+  // fetch 虽不改工作树 HEAD，但会写 remote-tracking ref，因此执行前重新绑定 branch+HEAD。
   git(repoRoot, [
     "fetch", "--no-tags", "origin",
     `refs/heads/${branch}:refs/remotes/origin/${branch}`,
-  ]);
+  ], { expectedBranch: branch, expectedHead: before });
   const remoteHead = git(repoRoot, ["rev-parse", `refs/remotes/origin/${branch}`]).trim();
   const localHead = git(repoRoot, ["rev-parse", "HEAD"]).trim();
 
@@ -118,7 +125,10 @@ export function refreshCanonical(
   }
 
   if (isAncestor(repoRoot, localHead, remoteHead)) {
-    git(repoRoot, ["merge", "--ff-only", `refs/remotes/origin/${branch}`]);
+    git(repoRoot, ["merge", "--ff-only", `refs/remotes/origin/${branch}`], {
+      expectedBranch: branch,
+      expectedHead: localHead,
+    });
     const after = git(repoRoot, ["rev-parse", "HEAD"]).trim();
     if (after !== remoteHead) {
       throw new StateError("CANONICAL_DIVERGED", `仓库 ${repoId} refresh 后 HEAD 未达到 origin/${branch}，拒绝继续。`);
