@@ -41,6 +41,11 @@ export const TRUSTED_HOST_MANIFEST: readonly HostManifestEntry[] = [
     reason: "Exercises the complete request-to-run loop with real host resources.",
     levels: ["full"],
   },
+  {
+    file: "tests/host/verifier-sandbox.host.test.ts",
+    reason: "Proves verifier Seatbelt nesting, hook suppression, loopback isolation, sensitive-path denial, and process-group cleanup on the real host.",
+    levels: ["full"],
+  },
 ] as const;
 
 const FULL_SOURCE_BASENAMES = new Set([
