@@ -537,12 +537,14 @@ export function createDefaultHostVerifierRuntimeAdapter(
         const nodePath = realpathSync(process.execPath);
         const gitPath = exactGitExecutable();
         const shPath = realpathSync("/bin/sh");
+        const bashPath = realpathSync("/bin/bash");
         const vitestEntry = realpathSync(join(canonicalSource, "node_modules", "vitest", "vitest.mjs"));
         const hookPath = join(canonicalJobTmp, "tmp", "git-hook-probe", "repo", ".git", "hooks", "pre-commit");
         const executableFiles = [...new Set([
           nodePath,
           gitPath,
           shPath,
+          bashPath,
           ...(plan.files.includes("tests/host/git-hook.host.test.ts") ? [hookPath] : []),
         ])];
         const toolchainReadRoots = [...new Set([
