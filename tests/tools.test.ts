@@ -11,6 +11,7 @@ import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
 import { buildTools, TOOLSET_EPOCH, toolsetIdentity, type ToolDeps } from "../src/tools.ts";
 import { MCP_WRITE_TOOLS } from "../src/contract.ts";
+import { toMcpTextResult } from "../src/mcpToolResult.ts";
 
 let ws: string, ctrl: string, layout: Layout, deps: ToolDeps;
 let savedWs: string | undefined, savedCtrl: string | undefined;
@@ -89,10 +90,14 @@ afterEach(async () => {
 });
 
 async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
+  return JSON.stringify(await callToolEnvelope(name, args));
+}
+
+async function callToolEnvelope(name: string, args: Record<string, unknown>): Promise<unknown> {
   const tool = buildTools(deps).find((t) => t.name === name);
   if (!tool) throw new Error(`未注册的工具：${name}`);
   const r = await tool.handler(args);
-  return JSON.stringify(r.structuredContent);
+  return r.structuredContent;
 }
 
 async function callToolThatThrowsRaw(): Promise<string> {
@@ -216,6 +221,57 @@ describe("工具注解", () => {
     }));
     annotationDrift[0]!.annotations.readOnlyHint = !annotationDrift[0]!.annotations.readOnlyHint;
     expect(toolsetIdentity(annotationDrift, "db5d020-test-build").toolsDigest).not.toBe(pinnedDigest);
+  });
+
+  it("真实 handler 的代表性结果保持 32 KiB 内，且 canonical wire 比 legacy 重复编码至少小 30%", async () => {
+    const MAX_COMPLETE_RESULT_BYTES = 32 * 1024;
+    const MAX_CANONICAL_SHARE_OF_LEGACY = 0.70;
+    const worktree = join(layout.worktreesRoot, "demo", "task_abcd");
+    writeFileSync(
+      join(worktree, "wire-budget.ts"),
+      Array.from({ length: 320 }, (_, line) =>
+        `export const wireBudget${line} = "${"x".repeat(72)}";`,
+      ).join("\n"),
+      "utf8",
+    );
+
+    createJob(deps.db, {
+      jobId: "job_wire_budget", taskId: "task_abcd", profile: "ok",
+      argv: ["/bin/sh", "-c", "echo wire-budget"], pgid: null,
+    });
+    finishJob(deps.db, "job_wire_budget", {
+      state: "passed", exitCode: 0, artifactPath: null,
+      summary: { durationMs: 125, peakRssMb: 18, outputTruncated: false, killedBy: null },
+    });
+
+    const envelopes = await Promise.all([
+      callToolEnvelope("grande_repo_read", { path: "wire-budget.ts", taskId: "task_abcd" }),
+      callToolEnvelope("grande_repo_search", {
+        pattern: "wireBudget", maxMatches: 25, taskId: "task_abcd",
+      }),
+      callToolEnvelope("grande_run_result", { jobId: "job_wire_budget" }),
+      callToolEnvelope("grande_repo_read", { path: "missing-wire-budget.ts", taskId: "task_abcd" }),
+    ]);
+
+    const canonicalResults = envelopes.map(toMcpTextResult);
+    const canonicalBytes = canonicalResults.map((result) =>
+      Buffer.byteLength(JSON.stringify(result), "utf8")
+    );
+    const legacyBytes = envelopes.map((envelope, index) =>
+      Buffer.byteLength(JSON.stringify({
+        ...canonicalResults[index],
+        structuredContent: envelope,
+      }), "utf8")
+    );
+
+    expect(envelopes.map((envelope) => (envelope as { ok?: boolean }).ok)).toEqual([true, true, true, false]);
+    for (const bytes of canonicalBytes) expect(bytes).toBeLessThanOrEqual(MAX_COMPLETE_RESULT_BYTES);
+
+    const combinedCanonicalBytes = canonicalBytes.reduce((total, bytes) => total + bytes, 0);
+    const combinedLegacyBytes = legacyBytes.reduce((total, bytes) => total + bytes, 0);
+    expect(combinedCanonicalBytes).toBeLessThanOrEqual(
+      Math.floor(combinedLegacyBytes * MAX_CANONICAL_SHARE_OF_LEGACY),
+    );
   });
 
   it("repo_read 用 nextLine 给出精确续读调用，续读到 EOF 后即使 truncated=true 也不再提示调用", async () => {

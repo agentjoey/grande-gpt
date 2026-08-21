@@ -139,3 +139,37 @@ Production App 只在这种正式 tool-contract release 时更新工具 snapshot
 - contract 未变：到此结束，不 Refresh App。
 - contract 已变：Scan/Refresh Tools → 新聊天 → `grande_task_status` read probe → 再恢复写操作。
 - onboarding release 的 read probe 必须看到 `toolsetEpoch=2`、`toolsCount=25` 与新的 `toolsDigest`；只有随后才对真实 repo 执行 propose/confirm/apply。
+
+## 7. Release A baseline / candidate 证据表
+
+Release A 只组合 Tasks 1–5：Gateway 边界遥测、单份 canonical tool result、有界
+`grande_run_result` 等待，以及 repo read/search 输出预算。它不改变 tool name、input schema
+或 annotations，所以 `toolsetEpoch` 必须保持 `2`，`toolsDigest` 必须保持不变。这个 patch
+release 不重建 App，也不执行 App Refresh / Scan Tools；部署和 Gateway restart 只能走现有受保护
+流程，并由获授权的操作者另行执行。
+
+下表是 Release A 的统一证据账本：历史资料没有记录的字段明确写“未记录”，不能倒推；
+candidate 行在真实 Web/iOS 门禁完成前明确保持“等待外部门禁”，不能用本地自动测试代填。
+`任务 A/B calls / bytes` 中的 bytes 是完整 serialized MCP tool-result bytes；correlation 只记录
+Gateway 生成的安全相关值，不能从客户端会话或其他标识猜测。
+
+| 证据 | 平台 | ChatGPT model | App version / tool count | Gateway build | toolset epoch / digest | 任务 A calls / bytes | 任务 B calls / bytes | disabled timestamp | 最后匹配的 Gateway correlation | 401 / restart |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Baseline B-89（失败样本） | 未记录 | 未记录 | installed/enabled；精确 version/count 未记录 | 未记录 | 未记录 | 76 / bytes 未保留 | 13 / bytes 未保留 | 未记录 | disabled 调用未到 Gateway；此前最后一个精确 correlation 未保留 | 未观察到 401 或 restart |
+| Baseline B-256（独立失败样本） | 未记录 | 未记录 | 精确 version/count 未记录 | 未记录 | 未记录 | 未按任务拆分；累计 256 calls / bytes 未保留 | 未按任务拆分 | 未记录 | 第 257 次 disabled 调用未到 Gateway；此前最后一个精确 correlation 未保留 | 未观察到 401 或 restart |
+| Candidate C-Web-1 | ChatGPT Web，等待外部门禁 | 等待运行时记录 | 等待运行时记录 version / count | 等待受保护部署后 `selfcheck` | 必须为 `2` / 等待 `selfcheck` 精确 digest | 等待 Task A 实测 | 等待 Task B 实测 | 等待时间窗核对；无禁用则记 `none observed` | 等待逐调用 `/mcp → [rpc] → [tool]` 对账 | 等待日志核对；任务间必须 0 restart |
+| Candidate C-iOS | 当前 iOS App，等待外部门禁 | 等待运行时记录 | 等待运行时记录 version / count | 等待受保护部署后 `selfcheck` | 必须为 `2` / 等待 `selfcheck` 精确 digest | 等待 Task A 实测 | 等待 Task B 实测 | 等待时间窗核对；无禁用则记 `none observed` | 等待逐调用 `/mcp → [rpc] → [tool]` 对账 | 等待日志核对；任务间必须 0 restart |
+| Candidate C-Web-2 | 第二个 fresh Web conversation，等待外部门禁 | 等待运行时记录 | 等待运行时记录 version / count | 等待受保护部署后 `selfcheck` | 必须为 `2` / 等待 `selfcheck` 精确 digest | 等待 Task A 实测 | 等待 Task B 实测 | 等待时间窗核对；无禁用则记 `none observed` | 等待逐调用 `/mcp → [rpc] → [tool]` 对账 | 等待日志核对；任务间必须 0 restart |
+
+每次 candidate 运行必须同时保留起止时间和以下判定：Task A、Task B 各不超过 50 次外部
+GrandeGPT 调用；两任务 serialized result 合计不超过 1 MiB；单个结果不超过 32 KiB；至少一个
+真实 job 只用一次外部 `grande_run_result` 取得终态。这里的 50 次、1 MiB、32 KiB 是 Release A
+验收上限，不是 ChatGPT 平台的推断配额，也不能让测试依赖“累计到某个 magic call count 就失败”。
+部署后的 `gatewayBuild / toolsetEpoch / toolsCount / toolsDigest` 必须在每次运行前后分别由
+`selfcheck` 记录；任一身份变化、意外 401、Gateway restart 或 pre-Gateway disablement 都按真实
+边界记录，不得改写成应用 handler 失败。
+
+截至 2026-08-21，本地行为回归已经覆盖真实 built handlers 产生的 `repo_read`、`repo_search`、
+`run_result` 与 error envelopes，再走 canonical `toMcpTextResult` 计算完整编码大小；host
+`outer-test`、受保护部署/Gateway restart、部署后 `selfcheck`，以及三次 Web/iOS 真实验收仍是
+明确待完成的外部门禁。因此 `GG-BL-010` 保持 `OPEN`。
