@@ -422,27 +422,34 @@ export function createApp(cfg: AppConfig): Hono {
         // 工具的次数」。用户在 ChatGPT 界面里也看不到，所以这是唯一的观察点。
         // 只读工具不走审计账本，日志是它们唯一的痕迹。
         const t0 = Date.now();
-        const result = await tool.handler(args as Record<string, unknown>);
-        const sc = result.structuredContent as Record<string, unknown>;
-        const ok = sc.ok === true;
         // Arguments may contain complete file bodies, PR text, deployment data,
         // or credentials accidentally supplied to a wrong field. Keep enough
         // metadata to diagnose tool selection without persisting caller values.
-        const metrics: McpCallMetrics = {
-          correlation,
-          inputBytes: jsonByteLength(args),
-          outputBytes: jsonByteLength(sc),
-        };
+        const inputBytes = jsonByteLength(args);
         const argKeys = Object.keys(args).sort().join(",");
-        console.log(
-          `[tool] ${ts()} ${tool.name} correlation=${metrics.correlation} inputBytes=${metrics.inputBytes} ` +
-          `outputBytes=${metrics.outputBytes} argKeys=[${argKeys}] result=${ok ? "ok" : "error"} ` +
-          `durationMs=${Date.now() - t0}`,
-        );
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(sc) }],
-          structuredContent: sc,
+        const logTool = (outputBytes: number, result: "ok" | "error") => {
+          const metrics: McpCallMetrics = { correlation, inputBytes, outputBytes };
+          console.log(
+            `[tool] ${ts()} ${tool.name} correlation=${metrics.correlation} inputBytes=${metrics.inputBytes} ` +
+            `outputBytes=${metrics.outputBytes} argKeys=[${argKeys}] result=${result} ` +
+            `durationMs=${Date.now() - t0}`,
+          );
         };
+        try {
+          const result = await tool.handler(args as Record<string, unknown>);
+          const sc = result.structuredContent as Record<string, unknown>;
+          const serialized = JSON.stringify(sc);
+          logTool(jsonByteLength(sc), sc.ok === true ? "ok" : "error");
+          return {
+            content: [{ type: "text" as const, text: serialized }],
+            structuredContent: sc,
+          };
+        } catch (error) {
+          // Preserve the SDK's existing tool-error response by rethrowing. The
+          // callback nevertheless executed, so leave exactly one safe line.
+          logTool(0, "error");
+          throw error;
+        }
       });
     }
 

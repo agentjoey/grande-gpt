@@ -6,8 +6,9 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
+import * as toolsModule from "../src/tools.ts";
 import { openDb } from "../src/db.ts";
 import { bumpEpoch, currentEpoch } from "../src/tokenEpoch.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
@@ -840,10 +841,9 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
     } finally { restore(); }
   });
 
-  it("tools/call 记录可关联的大小与状态元数据，但绝不回显请求秘密", async () => {
+  it("tools/call records exact UTF-8 input and logical-envelope output byte counts", async () => {
     const token = await mintToken(app);
     const [text, restore] = captureLog();
-    const fileContentMarker = "FILE_CONTENT_MARKER_MUST_NOT_REACH_LOGS";
     const rawSessionMarker = "RAW_SESSION_MARKER_MUST_NOT_REACH_LOGS";
     try {
       const response = await app.request("/mcp", {
@@ -858,7 +858,7 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
           jsonrpc: "2.0", id: 81, method: "tools/call",
           params: {
             name: "grande_repo_read",
-            arguments: { repoId: REPO, path: fileContentMarker },
+            arguments: { repoId: REPO, path: "a.ts" },
           },
         }),
       });
@@ -868,15 +868,97 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
       const line = toolLines[0];
       expect(line).toMatch(/\[tool\].*grande_repo_read/);
       expect(line).toMatch(/correlation=mcp:[0-9a-f]{12}/);
-      expect(line).toMatch(/inputBytes=\d+/);
-      expect(line).toMatch(/outputBytes=\d+/);
+      expect(line).toContain("inputBytes=31");
+      expect(line).toContain("outputBytes=282");
       expect(line).toMatch(/argKeys=\[path,repoId\]/);
-      expect(line).toMatch(/result=error/);
+      expect(line).toMatch(/result=ok/);
       expect(line).toMatch(/durationMs=\d+/);
       expect(line).not.toContain(token);
-      expect(line).not.toContain(fileContentMarker);
       expect(line).not.toContain(rawSessionMarker);
     } finally { restore(); }
+  });
+
+  it("tools/call does not log a real repo-edit body", async () => {
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    const editBodyMarker = "EDIT_BODY_MARKER_MUST_NOT_REACH_LOGS";
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 83, method: "tools/call",
+          params: {
+            name: "grande_repo_edit",
+            arguments: {
+              taskId: TASK,
+              ops: [{ op: "create", path: "telemetry-marker.ts", content: editBodyMarker }],
+            },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain("grande_repo_edit");
+      expect(toolLines[0]).toContain("argKeys=[ops,taskId]");
+      expect(toolLines[0]).toContain("result=ok");
+      expect(toolLines[0]).not.toContain(editBodyMarker);
+      expect(toolLines[0]).not.toContain(token);
+    } finally { restore(); }
+  });
+
+  it("a rejected tool handler still emits one safe error line and preserves the MCP tool error", async () => {
+    const rejectionMarker = "REJECTED_HANDLER_MARKER_MUST_NOT_REACH_LOGS";
+    const buildToolsSpy = vi.spyOn(toolsModule, "buildTools").mockReturnValue([{
+      name: "grande_rejected",
+      description: "test-only rejected tool",
+      inputSchema: { type: "object", properties: {} },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      handler: async () => { throw new Error(rejectionMarker); },
+    }]);
+    const rejectedDb = openDb(layout);
+    const rejectedApp = createApp({
+      issuer: ISSUER,
+      layout,
+      db: rejectedDb,
+      accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },
+    });
+    const token = await mintToken(rejectedApp);
+    const [text, restore] = captureLog();
+    try {
+      const response = await rejectedApp.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 84, method: "tools/call",
+          params: { name: "grande_rejected", arguments: {} },
+        }),
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toContain(rejectionMarker);
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain("grande_rejected");
+      expect(toolLines[0]).toContain("inputBytes=2");
+      expect(toolLines[0]).toContain("outputBytes=0");
+      expect(toolLines[0]).toContain("result=error");
+      expect(toolLines[0]).not.toContain(rejectionMarker);
+    } finally {
+      restore();
+      buildToolsSpy.mockRestore();
+      rejectedDb.close();
+    }
   });
 
   it("tools/call without an MCP session logs correlation=none", async () => {
