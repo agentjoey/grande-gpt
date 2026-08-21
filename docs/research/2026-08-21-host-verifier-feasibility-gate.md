@@ -42,6 +42,8 @@ The canonical-path correction worked: the sensitive-path/environment probe passe
 
 No generic host execution, directory-wide process-exec, broad signal permission, arbitrary argv/cwd, or wider filesystem/network rule was added by these changes.
 
+The fork and remote-LAN probe corrections were committed as `20064b6a5d27ad41ab44c831242dedc960ff3e62`. A fresh clean-HEAD regression on that exact commit then passed `unit-selfhost` (`78 files / 726 tests`, `job_24ca661e-c1f7-4d9b-99d5-0381ce519604`) and `typecheck` (`job_05766b5f-5986-41c7-9985-68068dfbe607`). The commit itself lacked an attestation only because this evidence document had been edited after the immediately preceding run; the next evidence commit is therefore intentionally using the correct `edit -> verify -> commit` order rather than an empty commit.
+
 ## Current gate state
 
 The four real-host properties are **not yet claimed PASS** after the fork/network-probe corrections. A fresh trusted-host run against the next clean exact SHA is still required. Until that run passes:
