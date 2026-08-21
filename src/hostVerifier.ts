@@ -59,7 +59,7 @@ export function buildTrustedVitestConfig(files: readonly string[]): string {
   }
   return [
     "export default {",
-    `  test: { include: ${JSON.stringify([...files].sort())}, environment: "node", watch: false, pool: "forks", maxWorkers: 1, minWorkers: 1 },`,
+    `  test: { include: ${JSON.stringify([...files].sort())}, environment: "node", watch: false, pool: "threads", maxWorkers: 1, minWorkers: 1, fileParallelism: false },`,
     "};",
     "",
   ].join("\n");

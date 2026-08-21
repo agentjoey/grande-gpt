@@ -82,14 +82,15 @@ describe("host verifier sandbox plan", () => {
     }
   });
 
-  it("constructs a fresh minimal environment and only exposes trusted allocated ports", () => {
+  it("constructs a fresh minimal environment, disables system Git config, and only exposes trusted allocated ports", () => {
     const plan = buildHostVerifierSandboxPlan(paths);
     expect(Object.keys(plan.env).sort()).toEqual([
-      "CI", "GRANDE_VERIFIER_LOOPBACK_PORTS", "HOME", "LANG", "PATH", "TMPDIR", "XDG_CACHE_HOME",
+      "CI", "GIT_CONFIG_NOSYSTEM", "GRANDE_VERIFIER_LOOPBACK_PORTS", "HOME", "LANG", "PATH", "TMPDIR", "XDG_CACHE_HOME",
     ]);
     expect(plan.env.PATH).toBe("/usr/bin:/bin:/opt/trusted-node/bin");
     expect(plan.env.HOME).toBe(`${paths.jobTmp}/home`);
     expect(plan.env.GRANDE_VERIFIER_LOOPBACK_PORTS).toBe("49173,49174");
+    expect(plan.env.GIT_CONFIG_NOSYSTEM).toBe("1");
     for (const forbidden of [
       "GITHUB_TOKEN", "OPENAI_API_KEY", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
       "SSH_AUTH_SOCK", "DYLD_INSERT_LIBRARIES", "GIT_CONFIG_GLOBAL", "GIT_ASKPASS",

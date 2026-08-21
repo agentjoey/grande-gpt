@@ -194,6 +194,7 @@ export function buildHostVerifierSandboxPlan(input: HostVerifierSandboxPaths): H
     TMPDIR: `${input.jobTmp}/tmp`,
     XDG_CACHE_HOME: `${input.jobTmp}/cache`,
     CI: "1",
+    GIT_CONFIG_NOSYSTEM: "1",
     GRANDE_VERIFIER_LOOPBACK_PORTS: input.loopbackPorts.join(","),
   });
 
