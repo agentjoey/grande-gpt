@@ -34,12 +34,13 @@ describe("host verifier sandbox plan", () => {
     expect(plan.profile).not.toContain('(allow file-write* (subpath "/private/tmp/grande-verifier/source"))');
     expect(plan.profile).toContain('(allow file-write* (subpath "/private/tmp/grande-verifier/job"))');
     for (const port of paths.loopbackPorts) {
-      expect(plan.profile).toContain(`(allow network-bind (local ip "127.0.0.1:${port}"))`);
-      expect(plan.profile).toContain(`(allow network-inbound (local ip "127.0.0.1:${port}"))`);
-      expect(plan.profile).toContain(`(allow network-outbound (remote ip "127.0.0.1:${port}"))`);
+      expect(plan.profile).toContain(`(allow network-bind (local ip "localhost:${port}"))`);
+      expect(plan.profile).toContain(`(allow network-inbound (local ip "localhost:${port}"))`);
+      expect(plan.profile).toContain(`(allow network-outbound (remote ip "localhost:${port}"))`);
+      expect(plan.profile).not.toContain(`127.0.0.1:${port}`);
     }
     expect(plan.profile).not.toContain("localhost:*");
-    expect(plan.profile).not.toContain("127.0.0.1:8787");
+    expect(plan.profile).not.toContain("localhost:8787");
     expect(plan.profile).not.toContain('(deny network-outbound (remote tcp "localhost:8787"))');
     expect(plan.profile).not.toContain("(allow network*)");
   });

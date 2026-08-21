@@ -26,13 +26,13 @@ The existing host suites passed, but three new `runVerifierNode()` probes failed
 
 The common path was the new verifier SBPL launching Node. The established sandbox profile already allowed `sysctl-read`, and prior Seatbelt research records that Node/V8 startup uses sysctl reads and can otherwise fail with misleading startup errors.
 
-A minimal regression test was added requiring `(allow sysctl-read)` while still forbidding `process-fork` and broad signal permissions. RED was observed in `job_93fc0b9a-c066-4af5-b56d-4bea1719a97b`; adding only `sysctl-read` restored `unit-selfhost` and `typecheck` and was committed as `9506e33f3c0cea5b4e2a894c9130ff6b08cfa878`.
+A minimal regression test was added requiring `(allow sysctl-read)` while still forbidding broad signal permissions. RED was observed in `job_93fc0b9a-c066-4af5-b56d-4bea1719a97b`; adding only `sysctl-read` restored `unit-selfhost` and `typecheck` and was committed as `9506e33f3c0cea5b4e2a894c9130ff6b08cfa878`.
 
 ### Second real-host run
 
 The failure signature changed: Node now started normally (`status=1` instead of `null`) but reported `MODULE_NOT_FOUND` for probe scripts under `/var/folders/...`.
 
-Root cause: `tmpdir()` produced `/var/...` paths, while the verifier policy was deliberately constructed from `realpathSync(...)` paths under `/private/var/...`. Seatbelt matches the path spelling used at runtime against profile paths; the probe passed the non-canonical `/var/...` script path to Node while only `/private/var/...` was allowed.
+Root cause: `tmpdir()` produced `/var/...` paths, while the verifier policy was deliberately constructed from `realpathSync(...)` paths under `/private/var/...`. Seatbelt matches runtime path spelling against profile paths; the probe passed the non-canonical `/var/...` script path to Node while only `/private/var/...` was allowed.
 
 The probe fixture was corrected to canonicalize source/dependency/job-temp paths immediately after creation and to use those exact paths for policy construction, cwd, script argv, and probe files. No file-read or execution permission was broadened. That correction was committed as `f2e718ebf1b396c1b11007361b8d6d0ebcb99038`.
 
@@ -40,80 +40,71 @@ The probe fixture was corrected to canonicalize source/dependency/job-temp paths
 
 The canonical-path correction worked: the sensitive-path/environment probe passed, and the remaining failures were reduced to two actual policy/probe semantics.
 
-1. The nested Seatbelt script entered Node successfully, but its inner `spawnSync()` produced no child stdout. The verifier policy allowed exact executable targets but still denied `process-fork`; child creation is required both by the nested probe and by the eventual fixed Vitest runner. A RED unit contract requiring `process-fork` was observed in `job_4896bd22-d492-44a0-9bb8-64741f19dbd9`. The implementation now permits `process-fork` while retaining exact-file `process-exec` and still denying broad signal permission. Fresh selfhost after the change is `78 files / 726 tests PASS` (`job_63e1cb33-0a49-405e-ba11-6f3055dd015d`); typecheck PASS is `job_1b46b0bd-4f7a-4e1a-8e3e-138d060c3af1`.
-2. The network probe connected successfully to the machine's own non-loopback interface address. That destination is still the local machine and therefore is not a valid proof of reaching an external LAN peer under Seatbelt's `localhost` semantics. The probe now derives a same-subnet IPv4 address that is neither loopback nor any local interface address and requires that connection attempt to fail with a Seatbelt permission error. Loopback success and the explicit production-port deny remain separate assertions.
-
-No generic host execution, directory-wide process-exec, broad signal permission, arbitrary argv/cwd, or wider filesystem/network rule was added by these changes.
-
-The fork and remote-LAN probe corrections were committed as `20064b6a5d27ad41ab44c831242dedc960ff3e62`. A fresh clean-HEAD regression on that exact commit then passed `unit-selfhost` (`78 files / 726 tests`, `job_24ca661e-c1f7-4d9b-99d5-0381ce519604`) and `typecheck` (`job_05766b5f-5986-41c7-9985-68068dfbe607`). The commit itself lacked an attestation only because this evidence document had been edited after the immediately preceding run; the next evidence commit therefore used the correct `edit -> verify -> commit` order rather than an empty commit.
+1. The nested Seatbelt script entered Node successfully, but its inner `spawnSync()` produced no child stdout. The verifier policy allowed exact executable targets but still denied `process-fork`; child creation is required both by the nested probe and by the eventual fixed Vitest runner. A RED unit contract requiring `process-fork` was observed in `job_4896bd22-d492-44a0-9bb8-64741f19dbd9`.
+2. The network probe connected successfully to the machine's own non-loopback interface address. That destination is still the local machine and therefore is not a valid proof of reaching an external LAN peer under Seatbelt's `localhost` semantics. The probe was changed to derive a same-subnet IPv4 address that is neither loopback nor any local interface address.
 
 ### Fourth real-host run
 
-The fork and remote-LAN changes improved the evidence again: the distinct same-subnet LAN peer assertion passed, as did the sensitive-path/environment, Git hook, and process-group probes. Two failures remained.
-
-1. Nested Seatbelt now spawned `/usr/bin/sandbox-exec`, but both inner `cat` invocations exited `71`; the nominal allow branch did not reach the file read. The outer verifier grants `process-exec` only to canonical executable literals, while the inner probe still hard-coded `/bin/cat`. This is the same class of path-spelling hazard already proven by the `/var` versus `/private/var` failure. The probe was changed to pass the canonical executable path, without adding executable permission.
-2. The production Gateway connection to `127.0.0.1:8787` still succeeded even though LAN/non-loopback was denied. The previous carve-out used `(remote ip "localhost:8787")`; the real host proved that this filter did not override the broader `(remote ip "localhost:*")` allow for this TCP connection. A TCP-specific deny was tried next. A RED unit contract for that exact policy shape was observed in `job_b70b68c1-1815-46d9-a4e0-a0bdbc321d06`.
-
-After those two corrections, sandboxed `unit-selfhost` returned to `78 files / 726 tests PASS` in `job_8b9829ed-526c-43a7-804c-472f908600a2`. The final attestation-bound verification was then run and committed as `7cbffa73c7ce6a0d508abd2afaa19545467633fb` with attestation `att_419a6dce-5d9a-4a09-b2bb-08591cfadab3`.
+The distinct LAN peer assertion passed. Two failures remained: nested Seatbelt nominal allow still exited 71, and production `127.0.0.1:8787` still connected despite a narrow deny attempt.
 
 ### Fifth real-host run — design-level blocker
 
-The two remaining failures were unchanged on exact SHA `7cbffa73c7ce6a0d508abd2afaa19545467633fb`:
+The two failures were unchanged on exact SHA `7cbffa73c7ce6a0d508abd2afaa19545467633fb`:
 
-1. The nested `sandbox-exec` nominal allow branch still exited `71`, while the denied branch also exited `71`. Canonical executable paths did not address the root cause. A process already under Seatbelt cannot reliably apply a second Seatbelt profile on the target host; recursive `sandbox-exec` is therefore not a valid required proof.
-2. The distinct LAN peer remained denied correctly, but `127.0.0.1:8787` still connected successfully even with the TCP-specific deny rule. The target macOS behavior therefore cannot support broad localhost allow plus a reliable one-port carve-out.
+1. recursive `sandbox-exec` nominal allow and deny both exited 71;
+2. LAN peer was denied, but production localhost port remained reachable under broad localhost allow.
 
-These are platform/design constraints, not reasons to weaken assertions. No further policy widening or test neutralization is permitted.
-
-### Human Owner decision
-
-On 2026-08-21 the Human Owner approved the platform amendment:
-
-- replace recursive nested-Seatbelt success with child inheritance/non-escape under one outer Seatbelt boundary;
-- replace broad ephemeral localhost with trusted parent allocation of exact loopback ports, so the production Gateway port is absent from the allowlist by construction;
-- recursive-Seatbelt host cases are a predefined `manualOnly` Human Gate and cannot be represented as auto-safe coverage;
-- bump verifier policy version to 2 and bind exact runtime port allocation into the trusted execution-plan/receipt digest.
-
-The approved design and executable plan are:
-
-- `docs/superpowers/specs/2026-08-21-grande-gpt-reliability-host-verifier-platform-amendment.md`
-- `docs/superpowers/plans/2026-08-21-host-verifier-platform-amendment.md`
+Human Owner approved the platform amendment: one outer Seatbelt with child inheritance/non-escape, trusted exact loopback-port allocation, explicit `manualOnly` host cases, verifier policy version 2, and runtime allocation bound into execution-plan/receipt identity.
 
 ### Amended B2R implementation evidence
 
-The approved amendment is now implemented at the unit/type boundary pending fresh real-host proof:
+The amendment was implemented at the unit/type layer:
 
-- `TRUSTED_HOST_MANIFEST` now records `execution: "auto" | "manualOnly"`; recursive-Seatbelt/runner/e2e/verifier-feasibility adapters are manual-only, while the real Git-hook proof is split into a dedicated auto-safe host file. The planning helper fails closed to `full + manualOnlyRequired` for sandbox/SBPL/verifier-policy surfaces. RED was observed in `job_e899e4c8-1792-406a-acaa-2851acaa4e48`; GREEN reached 78 files / 729 tests in `job_bc9027da-9f03-4be9-aa61-314cb414c275`.
-- `HOST_VERIFIER_POLICY_VERSION` is now `2`. The verifier profile no longer contains broad `localhost:*`; trusted internal input supplies at most eight unique exact IPv4 loopback ports, rejects invalid/duplicate/production-port entries, and emits bind/inbound/outbound allows only for `127.0.0.1:<trusted-port>`. RED was observed in `job_ccddf90e-7bb6-420f-a2b4-6c3177b11953`; GREEN reached 78 files / 730 tests in `job_05bb3362-f7af-4259-8827-4a23d2e4ed3e`.
-- The real-host feasibility harness now allocates a loopback port on the trusted host before constructing the profile. Its inheritance probe starts one outer verifier Seatbelt and then an ordinary child Node process; the child must retain allowed fixture/job-temp behavior while DB and LAN access remain denied. The network probe binds/connects only the trusted exact port, while LAN and production Gateway destinations remain unlisted and therefore denied by default.
-- The scrubbed verifier environment exposes only the already-validated trusted allocation through `GRANDE_VERIFIER_LOOPBACK_PORTS`; it is not inherited from the host and cannot introduce a port not already present in the Seatbelt profile. The corresponding RED was `job_0ba33710-b235-4062-a97b-574c3d441972`; after adding the trusted env projection, `unit-selfhost` passed 78 files / 730 tests in `job_cf4005da-d039-42fc-a2e1-a37ca2ee7f4c` and typecheck passed in `job_df552a4d-42c0-4c45-a86d-ed4b9830cddb`.
-- A security review identified that the future auto-safe server listener harness currently uses a legacy fixed port. The C2 amendment now explicitly requires auto-safe listener cases to consume only `GRANDE_VERIFIER_LOOPBACK_PORTS` from the trusted parent allocation; this is a Slice C orchestrator integration requirement and does not weaken the B feasibility gate.
+- `TRUSTED_HOST_MANIFEST` records `execution: "auto" | "manualOnly"`; recursive-Seatbelt/runner/e2e/verifier-feasibility adapters are manual-only, while the real Git-hook proof is split into a dedicated auto-safe host file. Planning fails closed to `full + manualOnlyRequired` for sandbox/SBPL/verifier-policy surfaces.
+- `HOST_VERIFIER_POLICY_VERSION` is `2`. Broad `localhost:*` is absent; trusted input supplies at most eight unique ports, rejects invalid/duplicate/production-port entries, and exposes only the validated allocation through `GRANDE_VERIFIER_LOOPBACK_PORTS`.
+- The feasibility harness allocates a port on the trusted host before constructing the profile. Its inheritance probe starts one outer verifier Seatbelt and then an ordinary child Node process; the child must retain allowed fixture/job-temp behavior while DB and LAN access remain denied.
+- A future auto-safe server listener harness currently uses a legacy fixed port; the C2 amendment explicitly requires it to consume only `GRANDE_VERIFIER_LOOPBACK_PORTS` from trusted parent allocation.
 
 No generic host execution, arbitrary argv/cwd/env input, directory-wide process-exec, broad signal permission, inherited credential/proxy state, broad localhost rule, or production-port allow was introduced by B2R.
 
+### Sixth real-host run — SBPL exact-port syntax failure
+
+Real host run against clean exact SHA `b6ed5101ab18ca3ea4aa5419c792bae2abe17609` reached 6/7 host files PASS and 164/166 tests PASS. The only two failures were the two new verifier feasibility tests, and both failed before Node started because Seatbelt rejected the generated profile:
+
+`host must be * or localhost in network address`
+
+The offending profile rules were of the form:
+
+`(local ip "127.0.0.1:<trusted-port>")`
+
+This is a syntax/selector-spelling issue, not a failure of the security property. The real-host compiler proves that exact port filters must use Seatbelt's accepted `localhost:<port>` host spelling for `local ip` / `remote ip`. Runtime probes still bind/connect explicitly to `127.0.0.1`, so the network target remains IPv4 loopback; only the SBPL selector spelling changes.
+
+A new RED unit contract was observed in `job_e4e360aa-2a3c-44ba-ab33-4e5223200f68`, requiring exact `localhost:<port>` rules and rejecting the old `127.0.0.1:<port>` profile spelling. The minimal builder correction restored `unit-selfhost` to 78 files / 730 tests in `job_95711573-dd21-4445-9ef2-2eaa39eb7b32`; typecheck passed in `job_e87c5917-3551-4882-93d6-60f58afeb5e9`.
+
 ## Current gate state
 
-The previous design-level blocker is **resolved by Owner approval** and the amended implementation is **unit/type GREEN**, but Slice B is **not yet PASS** until the clean exact-SHA real-host run succeeds.
+Slice B is **not yet PASS** until a fresh clean exact-SHA real-host run proves the amended criteria with the corrected Seatbelt selector syntax.
 
 Already proven and retained:
 
-- Safe Git hook suppression: PASS on prior host runs; now isolated into its own trusted host case for fresh rerun;
+- Safe Git hook suppression: PASS on prior host runs;
 - remote LAN/non-loopback deny under deny-default: PASS on prior host runs;
 - sensitive control/workspace/canonical/task/DB/credential/env isolation: PASS on prior host runs;
 - timeout process-group cleanup with no residual orphan: PASS on prior host runs;
-- Node/V8 startup under the verifier sandbox: PASS on prior host runs.
+- Node/V8 startup under the verifier sandbox: PASS on prior host runs;
+- sixth run: all legacy/manual host files except the two profile-compile feasibility probes passed, giving 6/7 files and 164/166 tests PASS.
 
 Required on the next clean exact SHA before Slice C:
 
-- policy v2 exact trusted loopback allocation PASS with no broad localhost;
+- policy v2 exact trusted `localhost:<port>` Seatbelt filters PASS with no broad localhost;
 - child inheritance/non-escape probe PASS;
-- exact allocated loopback port PASS, LAN peer DENY, production port DENY;
+- exact allocated runtime `127.0.0.1` loopback PASS, LAN peer DENY, production port DENY;
 - dedicated raw-hook/Safe-Git host case PASS;
 - sensitive path/env and process-group cleanup PASS;
 - manual-only manifest contract PASS;
 - exact-SHA outer-test receipt issued only after the worktree is clean.
 
-Until those amended requirements pass:
+Until those requirements pass:
 
 - Slice C must not start;
 - no PR/merge should occur;

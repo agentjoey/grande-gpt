@@ -1,56 +1,62 @@
-# GrandeGPT Host Verifier macOS Platform Amendment
+# GrandeGPT Reliability Host Verifier — macOS Platform Amendment
 
-**状态：** Approved by Human Owner
+> **Status:** Human Owner approved on 2026-08-21. This amendment overrides only the conflicting host-verifier clauses in `2026-08-21-grande-gpt-reliability-and-automated-host-verifier-design.md`; all other design constraints remain in force.
 
-**日期：** 2026-08-21
+## 1. Why an amendment is required
 
-**作用域：** `docs/superpowers/specs/2026-08-21-grande-gpt-reliability-and-automated-host-verifier-design.md` 的 macOS Host Verifier 实现约束
-
-**优先级：** 本 amendment 与原设计共同构成本任务的批准设计来源；仅在下列条款冲突时，本 amendment 优先。未被明确修改的原设计要求全部继续有效。
-
-## 1. 触发原因与已验证平台事实
-
-Slice B 在真实 trusted host 上连续得到两个稳定结果：
+Five real-host feasibility runs narrowed two assumptions in the original Slice B design to macOS platform constraints rather than implementation bugs:
 
 1. 已处于 Seatbelt sandbox 内的进程再次调用 `sandbox-exec`/`sandbox_apply` 时，inner nominal-allow 与 deny 路径都以 exit 71 失败。继续增加 `process-fork`、canonical executable path 等没有改变该结果。递归 Seatbelt 因此不能作为 target macOS 上的可满足安全证明。
 2. broad localhost outbound allow 能正确拒绝真实 LAN peer，但无法可靠表达“允许任意 localhost 临时端口、同时排除 `127.0.0.1:8787`”。`remote ip` 与 `remote tcp` 的 narrow deny 都没有覆盖已授予的 broad localhost capability。
+3. Real-host SBPL parsing additionally proved that exact port filters must use Seatbelt's `localhost:<port>` network-address spelling for `local ip`/`remote ip`; literal `127.0.0.1:<port>` is rejected at profile compile time (`host must be * or localhost in network address`). Runtime TCP listeners/connects still bind explicitly to `127.0.0.1`; only the SBPL filter spelling changes.
 
-这些结果记录在 `docs/research/2026-08-21-host-verifier-feasibility-gate.md`。不得通过削弱断言、扩大 sandbox 权限或把平台拒绝当作 PASS 来绕过。
+这些结果不能通过放宽测试断言、扩大 network/file/process 权限或把失败改成 skip 来“修复”。因此需要改证明方式，而不是降低安全目标。
 
-## 2. 批准的设计修订
+## 2. Approved design changes
 
-### 2.1 单一 outer Seatbelt + child inheritance/non-escape
+### 2.1 One outer Seatbelt + child inheritance / non-escape proof
 
-自动 verifier 只建立**一个**由 trusted Gateway parent 构造的 outer Seatbelt boundary。候选 Vitest/Node 子进程及其普通 child process 必须继承该 boundary；自动 verifier 不要求、也不依赖 candidate child 成功再次 `sandbox_apply`。
+原要求 “nested Seatbelt produces a true inner allow/deny result” 改为：
 
-Slice B 的原“nested Seatbelt true inner allow/deny”承重证明替换为：
+- trusted host parent 构造并启动**唯一的 outer verifier Seatbelt**；
+- verifier 内允许 fork/exec 仅 trusted exact executable；
+- 普通 child process 自动继承同一 sandbox 边界；
+- child 必须能完成允许的 verifier fixture 读取与 job-temp 写入；
+- child 必须无法读取 control/workspace/canonical/task/DB/credential-store；
+- child 必须无法访问 LAN/non-loopback 或未分配 loopback port；
+- child 不得获得 candidate-controlled profile/env/cwd/argv 扩权路径。
 
-- outer verifier Seatbelt 能正常启动 trusted Node/Vitest entry；
-- outer sandbox 内允许 `process-fork`，但 `process-exec` 仍只允许 trusted exact executable files；
-- child 能读取 verifier fixture、写 job temp、使用被明确允许的 exact loopback test port；
-- 同一个 child 不能读取真实 control/workspace/canonical/task/credential 路径，不能访问 LAN/外网，不能写真实状态；
-- child 不能通过再调用 `sandbox-exec`/`sandbox_apply` 获得更宽权限。若平台返回 exit 71 / permission denied，它是 non-escape 的补充证据，不再要求 inner apply 成功。
+如果保留一次 inner `sandbox-exec` 负向 probe，exit 71 / permission denied 只作为“不能重新应用/替换 sandbox”的补充 non-escape evidence；**不再要求第二层 Seatbelt 成功**。
 
-这证明生产架构真正依赖的性质：candidate/test child **继承且不能逃离** verifier boundary。
+### 2.2 Trusted host manifest distinguishes auto-safe vs manual-only
 
-### 2.2 Recursive-Seatbelt host cases 保持 predefined Human Gate
+host manifest 新增 trusted execution 属性：
 
-任何测试若其被验证行为本身必须启动第二个 Seatbelt boundary（例如真实验证普通 `runSandboxed()`/`src/sbpl.ts` 的 host behavior），都不能放进 outer-Seatbelt 自动 verifier 后再递归执行。
+- `auto`: 可在 one-shot verifier 的 single Seatbelt 边界内执行；
+- `manualOnly`: 测试主体本身需要启动第二个 Seatbelt 边界，或依赖无法安全嵌入 auto verifier 的 host behavior。
 
-可信 host manifest/plan 必须把此类 case 标记为 `manualOnly`（具体字段名可在实现计划中确定，但语义必须固定），且：
+至少以下类型属于 `manualOnly`：
 
-- 普通任务的 auto-safe host suite 不运行 recursive-Seatbelt case；
-- 变更 `src/sandbox.ts`、`src/sbpl.ts`、trusted verifier policy/profile，或其他需要真实第二层 Seatbelt 证明的关键路径时，classifier/plan 必须 fail closed 为 predefined Human Gate；
-- 此 Human Gate 继续使用 Human Owner 显式触发的 exact-SHA manual host path；Gateway/MCP 不获得通用 unsandboxed candidate execution 能力；
+- `tests/host/sandbox.host.test.ts`；
+- verifier Seatbelt 自身 feasibility/security boundary cases；
+- 任何未来需要 `sandbox-exec`/`sandbox_apply` 再包一层的 host case。
+
+Trusted changed-file planning 必须 fail closed：
+
+- 普通 source bugfix 仍可得到 `smoke/full + auto-safe`；
+- 修改 `src/sandbox.ts`、`src/sbpl.ts`、host-verifier policy/profile、manual-only host test 等 security boundary 路径时，得到 `full + manualOnlyRequired`；
+- auto verifier receipt 只能覆盖 auto-safe files；
 - manual-only case 的成功不能被普通 auto receipt 冒充或省略。
 
 因此“普通自举 bugfix 零人工 outer-test”仍是目标；安全边界本身的 Seatbelt 变更属于少量预定义 Human Gate，不算普通路径。
 
-### 2.3 Trusted parent 预分配 exact loopback ports
+### 2.3 Trusted parent preallocates exact loopback ports
 
-删除“allow localhost:* 再 deny production port”的模型。Verifier 默认没有任何 network capability；trusted parent 在 sandbox launch 前为本 job 分配有限数量的 exact IPv4 loopback ports，并把**仅这些端口**编译进 Seatbelt profile：
+删除“allow localhost:* 再 deny production port”的模型。Verifier 默认没有任何 network capability；trusted parent 在 sandbox launch 前为本 job 分配有限数量的 exact loopback ports，并把**仅这些端口**编译进 Seatbelt profile：
 
-- bind/inbound/outbound 只允许 `127.0.0.1:<allocatedPort>`；
+- runtime listener/connect 仍显式使用 `127.0.0.1:<allocatedPort>`；
+- Seatbelt filter 必须使用其可接受的 exact address spelling：`localhost:<allocatedPort>`；
+- bind/inbound/outbound 只允许这些 exact `localhost:<allocatedPort>` filters；
 - 不允许 `localhost:*`、任意端口范围、LAN 或外网；
 - production Gateway port `8787`（或 trusted runtime 当前 production port）不得出现在 allocation 中，因此由 deny-default 自然拒绝，不依赖 deny-within-allow carve-out；
 - allocation 由 trusted parent 产生，candidate/task/argv/env 不能请求端口；端口冲突是 infrastructure failure，不得通过扩大网络规则恢复；
@@ -74,28 +80,13 @@ Exact loopback allocation 属于真实执行计划的一部分，不能脱离 re
 
 以下原设计文字被本 amendment 覆盖：
 
-- §6.5 “loopback bind/connect 到系统分配的临时端口”改为“trusted parent 预分配并编译进 profile 的 exact loopback ports”；
-- §6.5 “为 sandbox 承重测试执行嵌套 `sandbox-exec`”删除，改为 child inheritance/non-escape；
-- §6.5/§6.6 “production Gateway port 显式 narrow deny”改为“production port 永不进入 exact allowlist，由 deny-default 拒绝”；
-- §11 Slice B 的 “nested sandbox” probe 改为 inheritance/non-escape probe；
-- §13.1(3) 的“临时 loopback listener 正常”解释为“仅 trusted execution plan 中 exact allocated loopback listener 正常”；
-- §6.9/C3 的“manual fallback 全部走同一 restricted orchestrator”对 recursive-Seatbelt `manualOnly` case 有一个窄例外：它仍由 Human Owner 显式启动现有 exact-SHA host path，且不得由 MCP/Gateway 自动调用。其他 manual fallback 继续走 restricted orchestrator。
+- nested Seatbelt success proof；
+- broad ephemeral localhost allow + production-port carve-out；
+- “all host files are auto-runnable under one verifier” 的隐含假设；
+- 任何把 runtime random ports 排除在 receipt/plan identity 外的实现。
 
-## 4. Slice B 修订后的必须 PASS 证据
+其余约束全部保留：exact SHA、trusted manifest、fixed runner、default deny、credential isolation、job-temp-only writes、no arbitrary host exec、no candidate-controlled policy/receipt、PASS 不自动 merge、manual mode 默认不变。
 
-进入 Slice C 前，真实 trusted host 必须同时证明：
+## 4. Activation consequence
 
-1. outer Seatbelt 内 child inheritance/non-escape：允许 fixture 行为成功，真实敏感路径/LAN 行为被拒，child 不能获得更宽 sandbox 权限；
-2. Safe Git hook marker：raw Git 真执行 hook，Safe Git override 真抑制；
-3. trusted exact loopback port：allocated port bind/connect PASS，LAN peer DENY，production port DENY；
-4. process-group cleanup：timeout 后 orphan child 消失；
-5. control/workspace/canonical/task/DB/credential/env negative probes继续 PASS；
-6. recursive-Seatbelt case 被可信 plan 明确标为 manual-only，不被 auto-safe receipt 计入 PASS。
-
-任一项缺少真实证据仍停在 Human Gate；不得进入 Slice C。
-
-## 5. Policy version 与安全回滚
-
-这次修改改变 verifier network/process proof semantics，`HOST_VERIFIER_POLICY_VERSION` 必须从 1 bump 到 2。未来 Receipt V2 必须绑定该 version。
-
-回滚仍是 `hostVerification.mode=manual`。不得为了绕过 macOS 限制恢复 broad localhost allow、自动 unsandboxed candidate execution、通用 host exec 或独立高权限 verifier 服务。
+这个 amendment **不构成 auto mode 激活批准**。实现完成并通过 real-host gate 后，仍须继续 Slice C/D、回归、20-run soak（若原 design 要求）以及 Human Owner 对 production `hostVerification.mode=auto` 的显式批准。

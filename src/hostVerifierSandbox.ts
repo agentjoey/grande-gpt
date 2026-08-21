@@ -176,11 +176,11 @@ export function buildHostVerifierSandboxPlan(input: HostVerifierSandboxPaths): H
     ";; Exact executable allowlist: process-fork permits child creation, not arbitrary exec targets.",
     ...input.executableFiles.map((path) => `(allow process-exec (literal "${q(path)}"))`),
     "",
-    ";; Trusted parent allocates exact IPv4 loopback ports before sandbox launch; all others remain denied.",
+    ";; Trusted parent allocates exact localhost ports before sandbox launch; all others remain denied.",
     ...input.loopbackPorts.flatMap((port) => [
-      `(allow network-bind (local ip "127.0.0.1:${port}"))`,
-      `(allow network-inbound (local ip "127.0.0.1:${port}"))`,
-      `(allow network-outbound (remote ip "127.0.0.1:${port}"))`,
+      `(allow network-bind (local ip "localhost:${port}"))`,
+      `(allow network-inbound (local ip "localhost:${port}"))`,
+      `(allow network-outbound (remote ip "localhost:${port}"))`,
     ]),
     "",
   ].join("\n");
