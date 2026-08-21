@@ -6,6 +6,7 @@ import { registeredIds } from "./registry.ts";
 import { getTask, listActiveTasks, createTask, updateTaskState } from "./tasks.ts";
 import { loadProfiles } from "./profiles.ts";
 import { getJob, listJobs, TERMINAL } from "./jobs.ts";
+import { JOB_RESULT_WAIT_MS, waitForTerminalJob } from "./jobWait.ts";
 import { jobReport, jobStateToError, startJob } from "./runner.ts";
 import { repoRead } from "./repoFile.ts";
 import { repoEdit, type EditOp } from "./repoFile.ts";
@@ -684,9 +685,13 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           required: ["jobId"],
         },
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-        handler: async (args) =>
-          wrap(deps, null, () => {
-            const jobId = args.jobId as string;
+        handler: async (args) => {
+          const jobId = args.jobId as string;
+          const initialJob = getJob(db, jobId);
+          if (initialJob && !TERMINAL.has(initialJob.state)) {
+            await waitForTerminalJob(db, jobId);
+          }
+          return wrap(deps, null, () => {
             const r = jobReport(db, jobId);
             const j = getJob(db, jobId);
             const taskId = j?.taskId ?? null;
@@ -701,12 +706,14 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
               // 的话，新增的非终态会掉进下面那条分支，模型读到「状态：<非终态>」
               // 会当作已结束——**而 P-1 的自主轮询正是靠这句 hint 决定要不要再取一次**。
               hint: !TERMINAL.has(r.state)
-                ? `Job ${jobId} 仍在运行中`
+                ? `本次调用已等待 ${JOB_RESULT_WAIT_MS / 1000} 秒，Job ${jobId} 仍在运行中；` +
+                  `请等待 grande_run 返回的 pollAfterSeconds 后再调用 grande_run_result`
                 : `Job ${jobId} 状态：${r.state}${r.exitCode !== null ? `，exitCode: ${r.exitCode}` : ""}${r.networkDenied ? "（疑似网络被拒——启发式判定，非沙箱权威信号）" : ""}`,
               truncated: r.truncated,
               taskContext: taskId ? makeTaskContext(db, layout, taskId) : null,
-            })
-          }),
+            });
+          });
+        },
       },
       {
         name: "grande_task_close",

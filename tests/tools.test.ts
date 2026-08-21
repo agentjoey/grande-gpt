@@ -2,11 +2,11 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createTask, getTask } from "../src/tasks.ts";
-import { getJob } from "../src/jobs.ts";
+import { createJob, finishJob, getJob } from "../src/jobs.ts";
 import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
 import { buildTools, type ToolDeps } from "../src/tools.ts";
@@ -497,6 +497,47 @@ describe("grande_run / grande_run_result", () => {
     await settle(r.data.jobId);
     const res = JSON.parse(await callTool("grande_run_result", { jobId: r.data.jobId }));
     expect(res.data.networkDenied).toBe(false);
+  });
+
+  it("grande_run_result 在一次调用内等到 running fixture 转为终态", async () => {
+    createJob(deps.db, {
+      jobId: "job_waiting_result", taskId: "task_abcd", profile: "ok",
+      argv: ["/bin/sh", "-c", "true"], pgid: 123,
+    });
+    const transition = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        finishJob(deps.db, "job_waiting_result", {
+          state: "passed", exitCode: 0, artifactPath: null, summary: null,
+        });
+        resolve();
+      }, 25);
+    });
+
+    const result = JSON.parse(await callTool("grande_run_result", { jobId: "job_waiting_result" }));
+    await transition;
+
+    expect(result.ok).toBe(true);
+    expect(result.data.state).toBe("passed");
+    expect(result.data.exitCode).toBe(0);
+  });
+
+  it("等待 15 秒仍未结束时提示按 pollAfterSeconds 稍后再试", async () => {
+    createJob(deps.db, {
+      jobId: "job_wait_deadline", taskId: "task_abcd", profile: "slow",
+      argv: ["/bin/sh", "-c", "sleep 30"], pgid: 123,
+    });
+    vi.useFakeTimers();
+    try {
+      const pending = callTool("grande_run_result", { jobId: "job_wait_deadline" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      const result = JSON.parse(await pending);
+
+      expect(result.data.state).toBe("running");
+      expect(result.hint).toContain("已等待 15 秒");
+      expect(result.hint).toContain("pollAfterSeconds");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 }, 15_000);
 
