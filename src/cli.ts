@@ -370,13 +370,13 @@ function cmdOuterTest(
     out(`验收目标：${taskId === undefined ? "canonical grande-gpt" : taskId}`);
     out(`  cwd  ${cwd}`);
     out("");
-    out(`自举时跑不了的测试文件：${plan.files.length} 个`);
-    out(`（清单从 ${plan.fromProfile} profile 的 --exclude 反推，不是硬编码）`);
+    out(`可信 host suite：${plan.files.length} 个文件`);
+    out(`（执行清单来自运行中 Gateway manifest；${plan.fromProfile} 的 --exclude 仅用于 transition drift 检查）`);
     out("");
     for (const f of plan.files) {
       const why = plan.reasons.get(f);
       out(`  ${f}`);
-      out(`    ${why ?? "（排除理由未记录——请在 src/outerTest.ts 的 WHY 里补上）"}`);
+      out(`    ${why ?? "（trusted host manifest 缺少 capability reason）"}`);
     }
     out("");
     if (!run) {
@@ -396,7 +396,9 @@ function cmdOuterTest(
 
     out("正在运行……（沙箱外）");
     out("");
-    const r = outerTestSpawn("npx", ["vitest", "run", ...plan.files], {
+    const r = outerTestSpawn("npx", [
+      "vitest", "run", "--config", "vitest.host.config.ts", ...plan.files,
+    ], {
       cwd,
       stdio: "inherit",
       encoding: "utf8",

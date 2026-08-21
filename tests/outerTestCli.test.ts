@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.ts";
 import { openDb } from "../src/db.ts";
+import { TRUSTED_HOST_MANIFEST } from "../src/hostVerification.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { createTask } from "../src/tasks.ts";
 
@@ -20,14 +21,17 @@ function syncCli(argv: string[]): number {
   return result;
 }
 
-function syncCliWithOuterTestSpawn(
-  argv: string[],
-  spawn: () => { status: number | null; error?: Error },
-): number {
+type TestOuterSpawn = (
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; stdio: "inherit"; encoding: "utf8" },
+) => { status: number | null; error?: Error };
+
+function syncCliWithOuterTestSpawn(argv: string[], spawn: TestOuterSpawn): number {
   const callable = runCli as unknown as (
     argv: string[],
     out: (line: string) => void,
-    options: { outerTestSpawn: typeof spawn },
+    options: { outerTestSpawn: TestOuterSpawn },
   ) => number | Promise<number>;
   const result = callable(argv, (line) => lines.push(line), { outerTestSpawn: spawn });
   if (typeof result !== "number") throw new Error("outer-test 应同步返回退出码");
@@ -78,10 +82,17 @@ beforeEach(() => {
   const layout = loadLayout();
   ensureLayout(layout);
   mkdirSync(join(ws, "grande-gpt"), { recursive: true });
+  const excludes = [
+    "tests/sandbox.test.ts",
+    "tests/runner.test.ts",
+    "tests/server.test.ts",
+    "tests/tools.test.ts",
+    "tests/e2e.test.ts",
+  ].flatMap((file) => ["--exclude", file]);
   writeFileSync(
     join(layout.configDir, "profiles.yaml"),
     "repos:\n  grande-gpt:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts"], timeoutSeconds: 600 }\n',
+      `    unit-selfhost: { argv: ${JSON.stringify(["npx", "vitest", "run", ...excludes])}, timeoutSeconds: 600 }\n`,
     "utf8",
   );
 });
@@ -117,6 +128,22 @@ describe("grande outer-test --task", () => {
     expect(lines.join("\n")).toContain("--task");
   });
 
+  it("--run uses the dedicated host config and manifest-selected files", () => {
+    prepareRunnableTask("task_host_plan");
+    let seenArgs: readonly string[] = [];
+    expect(syncCliWithOuterTestSpawn(
+      ["outer-test", "--task", "task_host_plan", "--run"],
+      (_command, args) => {
+        seenArgs = args;
+        return { status: 0 };
+      },
+    )).toBe(0);
+    expect(seenArgs).toEqual([
+      "vitest", "run", "--config", "vitest.host.config.ts",
+      ...TRUSTED_HOST_MANIFEST.map((entry) => entry.file),
+    ]);
+  });
+
   it("--run 成功后把 host outer-test receipt 绑定到运行前锁定的 task HEAD", () => {
     const { head } = prepareRunnableTask("task_s18_receipt");
 
@@ -135,7 +162,7 @@ describe("grande outer-test --task", () => {
       taskId: "task_s18_receipt",
       commit: head,
       profile: "unit-selfhost",
-      files: ["tests/sandbox.test.ts"],
+      files: TRUSTED_HOST_MANIFEST.map((entry) => entry.file),
     });
     expect(lines.join("\n")).toMatch(/receipt|凭据|验证记录/i);
   });
