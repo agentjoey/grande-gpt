@@ -242,6 +242,29 @@ describe("repoSearch()", () => {
     expect(new Set([first.nextCursor, second.nextCursor, third.nextCursor]).size).toBe(3);
   });
 
+  it("numeric legacy offset 在耗尽前超时时保留剩余量，续页从第二条基线命中开始且游标继续前进", () => {
+    file("src/legacy.ts", "header\nNEEDLE-first\nNEEDLE-second\nNEEDLE-third");
+    const baseline = repoSearch(root, "NEEDLE").matches.map((match) => match.text);
+    expect(baseline).toEqual(["NEEDLE-first", "NEEDLE-second", "NEEDLE-third"]);
+
+    const timedOut = repoSearch(root, "NEEDLE", { cursor: "1", budgetMs: 0 });
+    expect(timedOut.matches).toEqual([]);
+    expect(timedOut.nextCursor).toBe("v3:0:1:1");
+
+    const resumed = repoSearch(root, "NEEDLE", { cursor: timedOut.nextCursor });
+    expect(resumed.matches.map((match) => match.text)).toEqual(baseline.slice(1));
+    expect(resumed.matches.map((match) => match.text)).not.toContain(baseline[0]);
+
+    const oneMoreTimedStep = repoSearch(root, "NEEDLE", {
+      cursor: timedOut.nextCursor,
+      budgetMs: 0,
+    });
+    expect(oneMoreTimedStep.matches).toEqual([]);
+    expect(oneMoreTimedStep.nextCursor).not.toBe(timedOut.nextCursor);
+    const afterTimedStep = repoSearch(root, "NEEDLE", { cursor: oneMoreTimedStep.nextCursor });
+    expect(afterTimedStep.matches[0]!.text).toBe(baseline[1]);
+  });
+
   it("拒绝语义上超出当前文件集合或行数的 opaque 游标", () => {
     file("src/a.ts", "one\nNEEDLE\nthree");
 
@@ -251,6 +274,17 @@ describe("repoSearch()", () => {
       .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/lineIndex|行索引|范围/) }));
     expect(() => repoSearch(root, "NEEDLE", { cursor: "v2:1:1" }))
       .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/lineIndex|行索引|范围/) }));
+  });
+
+  it("拒绝没有待跳过命中、位于 EOF、或超出安全整数范围的 v3 legacyOffset", () => {
+    file("src/a.ts", "header\nNEEDLE-first\nNEEDLE-second");
+
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v3:0:0:0" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/legacyOffset|剩余|正整数/) }));
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v3:1:0:1" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/legacyOffset|剩余|EOF/) }));
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v3:0:0:9007199254740992" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/安全整数|范围/) }));
   });
 
   it("超过大小上限的文件被跳过，但计数体现在 skippedOversized 里而不是静默消失", () => {

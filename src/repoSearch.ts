@@ -61,18 +61,38 @@ function parseCursor(raw: string | null | undefined): ParsedCursor {
     }
     return { point: { fileIndex: 0, lineIndex: 0 }, legacyOffset, versioned: false };
   }
-  const match = /^v2:(\d+):(\d+)$/.exec(raw);
-  if (!match) throw new SearchError("INVALID_INPUT", `cursor 格式无效，收到：${raw}`);
-  const fileIndex = Number(match[1]);
-  const lineIndex = Number(match[2]);
-  if (!Number.isSafeInteger(fileIndex) || !Number.isSafeInteger(lineIndex)) {
-    throw new SearchError("INVALID_INPUT", `cursor 超出安全整数范围，收到：${raw}`);
+  const v2 = /^v2:(\d+):(\d+)$/.exec(raw);
+  if (v2) {
+    const fileIndex = Number(v2[1]);
+    const lineIndex = Number(v2[2]);
+    if (!Number.isSafeInteger(fileIndex) || !Number.isSafeInteger(lineIndex)) {
+      throw new SearchError("INVALID_INPUT", `cursor 超出安全整数范围，收到：${raw}`);
+    }
+    return { point: { fileIndex, lineIndex }, legacyOffset: 0, versioned: true };
   }
-  return { point: { fileIndex, lineIndex }, legacyOffset: 0, versioned: true };
+
+  const v3 = /^v3:(\d+):(\d+):(\d+)$/.exec(raw);
+  if (!v3) throw new SearchError("INVALID_INPUT", `cursor 格式无效，收到：${raw}`);
+  const fileIndex = Number(v3[1]);
+  const lineIndex = Number(v3[2]);
+  const legacyOffset = Number(v3[3]);
+  if (
+    !Number.isSafeInteger(fileIndex) ||
+    !Number.isSafeInteger(lineIndex) ||
+    !Number.isSafeInteger(legacyOffset)
+  ) {
+    throw new SearchError("INVALID_INPUT", `cursor legacyOffset 或扫描点超出安全整数范围，收到：${raw}`);
+  }
+  if (legacyOffset <= 0) {
+    throw new SearchError("INVALID_INPUT", "v3 cursor 的剩余 legacyOffset 必须是正整数");
+  }
+  return { point: { fileIndex, lineIndex }, legacyOffset, versioned: true };
 }
 
-function versionedCursor(point: ScanPoint): string {
-  return `v2:${point.fileIndex}:${point.lineIndex}`;
+function versionedCursor(point: ScanPoint, remainingLegacyOffset = 0): string {
+  return remainingLegacyOffset > 0
+    ? `v3:${point.fileIndex}:${point.lineIndex}:${remainingLegacyOffset}`
+    : `v2:${point.fileIndex}:${point.lineIndex}`;
 }
 
 export function boundSearchMatchForResult(
@@ -139,6 +159,9 @@ function validateVersionedCursor(cursor: ParsedCursor, files: string[]): void {
   if (fileIndex === files.length) {
     if (lineIndex !== 0) {
       throw new SearchError("INVALID_INPUT", "cursor lineIndex 在文件集合末尾必须为 0");
+    }
+    if (cursor.legacyOffset > 0) {
+      throw new SearchError("INVALID_INPUT", "v3 cursor 在 EOF 不能仍有剩余 legacyOffset");
     }
     return;
   }
@@ -349,7 +372,7 @@ export function repoSearch(
           ? String(cursor.legacyOffset + slice.length)
           : versionedCursor(firstUnreturned);
       } else {
-        nextCursor = versionedCursor(resumePoint);
+        nextCursor = versionedCursor(resumePoint, remainingLegacyOffset);
       }
     }
     if (nextCursor !== null && nextCursor === opts?.cursor) {
