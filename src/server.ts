@@ -19,7 +19,7 @@ import {
   requestCorrelation,
   type McpCallMetrics,
 } from "./mcpTelemetry.ts";
-import { toMcpTextResult } from "./mcpToolResult.ts";
+import { mcpToolResultByteLength, toMcpTextResult } from "./mcpToolResult.ts";
 
 export interface AppConfig {
   issuer: string;
@@ -428,7 +428,7 @@ export function createApp(cfg: AppConfig): Hono {
         // metadata to diagnose tool selection without persisting caller values.
         const inputBytes = jsonByteLength(args);
         const argKeys = Object.keys(args).sort().join(",");
-        const logTool = (outputBytes: number, result: "ok" | "error") => {
+        const logTool = (outputBytes: number | "unknown", result: "ok" | "error") => {
           const metrics: McpCallMetrics = { correlation, inputBytes, outputBytes };
           console.log(
             `[tool] ${ts()} ${tool.name} correlation=${metrics.correlation} inputBytes=${metrics.inputBytes} ` +
@@ -439,12 +439,14 @@ export function createApp(cfg: AppConfig): Hono {
         try {
           const result = await tool.handler(args as Record<string, unknown>);
           const sc = result.structuredContent as Record<string, unknown>;
-          logTool(jsonByteLength(sc), sc.ok === true ? "ok" : "error");
-          return toMcpTextResult(sc);
+          const mcpResult = toMcpTextResult(sc);
+          const deliveredEnvelope = JSON.parse(mcpResult.content[0].text) as { ok?: unknown };
+          logTool(mcpToolResultByteLength(mcpResult), deliveredEnvelope.ok === true ? "ok" : "error");
+          return mcpResult;
         } catch (error) {
           // Preserve the SDK's existing tool-error response by rethrowing. The
           // callback nevertheless executed, so leave exactly one safe line.
-          logTool(0, "error");
+          logTool("unknown", "error");
           throw error;
         }
       });

@@ -11,7 +11,11 @@ import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
 import { buildTools, TOOLSET_EPOCH, toolsetIdentity, type ToolDeps } from "../src/tools.ts";
 import { MCP_WRITE_TOOLS } from "../src/contract.ts";
-import { toMcpTextResult } from "../src/mcpToolResult.ts";
+import {
+  MAX_MCP_TOOL_RESULT_BYTES,
+  mcpToolResultByteLength,
+  toMcpTextResult,
+} from "../src/mcpToolResult.ts";
 
 let ws: string, ctrl: string, layout: Layout, deps: ToolDeps;
 let savedWs: string | undefined, savedCtrl: string | undefined;
@@ -224,7 +228,6 @@ describe("工具注解", () => {
   });
 
   it("真实 handler 的代表性结果保持 32 KiB 内，且 canonical wire 比 legacy 重复编码至少小 30%", async () => {
-    const MAX_COMPLETE_RESULT_BYTES = 32 * 1024;
     const MAX_CANONICAL_SHARE_OF_LEGACY = 0.70;
     const worktree = join(layout.worktreesRoot, "demo", "task_abcd");
     writeFileSync(
@@ -254,9 +257,7 @@ describe("工具注解", () => {
     ]);
 
     const canonicalResults = envelopes.map(toMcpTextResult);
-    const canonicalBytes = canonicalResults.map((result) =>
-      Buffer.byteLength(JSON.stringify(result), "utf8")
-    );
+    const canonicalBytes = canonicalResults.map(mcpToolResultByteLength);
     const legacyBytes = envelopes.map((envelope, index) =>
       Buffer.byteLength(JSON.stringify({
         ...canonicalResults[index],
@@ -265,7 +266,7 @@ describe("工具注解", () => {
     );
 
     expect(envelopes.map((envelope) => (envelope as { ok?: boolean }).ok)).toEqual([true, true, true, false]);
-    for (const bytes of canonicalBytes) expect(bytes).toBeLessThanOrEqual(MAX_COMPLETE_RESULT_BYTES);
+    for (const bytes of canonicalBytes) expect(bytes).toBeLessThanOrEqual(MAX_MCP_TOOL_RESULT_BYTES);
 
     const combinedCanonicalBytes = canonicalBytes.reduce((total, bytes) => total + bytes, 0);
     const combinedLegacyBytes = legacyBytes.reduce((total, bytes) => total + bytes, 0);
@@ -274,7 +275,7 @@ describe("工具注解", () => {
     );
   });
 
-  it("repo_read 用 nextLine 给出精确续读调用，续读到 EOF 后即使 truncated=true 也不再提示调用", async () => {
+  it("repo_read 只返回完整行，用 nextLine 续读到 EOF 可逐字节重建原文", async () => {
     const worktree = join(layout.worktreesRoot, "demo", "task_abcd");
     const full = Array.from({ length: 300 }, (_, i) => `${String(i + 1).padStart(3, "0")}:${"x".repeat(96)}`).join("\n");
     writeFileSync(join(worktree, "budget.ts"), full, "utf8");
@@ -283,29 +284,33 @@ describe("工具注解", () => {
 
     expect(r.ok).toBe(true);
     expect(r.truncated).toBe(true);
-    expect(r.data.lastLineTruncated).toBe(true);
-    expect(r.data.nextLine).toBe(164);
+    expect(r.data.lastLineTruncated).toBe(false);
+    expect(r.data.content.endsWith("\n")).toBe(true);
+    expect(r.data.nextLine).toBe(163);
     expect(r.hint).toContain(
-      'grande_repo_read({"path":"budget.ts","lineRange":[164,300],"maxBytes":16384,"taskId":"task_abcd"})',
+      'grande_repo_read({"path":"budget.ts","lineRange":[163,300],"maxBytes":16384,"taskId":"task_abcd"})',
     );
 
     const last = JSON.parse(await callTool("grande_repo_read", {
-      path: "budget.ts", lineRange: [164, 300], taskId: "task_abcd",
+      path: "budget.ts", lineRange: [r.data.nextLine, 300], taskId: "task_abcd",
     }));
     expect(last.ok).toBe(true);
     expect(last.truncated).toBe(true);
     expect(last.data.nextLine).toBeNull();
     expect(last.hint).not.toContain("grande_repo_read(");
     expect(last.hint).toMatch(/文件末尾|EOF/);
+    expect(r.data.content + last.data.content).toBe(full);
 
     writeFileSync(join(worktree, "one-long-line.ts"), "x".repeat(20 * 1024), "utf8");
     const oneLine = JSON.parse(await callTool("grande_repo_read", {
       path: "one-long-line.ts", taskId: "task_abcd",
     }));
-    expect(oneLine.data.lastLineTruncated).toBe(true);
-    expect(oneLine.data.nextLine).toBeNull();
-    expect(oneLine.hint).toMatch(/仅返回前缀/);
-    expect(oneLine.hint).not.toContain("grande_repo_read(");
+    expect(oneLine).toMatchObject({
+      ok: false,
+      taskId: "task_abcd",
+      error: { code: "INVALID_INPUT" },
+    });
+    expect(oneLine.error.message).toMatch(/第 1 行.*20480.*maxBytes=16384.*完整行/s);
   });
 
   it("repo_read/repo_search 对越过硬上限的调用返回 INVALID_INPUT，不静默钳制", async () => {

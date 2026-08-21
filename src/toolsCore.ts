@@ -399,11 +399,9 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             data: r,
             hint: r.nextLine !== null
               ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），内容未完整返回（本页 ${returnedBytes} 字节）` +
-                `${r.lastLineTruncated ? "；当前返回的最后一行超过字节预算，仅返回前缀并从下一行继续" : ""}；` +
-                `续取请调用 grande_repo_read(${JSON.stringify(continuationArgs)})`
+                `；本页仅含完整 UTF-8 行；续取请调用 grande_repo_read(${JSON.stringify(continuationArgs)})`
               : r.truncated
-                ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），本次请求已到文件末尾` +
-                  `${r.lastLineTruncated ? "；末行超过字节预算，仅返回前缀且没有后续行" : "，没有后续行"}`
+                ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），本次请求已到文件末尾，没有后续行`
                 : `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节）`,
               truncated: r.truncated,
             });

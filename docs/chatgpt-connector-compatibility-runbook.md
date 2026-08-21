@@ -132,6 +132,16 @@ Production App 只在这种正式 tool-contract release 时更新工具 snapshot
 - 本次 onboarding release：确认 production buildTools 精确为 25 tools、epoch 2，并且只新增 `grande_repo_add_propose` / `grande_repo_add_apply`。
 - 运行 `unit-selfhost + typecheck`；涉及 selfhost 排除区域时，再运行 host `outer-test`。
 
+### Release A 切换前 abort gate
+
+切换代码前，必须先从 production `selfcheck` 捕获并保留当前
+`gatewayBuild`、`toolsetEpoch`、`toolsCount`、`toolsDigest`，不得用 candidate 或历史值代填。
+只有 production `toolsDigest` 精确等于
+`sha256:62c1d93894112442740f01ec30aeefdea0229ef7fc6db583eb63c06c0aef46a1`
+时，才允许按 epoch 2 / no-refresh patch 路径继续。若 digest 不一致，立即停止（abort）：
+先对账/reconcile production contract 与 candidate，或取得 owner 对正式 contract release
+的明确授权；不得在快照已分叉时仍以 epoch 2 无刷新方式覆盖。
+
 发布后：
 
 - `selfcheck`：HTTP 200，toolsCount 正确，server identity 完整。
@@ -150,8 +160,12 @@ release 不重建 App，也不执行 App Refresh / Scan Tools；部署和 Gatewa
 
 下表是 Release A 的统一证据账本：历史资料没有记录的字段明确写“未记录”，不能倒推；
 candidate 行在真实 Web/iOS 门禁完成前明确保持“等待外部门禁”，不能用本地自动测试代填。
-`任务 A/B calls / bytes` 中的 bytes 是完整 serialized MCP tool-result bytes；correlation 只记录
-Gateway 生成的安全相关值，不能从客户端会话或其他标识猜测。
+`任务 A/B calls / bytes` 中的 bytes 只有一个定义：实际交付的完整 MCP result
+对象 `JSON.stringify(toMcpTextResult(envelope))` 的 UTF-8 字节数，包含外层 JSON
+对 text 内容做的转义；不得改记 inner logical envelope 大小。对于绕过 GrandeGPT
+encoder、由 SDK-generated error result 完成的拒绝，除非从实际 response 量到完整
+result，否则记 `outputBytes=unknown`，绝不记 `0`。correlation 只记录 Gateway 生成的
+安全相关值，不能从客户端会话或其他标识猜测。
 
 | 证据 | 平台 | ChatGPT model | App version / tool count | Gateway build | toolset epoch / digest | 任务 A calls / bytes | 任务 B calls / bytes | disabled timestamp | 最后匹配的 Gateway correlation | 401 / restart |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -170,6 +184,8 @@ GrandeGPT 调用；两任务 serialized result 合计不超过 1 MiB；单个结
 边界记录，不得改写成应用 handler 失败。
 
 截至 2026-08-21，本地行为回归已经覆盖真实 built handlers 产生的 `repo_read`、`repo_search`、
-`run_result` 与 error envelopes，再走 canonical `toMcpTextResult` 计算完整编码大小；host
-`outer-test`、受保护部署/Gateway restart、部署后 `selfcheck`，以及三次 Web/iOS 真实验收仍是
-明确待完成的外部门禁。因此 `GG-BL-010` 保持 `OPEN`。
+`run_result` 与 error envelopes，再走 canonical `toMcpTextResult` 计算完整编码大小。
+exact candidate host boundary tests 已在 code commit
+`7b98f7dce2f0b10723b29be64ca28e1438f1a779` 通过：5 files / 160 tests。该绑定证据不等于
+production activation；受保护部署/Gateway restart、部署后 `selfcheck`，以及三次 Web/iOS
+真实验收仍是明确待完成的外部门禁。因此 `GG-BL-010` 保持 `OPEN`。

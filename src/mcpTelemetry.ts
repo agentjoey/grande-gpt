@@ -3,10 +3,10 @@ import { createHash } from "node:crypto";
 export interface McpCallMetrics {
   correlation: string;
   inputBytes: number;
-  outputBytes: number;
+  outputBytes: number | "unknown";
 }
 
-/** Returns the UTF-8 size of the same JSON representation sent to MCP clients. */
+/** Returns the UTF-8 size of a value's JSON representation. */
 export function jsonByteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value) ?? "null", "utf8");
 }

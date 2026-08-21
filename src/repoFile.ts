@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { dirname } from "node:path";
 import type { AuditHandle } from "./audit.ts";
 import { createCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
-import { truncateText } from "./envelope.ts";
 import type { Layout } from "./layout.ts";
 import { resolveInRepo } from "./paths.ts";
 import { assertWritable, assertWritableResolved, type DenyRules } from "./policy.ts";
@@ -126,24 +125,48 @@ export function repoRead(
     truncated = from > 1 || to < actualTotalLines;
   }
 
-  const capped = truncateText(body, maxBytes);
-  const returnedNewlines = capped.text.match(/\n/g)?.length ?? 0;
-  const returnedBytes = Buffer.byteLength(capped.text, "utf8");
-  const nextSourceByte = Buffer.from(body, "utf8")[returnedBytes];
-  const lastLineTruncated = capped.truncated && !capped.text.endsWith("\n") && nextSourceByte !== 0x0a;
-  const nextCandidate = capped.truncated
-    ? startLine + returnedNewlines + (capped.text.endsWith("\n") ? 0 : 1)
+  // Page only at source-line boundaries. Byte truncation inside a line loses data:
+  // a continuation can address only line numbers, so advancing nextLine after a
+  // partial line silently skips its suffix. Count each line together with its
+  // newline delimiter so concatenating all pages recreates the selected bytes.
+  let pageEnd = 0;
+  let returnedLines = 0;
+  let returnedBytes = 0;
+  while (pageEnd < body.length) {
+    const newline = body.indexOf("\n", pageEnd);
+    const lineEnd = newline === -1 ? body.length : newline + 1;
+    const lineBytes = Buffer.byteLength(body.slice(pageEnd, lineEnd), "utf8");
+    if (returnedBytes + lineBytes > maxBytes) {
+      if (returnedLines === 0) {
+        throw new EditError(
+          "INVALID_INPUT",
+          `${relativePath} 第 ${startLine} 行为 ${lineBytes} 个 UTF-8 字节（包括换行边界），` +
+            `超过 maxBytes=${maxBytes}；repo_read 只能返回完整行，且 maxBytes 硬上限为 ` +
+            `${MAX_REPO_READ_BYTES}。请缩小/调整 lineRange，无法用 nextLine 跳过该行后缀。`,
+        );
+      }
+      break;
+    }
+    returnedBytes += lineBytes;
+    pageEnd = lineEnd;
+    returnedLines++;
+  }
+
+  const content = body.slice(0, pageEnd);
+  const budgetTruncated = pageEnd < body.length;
+  const nextCandidate = budgetTruncated
+    ? startLine + returnedLines
     : endLine + 1;
   const nextLine = nextCandidate <= actualTotalLines ? nextCandidate : null;
   return {
-    truncated: truncated || capped.truncated,
+    truncated: truncated || budgetTruncated,
     nextLine,
-    lastLineTruncated,
+    lastLineTruncated: false,
     path: relativePath,
     sha256: digest,
     bytes: raw.byteLength,
     totalLines: lines.length,
-    content: capped.text,
+    content,
   };
 }
 

@@ -87,50 +87,107 @@ describe("repoRead()", () => {
   it("超过 maxBytes 时截断并标记，但 sha256 仍是【完整文件】的哈希", () => {
     // 这一条是设计要点：sha256 用于 staleness 校验，必须代表磁盘上的完整文件。
     // 若返回截断内容的哈希，模型拿它回来改文件会永远对不上。
-    const big = "x".repeat(200);
+    const big = Array.from({ length: 20 }, () => "x".repeat(20)).join("\n");
     file("big.ts", big);
     const r = repoRead(root, "big.ts", { maxBytes: 50 });
     expect(r.truncated).toBe(true);
-    expect(r.content.length).toBeLessThanOrEqual(50);
+    expect(Buffer.byteLength(r.content, "utf8")).toBeLessThanOrEqual(50);
+    expect(r.lastLineTruncated).toBe(false);
     expect(r.sha256).toBe(sha(big));
   });
 
-  it("默认最多返回 16 KiB，同时保留完整文件的 sha256、bytes 与 totalLines", () => {
+  it("默认按完整行分页，沿 nextLine 续读可逐字节重建原文件并保留完整文件元数据", () => {
     const full = Array.from({ length: 300 }, (_, i) => `${String(i + 1).padStart(3, "0")}:${"x".repeat(96)}`).join("\n");
     file("budget.ts", full);
 
-    const r = repoRead(root, "budget.ts");
+    const first = repoRead(root, "budget.ts");
 
-    expect(Buffer.byteLength(r.content, "utf8")).toBeLessThanOrEqual(16 * 1024);
-    expect(r.truncated).toBe(true);
-    expect(r.sha256).toBe(sha(full));
-    expect(r.bytes).toBe(Buffer.byteLength(full, "utf8"));
-    expect(r.totalLines).toBe(300);
-    expect(r.lastLineTruncated).toBe(true);
-    expect(r.nextLine).toBe(164);
+    expect(Buffer.byteLength(first.content, "utf8")).toBeLessThanOrEqual(16 * 1024);
+    expect(first.content).toMatch(/^001:/);
+    expect(first.content.endsWith("\n")).toBe(true);
+    expect(first.truncated).toBe(true);
+    expect(first.sha256).toBe(sha(full));
+    expect(first.bytes).toBe(Buffer.byteLength(full, "utf8"));
+    expect(first.totalLines).toBe(300);
+    expect(first.lastLineTruncated).toBe(false);
+    expect(first.nextLine).toBe(163);
 
-    const last = repoRead(root, "budget.ts", { lineRange: [r.nextLine!, 300] });
-    expect(last.content).toMatch(/^164:/);
+    const last = repoRead(root, "budget.ts", { lineRange: [first.nextLine!, 300] });
+    expect(last.content).toMatch(/^163:/);
     expect(last.content).toMatch(/300:x+$/);
     expect(last.truncated).toBe(true); // 前缀未返回，但本次已经读到 EOF。
     expect(last.lastLineTruncated).toBe(false);
     expect(last.nextLine).toBeNull();
+    expect(first.content + last.content).toBe(full);
   });
 
-  it("单行超过字节预算时只返回该行前缀并明确跳到下一行，不用同一 lineRange 原地重试", () => {
+  it("UTF-8 多字节行只整行返回，分页重建不重复、不跳字节并保留换行边界", () => {
+    const full = "α\nββ\n終";
+    file("utf8-lines.ts", full);
+
+    const first = repoRead(root, "utf8-lines.ts", { maxBytes: 5 });
+    expect(first.content).toBe("α\n");
+    expect(first.nextLine).toBe(2);
+    expect(first.lastLineTruncated).toBe(false);
+
+    const second = repoRead(root, "utf8-lines.ts", {
+      maxBytes: 5,
+      lineRange: [first.nextLine!, first.totalLines],
+    });
+    expect(second.content).toBe("ββ\n");
+    expect(second.nextLine).toBe(3);
+    expect(second.lastLineTruncated).toBe(false);
+
+    const third = repoRead(root, "utf8-lines.ts", {
+      maxBytes: 5,
+      lineRange: [second.nextLine!, second.totalLines],
+    });
+
+    expect(third.content).toBe("終");
+    expect(third.nextLine).toBeNull();
+    expect(third.lastLineTruncated).toBe(false);
+    expect(first.content + second.content + third.content).toBe(full);
+  });
+
+  it("恰好等于 maxBytes 的完整 UTF-8 行被返回，nextLine 指向下一条完整行", () => {
+    file("exact-boundary.ts", "éé\nnext");
+
+    const first = repoRead(root, "exact-boundary.ts", { maxBytes: 5 });
+    const second = repoRead(root, "exact-boundary.ts", {
+      maxBytes: 5,
+      lineRange: [first.nextLine!, first.totalLines],
+    });
+
+    expect(Buffer.byteLength(first.content, "utf8")).toBe(5);
+    expect(first.content).toBe("éé\n");
+    expect(first.nextLine).toBe(2);
+    expect(second.content).toBe("next");
+    expect(second.nextLine).toBeNull();
+  });
+
+  it("文件末尾换行可由分页逐字节重建，EOF 后 nextLine 为 null", () => {
+    const full = "one\ntwo\n";
+    file("eof-newline.ts", full);
+
+    const first = repoRead(root, "eof-newline.ts", { maxBytes: 4 });
+    const last = repoRead(root, "eof-newline.ts", {
+      maxBytes: 4,
+      lineRange: [first.nextLine!, first.totalLines],
+    });
+
+    expect(first.content).toBe("one\n");
+    expect(last.content).toBe("two\n");
+    expect(last.nextLine).toBeNull();
+    expect(first.content + last.content).toBe(full);
+  });
+
+  it("首条选中行单独超过 maxBytes 时以 INVALID_INPUT 明确报告行号与完整行限制", () => {
     file("long-line.ts", `${"x".repeat(20 * 1024)}\nSECOND\n`);
 
-    const first = repoRead(root, "long-line.ts");
-
-    expect(first.truncated).toBe(true);
-    expect(first.lastLineTruncated).toBe(true);
-    expect(first.nextLine).toBe(2);
-    expect(Buffer.byteLength(first.content, "utf8")).toBe(16 * 1024);
-
-    const second = repoRead(root, "long-line.ts", { lineRange: [first.nextLine!, 2] });
-    expect(second.content).toBe("SECOND");
-    expect(second.lastLineTruncated).toBe(false);
-    expect(second.nextLine).toBeNull();
+    expect(() => repoRead(root, "long-line.ts")).toThrow(expect.objectContaining({
+      code: "INVALID_INPUT",
+      message: expect.stringMatching(/第 1 行.*20481.*maxBytes=16384.*完整行/s),
+    }));
   });
 
   it("显式 24 KiB 上限被接受且不会把调用方请求静默压回默认 16 KiB", () => {

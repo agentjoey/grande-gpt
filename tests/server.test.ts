@@ -17,6 +17,11 @@ import { createTask } from "../src/tasks.ts";
 import { loadRegistry, saveRegistry } from "../src/registry.ts";
 import type { AppConfig } from "../src/server.ts";
 import { createApp, startGateway } from "../src/server.ts";
+import {
+  MAX_MCP_TOOL_RESULT_BYTES,
+  mcpToolResultByteLength,
+  type McpTextResult,
+} from "../src/mcpToolResult.ts";
 
 let ws: string, ctrl: string, layout: Layout, app: Hono;
 let savedWs: string | undefined, savedCtrl: string | undefined;
@@ -841,7 +846,7 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
     } finally { restore(); }
   });
 
-  it("tools/call records exact UTF-8 input and logical-envelope output byte counts", async () => {
+  it("tools/call records exact UTF-8 input and complete delivered MCP-result output byte counts", async () => {
     const token = await mintToken(app);
     const [text, restore] = captureLog();
     const rawSessionMarker = "RAW_SESSION_MARKER_MUST_NOT_REACH_LOGS";
@@ -862,19 +867,87 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
           },
         }),
       });
-      await response.text();
+      const body = await response.text();
+      const data = body.trim().startsWith("{")
+        ? body.trim()
+        : body.split("\n").filter((item) => item.startsWith("data:"))
+          .map((item) => item.slice(5).trim()).join("");
+      const rpc = JSON.parse(data) as { result?: unknown };
+      const deliveredBytes = Buffer.byteLength(JSON.stringify(rpc.result), "utf8");
       const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
       expect(toolLines).toHaveLength(1);
       const line = toolLines[0];
       expect(line).toMatch(/\[tool\].*grande_repo_read/);
       expect(line).toMatch(/correlation=mcp:[0-9a-f]{12}/);
       expect(line).toContain("inputBytes=31");
-      expect(line).toContain("outputBytes=324");
+      expect(line).toContain(`outputBytes=${deliveredBytes}`);
       expect(line).toMatch(/argKeys=\[path,repoId\]/);
       expect(line).toMatch(/result=ok/);
       expect(line).toMatch(/durationMs=\d+/);
       expect(line).not.toContain(token);
       expect(line).not.toContain(rawSessionMarker);
+    } finally { restore(); }
+  });
+
+  it("an escape-heavy real repo_read fails closed before the complete delivered MCP result exceeds 32 KiB", async () => {
+    const sourceMarker = "ESCAPE_HEAVY_SOURCE_MUST_NOT_SURVIVE_FAIL_CLOSED";
+    const escapePair = String.fromCharCode(92, 34);
+    const source = [
+      `export const marker = ${JSON.stringify(sourceMarker)};`,
+      ...Array.from({ length: 180 }, (_, index) =>
+        `export const escaped${index} = ${JSON.stringify(escapePair.repeat(80))};`),
+    ].join("\n");
+    writeFileSync(join(layout.worktreesRoot, REPO, TASK, "escape-heavy.ts"), source, "utf8");
+
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 86, method: "tools/call",
+          params: {
+            name: "grande_repo_read",
+            arguments: { taskId: TASK, path: "escape-heavy.ts" },
+          },
+        }),
+      });
+      const body = await response.text();
+      const data = body.trim().startsWith("{")
+        ? body.trim()
+        : body.split("\n").filter((item) => item.startsWith("data:"))
+          .map((item) => item.slice(5).trim()).join("");
+      const rpc = JSON.parse(data) as {
+        result?: { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
+      };
+      const result = rpc.result!;
+      const deliveredBytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+      const envelope = JSON.parse(result.content?.[0]?.text ?? "null") as {
+        ok?: boolean;
+        taskId?: string | null;
+        error?: { code?: string; message?: string };
+      };
+
+      expect(mcpToolResultByteLength(result as McpTextResult)).toBe(deliveredBytes);
+      expect(deliveredBytes).toBeLessThanOrEqual(MAX_MCP_TOOL_RESULT_BYTES);
+      expect(result).not.toHaveProperty("structuredContent");
+      expect(envelope).toMatchObject({
+        ok: false,
+        taskId: null,
+        error: { code: "RESOURCE_EXHAUSTED" },
+      });
+      expect(envelope.error?.message).toMatch(/smaller (?:page|line range)/i);
+      expect(JSON.stringify(envelope)).not.toContain(sourceMarker);
+
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain(`outputBytes=${deliveredBytes}`);
+      expect(toolLines[0]).toContain("result=error");
     } finally { restore(); }
   });
 
@@ -997,7 +1070,7 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
       expect(toolLines).toHaveLength(1);
       expect(toolLines[0]).toContain("grande_rejected");
       expect(toolLines[0]).toContain("inputBytes=2");
-      expect(toolLines[0]).toContain("outputBytes=0");
+      expect(toolLines[0]).toContain("outputBytes=unknown");
       expect(toolLines[0]).toContain("result=error");
       expect(toolLines[0]).not.toContain(rejectionMarker);
     } finally {
