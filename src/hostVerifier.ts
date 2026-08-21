@@ -128,8 +128,11 @@ function requestKey(request: HostVerifierRequest, plan: HostVerifierStaticPlan):
  */
 export class HostVerifierCoordinator {
   private active: ActiveVerifier | null = null;
+  private readonly launch: HostVerifierLauncher;
 
-  constructor(private readonly launch: HostVerifierLauncher) {}
+  constructor(launch: HostVerifierLauncher) {
+    this.launch = launch;
+  }
 
   start(request: HostVerifierRequest): HostVerifierDispatch {
     if (!/^[0-9a-f]{40}$/u.test(request.commit)) throw new Error("verifier commit must be an exact 40-hex SHA");

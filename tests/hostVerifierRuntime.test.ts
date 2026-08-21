@@ -140,8 +140,28 @@ describe("host verifier trusted launcher", () => {
     });
     expect(getOuterTestReceipt(db, taskId)).toMatchObject({
       version: 2,
+      mode: "auto",
       taskId,
       repoId: "grande-gpt",
+      commit,
+      jobId: started.jobId,
+    });
+  });
+
+  it("manual trusted launcher issues V2 manual receipt without requiring a PR head", async () => {
+    const launch = createHostVerifierLauncher(
+      { db, layout },
+      adapter({ readCurrentHeads: async () => ({ taskHead: commit, prHead: null }) }),
+      { receiptMode: "manual", requirePrHead: false },
+    );
+    const started = launch(request(), buildHostVerifierStaticPlan("full"));
+    await started.settled;
+
+    expect(getJob(db, started.jobId)?.summary).toMatchObject({ kind: "host-verifier-v2", mode: "manual", commit });
+    expect(getOuterTestReceipt(db, taskId)).toMatchObject({
+      version: 2,
+      mode: "manual",
+      taskId,
       commit,
       jobId: started.jobId,
     });

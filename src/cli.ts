@@ -4,7 +4,12 @@ import { pathToFileURL } from "node:url";
 import { listAudit, listUnfinishedAudit } from "./audit.ts";
 import { openDb } from "./db.ts";
 import { runGatewayCli } from "./gatewayCli.ts";
-import { listJobs } from "./jobs.ts";
+import { HostVerifierCoordinator } from "./hostVerifier.ts";
+import {
+  createDefaultHostVerifierRuntimeAdapter,
+  createHostVerifierLauncher,
+} from "./hostVerifierRuntime.ts";
+import { getJob, listJobs, TERMINAL } from "./jobs.ts";
 import { ensureLayout, loadLayout, type Layout } from "./layout.ts";
 import { applyRepoOnboarding, inspectRepoOnboarding } from "./onboarding.ts";
 import { assertValidId } from "./paths.ts";
@@ -13,8 +18,9 @@ import { getTask, listActiveTasks } from "./tasks.ts";
 import { discoverRepos, loadRegistry } from "./registry.ts";
 import { applyGc, planGc } from "./worktreeGc.ts";
 import { spawnSync } from "node:child_process";
-import { planOuterTest, resolveOuterTestCwd } from "./outerTest.ts";
-import { prepareOuterTestRun, recordOuterTestPass } from "./outerTestReceipt.ts";
+import { planOuterTest, planTaskHostVerification, resolveOuterTestCwd } from "./outerTest.ts";
+import { getOuterTestReceipt, prepareOuterTestRun, recordOuterTestPass } from "./outerTestReceipt.ts";
+import { inspectCurrentHostVerification } from "./prHostVerification.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
 import { renderSelfCheck, selfCheck, type SelfCheckResult } from "./selfcheck.ts";
 import { compactTaskProgress, projectTaskProgress } from "./taskProgress.ts";
@@ -34,7 +40,7 @@ const USAGE = `grande —— GrandeGPT 控制平面运维工具
 
 repo add 默认只读；只有 Human Owner 显式传 --apply 才写可信控制平面。
 除 gateway 的变更动作、repo add --apply、gc --apply、outer-test --run 与 revoke --yes 外均为只读。
-outer-test 必须在【沙箱外】跑——它跑的正是沙箱里结构上跑不通的那些文件。`;
+outer-test 必须在【沙箱外】跑——auto-safe task 会进入 restricted verifier；manual-only 边界才走 Human trusted host suite。`;
 
 function fmtTime(ms: number): string {
   return new Date(ms).toISOString().slice(11, 19);
@@ -49,9 +55,19 @@ type OuterTestSpawn = (
   options: { cwd: string; stdio: "inherit"; encoding: "utf8" },
 ) => OuterTestSpawnResult;
 
+type RestrictedOuterTestInput = {
+  taskId: string;
+  repoId: "grande-gpt";
+  commit: string;
+  level: "smoke" | "full";
+};
+type RestrictedOuterTestRun = (input: RestrictedOuterTestInput) => Promise<{ jobId: string }>;
+
 export interface RunCliOptions {
-  /** 仅用于测试 host-only outer-test 编排；生产调用不传，固定走 node:child_process spawnSync。 */
+  /** Test seam and manual-only Human Gate runner. Production fixed path is node:child_process spawnSync. */
   outerTestSpawn?: OuterTestSpawn;
+  /** Test seam for the restricted verifier path. Production constructs the trusted C2 runtime directly. */
+  restrictedOuterTestRun?: RestrictedOuterTestRun;
 }
 
 const defaultOuterTestSpawn: OuterTestSpawn = (command, args, options) => {
@@ -351,14 +367,48 @@ function cmdRepo(out: (l: string) => void, args: string[]): number {
   }
 }
 
-function cmdOuterTest(
+async function defaultRestrictedOuterTestRun(
+  db: ReturnType<typeof openDb>,
+  layout: Layout,
+  input: RestrictedOuterTestInput,
+): Promise<{ jobId: string }> {
+  const adapter = createDefaultHostVerifierRuntimeAdapter(
+    { db, layout },
+    { readPrHead: async () => null },
+  );
+  const launcher = createHostVerifierLauncher(
+    { db, layout },
+    adapter,
+    { receiptMode: "manual", requirePrHead: false },
+  );
+  const coordinator = new HostVerifierCoordinator(launcher);
+  const dispatch = coordinator.start(input);
+  while (true) {
+    const job = getJob(db, dispatch.jobId);
+    if (!job) throw new Error(`restricted host verifier job disappeared: ${dispatch.jobId}`);
+    if (TERMINAL.has(job.state)) return { jobId: dispatch.jobId };
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
+async function cmdOuterTest(
   out: (l: string) => void,
   run: boolean,
   taskId?: string,
   outerTestSpawn: OuterTestSpawn = defaultOuterTestSpawn,
-): number {
-  return withDbExitCode(out, (db, layout) => {
-    const plan = planOuterTest(layout, "grande-gpt");
+  restrictedOuterTestRun?: RestrictedOuterTestRun,
+): Promise<number> {
+  let layout: Layout;
+  try {
+    layout = loadLayout();
+  } catch (e) {
+    out(e instanceof Error ? e.message : String(e));
+    return 1;
+  }
+  ensureLayout(layout);
+  const db = openDb(layout);
+  try {
+    const fullManualPlan = planOuterTest(layout, "grande-gpt");
     let cwd: string;
     try {
       cwd = resolveOuterTestCwd(db, layout, "grande-gpt", taskId);
@@ -367,20 +417,48 @@ function cmdOuterTest(
       return 1;
     }
 
+    const task = taskId === undefined ? undefined : getTask(db, taskId);
+    if (taskId !== undefined && !task) {
+      out(`任务不存在：${taskId}`);
+      return 1;
+    }
+    const taskPlan = task ? planTaskHostVerification(task) : undefined;
+    const selectedFiles = taskPlan === undefined
+      ? fullManualPlan.files
+      : taskPlan.level === "none"
+        ? []
+        : taskPlan.manualOnlyRequired
+          ? fullManualPlan.files
+          : taskPlan.autoFiles;
+
     out(`验收目标：${taskId === undefined ? "canonical grande-gpt" : taskId}`);
     out(`  cwd  ${cwd}`);
+    if (taskPlan) {
+      out(`  level  ${taskPlan.level}${taskPlan.manualOnlyRequired ? " + manual-only Human Gate" : ""}`);
+    }
     out("");
-    out(`可信 host suite：${plan.files.length} 个文件`);
-    out(`（执行清单来自运行中 Gateway manifest；${plan.fromProfile} 的 --exclude 仅用于 transition drift 检查）`);
+    out(`可信 host suite：${selectedFiles.length} 个文件`);
+    if (taskPlan?.manualOnlyRequired) {
+      out("（当前变更触及 manual-only 宿主边界；Human --run 使用固定 trusted full host suite。）");
+    } else if (taskPlan && taskPlan.level !== "none") {
+      out("（当前变更为 auto-safe plan；--run 使用 restricted one-shot host verifier。）");
+    } else {
+      out(`（执行清单来自运行中 Gateway manifest；${fullManualPlan.fromProfile} 的 --exclude 仅用于 transition drift 检查）`);
+    }
     out("");
-    for (const f of plan.files) {
-      const why = plan.reasons.get(f);
+    for (const f of selectedFiles) {
+      const why = fullManualPlan.reasons.get(f);
       out(`  ${f}`);
       out(`    ${why ?? "（trusted host manifest 缺少 capability reason）"}`);
     }
     out("");
     if (!run) {
-      out("以上仅为清单。加 --run 在【当前进程】跑它们（必须在沙箱外）。");
+      out("以上仅为清单。加 --run 执行；auto-safe task 进入 restricted verifier，manual-only 由 Human trusted host path 执行。");
+      return 0;
+    }
+
+    if (taskPlan?.level === "none") {
+      out("当前 task 变更不需要 host verification；没有执行 candidate host tests，也不签发 receipt。");
       return 0;
     }
 
@@ -388,16 +466,61 @@ function cmdOuterTest(
     if (taskId !== undefined) {
       try {
         expectedCommit = prepareOuterTestRun(db, taskId, cwd);
+        if (taskPlan && expectedCommit !== taskPlan.head) {
+          throw new Error(`task HEAD 在 plan 后变化：${taskPlan.head} → ${expectedCommit}`);
+        }
       } catch (e) {
         out(e instanceof Error ? e.message : String(e));
         return 1;
       }
     }
 
-    out("正在运行……（沙箱外）");
+    const manualOnly = taskPlan?.manualOnlyRequired === true;
+    if (taskId !== undefined && task && taskPlan && !manualOnly) {
+      const level = taskPlan.level;
+      if (level !== "smoke" && level !== "full") {
+        out(`不可执行的 host verification level：${level}`);
+        return 1;
+      }
+      const runner = restrictedOuterTestRun
+        ?? ((input: RestrictedOuterTestInput) => defaultRestrictedOuterTestRun(db, layout, input));
+      out("正在运行 restricted host verifier……");
+      out("");
+      let result: { jobId: string };
+      try {
+        result = await runner({ taskId, repoId: "grande-gpt", commit: expectedCommit!, level });
+      } catch (e) {
+        out(`restricted host verifier 启动/执行失败：${e instanceof Error ? e.message : String(e)}`);
+        out("不要合并。");
+        return 1;
+      }
+      const job = getJob(db, result.jobId);
+      if (!job || job.taskId !== taskId || job.profile !== "host-verifier" || job.state !== "passed" || job.exitCode !== 0) {
+        out(`restricted host verifier 未通过：job=${result.jobId} state=${job?.state ?? "missing"} exit=${job?.exitCode ?? "-"}`);
+        if (job?.artifactPath) out(`artifact  ${job.artifactPath}`);
+        out("不要合并。");
+        return 1;
+      }
+      const receipt = getOuterTestReceipt(db, taskId);
+      const current = inspectCurrentHostVerification(db, task, expectedCommit!);
+      if (
+        !receipt || !("version" in receipt) || receipt.version !== 2 || receipt.mode !== "manual" ||
+        receipt.commit !== expectedCommit || receipt.jobId !== result.jobId || !current.receiptEligible
+      ) {
+        out(`restricted host verifier 通过，但没有可复用的 exact-SHA V2 manual receipt（job ${result.jobId}）。`);
+        out("不要合并；检查 task HEAD / verifier job / receipt identity 后重试。");
+        return 1;
+      }
+      out(`外层测试全部通过；restricted verifier 已记录 V2 manual receipt（commit ${receipt.commit}，job ${receipt.jobId}）。`);
+      return 0;
+    }
+
+    out(manualOnly
+      ? "正在运行 manual-only trusted host suite……（Human Gate，沙箱外固定清单）"
+      : "正在运行 canonical trusted host suite……（沙箱外）");
     out("");
     const r = outerTestSpawn("npx", [
-      "vitest", "run", "--config", "vitest.host.config.ts", ...plan.files,
+      "vitest", "run", "--config", "vitest.host.config.ts", ...fullManualPlan.files,
     ], {
       cwd,
       stdio: "inherit",
@@ -424,19 +547,21 @@ function cmdOuterTest(
         db,
         taskId,
         cwd,
-        plan.fromProfile,
-        plan.files,
+        fullManualPlan.fromProfile,
+        fullManualPlan.files,
         Date.now(),
         expectedCommit,
       );
-      out(`外层测试全部通过；已记录 host outer-test receipt（commit ${receipt.commit}）。`);
+      out(`外层测试全部通过；已记录 transitional manual host receipt（commit ${receipt.commit}）。`);
       return 0;
     } catch (e) {
       out(`外层测试通过，但 receipt 签发失败：${e instanceof Error ? e.message : String(e)}`);
       out("不要合并；重新确认 task HEAD/worktree 后再次执行 outer-test。");
       return 1;
     }
-  });
+  } finally {
+    db.close();
+  }
 }
 
 function cmdRevoke(out: (l: string) => void, yes: boolean): number {
@@ -605,7 +730,13 @@ export function runCli(
     case "gc":
       return cmdGc(out, rest.includes("--apply"));
     case "outer-test":
-      return cmdOuterTest(out, rest.includes("--run"), taskId, options.outerTestSpawn);
+      return cmdOuterTest(
+        out,
+        rest.includes("--run"),
+        taskId,
+        options.outerTestSpawn,
+        options.restrictedOuterTestRun,
+      );
     case "revoke":
       return cmdRevoke(out, rest.includes("--yes"));
     case "selfcheck":

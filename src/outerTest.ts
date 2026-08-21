@@ -1,15 +1,18 @@
 import type { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { StateError } from "./errors.ts";
+import { GitExecError, safeGit } from "./gitExec.ts";
 import {
   hostFilesForLevel,
   LEGACY_HOST_ADAPTERS,
+  planHostVerification,
   TRUSTED_HOST_MANIFEST,
   validateHostCoverage,
+  type HostVerificationPlan,
 } from "./hostVerification.ts";
 import type { Layout } from "./layout.ts";
 import { getProfile, ProfileError } from "./profiles.ts";
-import { getTask } from "./tasks.ts";
+import { getTask, type TaskRow } from "./tasks.ts";
 
 /**
  * Transitional manual host-test planner.
@@ -31,6 +34,11 @@ export interface OuterTestPlan {
   unitSelfhostExcluded: string[];
 }
 
+export interface TaskHostVerificationPlan extends HostVerificationPlan {
+  changedFiles: string[];
+  head: string;
+}
+
 export function resolveOuterTestCwd(
   db: DatabaseSync,
   layout: Layout,
@@ -47,6 +55,41 @@ export function resolveOuterTestCwd(
     );
   }
   return task.worktreePath;
+}
+
+function gitDetail(error: unknown): string {
+  if (error instanceof GitExecError) return error.message.replace(/^git failed:\s*/u, "");
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Resolve the trusted changed-file verification plan for one committed task HEAD.
+ * The caller may bind an expected PR SHA; any HEAD/base drift fails closed before a
+ * verifier can be scheduled or a receipt can be reused.
+ */
+export function planTaskHostVerification(task: TaskRow, expectedHead?: string): TaskHostVerificationPlan {
+  let head: string;
+  let changedRaw: string;
+  try {
+    head = safeGit.local(task.worktreePath, ["rev-parse", "HEAD"]).trim();
+    if (expectedHead !== undefined && head !== expectedHead) {
+      throw new StateError(
+        "STALE_STATE",
+        `host verification task HEAD=${head} 与期望 PR head=${expectedHead} 不一致。`,
+      );
+    }
+    changedRaw = safeGit.local(task.worktreePath, [
+      "diff", "--name-only", "--diff-filter=ACDMRTUXB", `${task.baseCommit}..${head}`, "--",
+    ]);
+  } catch (error) {
+    if (error instanceof StateError) throw error;
+    throw new StateError(
+      "STALE_STATE",
+      `无法从 task base/head 计算 host verification plan：${gitDetail(error)}`,
+    );
+  }
+  const changedFiles = changedRaw.split("\n").map((line) => line.trim()).filter(Boolean);
+  return { ...planHostVerification(changedFiles), changedFiles, head };
 }
 
 function readTestExclusions(layout: Layout, repoId: string, profileName: string): string[] {

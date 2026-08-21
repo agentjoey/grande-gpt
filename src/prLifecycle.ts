@@ -13,8 +13,9 @@ import {
 } from "./githubApi.ts";
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
 import { GitExecError, safeGit } from "./gitExec.ts";
+import type { HostVerifierCoordinator } from "./hostVerifier.ts";
 import type { Layout } from "./layout.ts";
-import { hasCurrentOuterTestReceipt } from "./outerTestReceipt.ts";
+import { inspectCurrentHostVerification, manualOuterTestCommand } from "./prHostVerification.ts";
 import { parseGithubRemote, readGithubRemoteUrl } from "./prOpen.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
@@ -111,6 +112,10 @@ export interface PrLifecycleOptions {
   readRemoteUrl?: RemoteReader;
   readLocalHead?: HeadReader;
   canonicalRefresher?: CanonicalRefresher;
+  /** Trusted control-plane mode. Production remains manual until explicit Owner activation. */
+  hostVerificationMode?: "manual" | "auto";
+  /** Internal restricted verifier coordinator. It exposes no argv/cwd/env inputs. */
+  hostVerifierCoordinator?: HostVerifierCoordinator;
 }
 
 function readHead(worktreePath: string): string {
@@ -235,12 +240,36 @@ export function createPrStatusTool(deps: ToolDeps, options: PrLifecycleOptions =
   };
 }
 
+function hostVerificationPending(
+  taskId: string,
+  prNumber: number,
+  headSha: string,
+  level: "smoke" | "full",
+  state: "manual_required" | "human_gate" | "running" | "failed",
+  extra: Record<string, unknown>,
+  hint: string,
+) {
+  return {
+    structuredContent: ok({
+      taskId,
+      data: {
+        merged: false,
+        prNumber,
+        headSha,
+        verification: { state, level, ...extra },
+      },
+      hint,
+    }),
+  };
+}
+
 export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = {}): ToolDef {
   return {
     name: "grande_pr_merge",
     description:
       "合并【当前 task.branch 自己的 PR】。每次调用重新读取 PR/CI，要求本地 HEAD=PR head、当前 SHA 有 attestation、" +
-      "CI 不是 pending/failed、PR 可合并；grande-gpt 自举 PR 还要求当前 SHA 的 host outer-test receipt；" +
+      "CI 不是 pending/failed、PR 可合并；grande-gpt 自举 PR 还要求当前 plan 的 exact-SHA host verification receipt；" +
+      "缺 receipt 时仅返回 verification 状态/受限 verifier job，不会在后台自动 merge。" +
       "merge 前后安全 refresh local canonical（fixed origin/current base，clean + ff-only）。" +
       "CI=none 时允许轻量项目在 attestation 门禁下继续。",
     inputSchema: {
@@ -315,16 +344,6 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
               `请先对当前代码运行验证并 grande_commit，旧 SHA 的验证不能复用。`,
           );
         }
-        if (
-          state.task.repoId === "grande-gpt" &&
-          !hasCurrentOuterTestReceipt(deps.db, taskId, state.pr.headSha)
-        ) {
-          throw new StateError(
-            "POLICY_DENIED",
-            `PR #${state.pr.number} 当前 head ${state.pr.headSha} 没有匹配的 host outer-test receipt；` +
-              `请在宿主执行 grande outer-test --task ${taskId} --run。旧 SHA 的 outer-test 结果不能复用。`,
-          );
-        }
         if (state.ci.state === "failed") {
           throw new StateError(
             "INVALID_INPUT",
@@ -333,6 +352,148 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
         }
         if (state.ci.state === "pending") {
           throw new StateError("STALE_STATE", `PR #${state.pr.number} CI 仍在 pending，不能合并。`);
+        }
+
+        if (state.task.repoId === "grande-gpt") {
+          const current = inspectCurrentHostVerification(deps.db, state.task, state.pr.headSha);
+          if (!current.receiptEligible && current.plan.level !== "none") {
+            const level = current.plan.level;
+            const command = manualOuterTestCommand(taskId);
+            if (current.plan.manualOnlyRequired) {
+              return hostVerificationPending(
+                taskId,
+                state.pr.number,
+                state.pr.headSha,
+                level,
+                "human_gate",
+                {
+                  manualOnlyRequired: true,
+                  manualOnlyFiles: current.plan.manualOnlyFiles,
+                  nextAction: command,
+                },
+                `当前 ${level} host plan 包含 manual-only 宿主边界；必须由 Human Owner 执行：${command}`,
+              );
+            }
+
+            const mode = options.hostVerificationMode ?? "manual";
+            if (mode !== "auto") {
+              return hostVerificationPending(
+                taskId,
+                state.pr.number,
+                state.pr.headSha,
+                level,
+                "manual_required",
+                { manualOnlyRequired: false, nextAction: command },
+                `hostVerification.mode=manual；请执行：${command}`,
+              );
+            }
+
+            const attempt = current.latestAttempt;
+            if (attempt?.kind === "running") {
+              return hostVerificationPending(
+                taskId,
+                state.pr.number,
+                state.pr.headSha,
+                level,
+                "running",
+                { jobId: attempt.jobId, coalesced: true, persisted: true },
+                `matching host verifier 仍在运行：${attempt.jobId}。PASS 后不会后台 merge；再次调用 grande_pr_merge 会重新读取 PR/CI/SHA。`,
+              );
+            }
+            if (attempt?.kind === "test") {
+              return hostVerificationPending(
+                taskId,
+                state.pr.number,
+                state.pr.headSha,
+                level,
+                "failed",
+                {
+                  kind: "test",
+                  jobId: attempt.jobId,
+                  artifactPath: attempt.artifactPath,
+                  artifactExcerpt: attempt.artifactExcerpt,
+                  retryable: false,
+                },
+                `host verifier 代码测试失败（job ${attempt.jobId}）；修复代码并产生新 SHA 后再走 merge gate。`,
+              );
+            }
+            if (attempt?.kind === "infrastructure" && attempt.infrastructureFailures >= 2) {
+              return hostVerificationPending(
+                taskId,
+                state.pr.number,
+                state.pr.headSha,
+                level,
+                "human_gate",
+                {
+                  kind: "infrastructure",
+                  jobId: attempt.jobId,
+                  consecutiveFailures: attempt.infrastructureFailures,
+                  artifactPath: attempt.artifactPath,
+                  artifactExcerpt: attempt.artifactExcerpt,
+                  nextAction: command,
+                },
+                `同一 SHA 已连续 ${attempt.infrastructureFailures} 次 verifier infrastructure failure；停止自动重试。Human Owner 可检查 artifact 后执行：${command}`,
+              );
+            }
+
+            const coordinator = options.hostVerifierCoordinator;
+            if (!coordinator) {
+              return hostVerificationPending(
+                taskId,
+                state.pr.number,
+                state.pr.headSha,
+                level,
+                "human_gate",
+                { manualOnlyRequired: false, reason: "verifier_unavailable", nextAction: command },
+                `auto verifier 尚未连接到当前 Gateway；请使用受信 manual fallback：${command}`,
+              );
+            }
+
+            const verificationAudit = beginAudit(deps.db, {
+              taskId,
+              tool: "grande_pr_merge",
+              input: {
+                taskId,
+                prNumber: state.pr.number,
+                phase: "host_verification",
+                expectedHeadSha: state.pr.headSha,
+                level,
+                retryOf: attempt?.kind === "infrastructure" ? attempt.jobId : null,
+              },
+            });
+            try {
+              verificationAudit.allowed();
+              if (!verificationAudit.executing()) {
+                throw new StateError("STALE_STATE", `任务 ${taskId} 的 host verification 审计句柄无法推进到 EXECUTING。`);
+              }
+              const dispatch = coordinator.start({
+                taskId,
+                repoId: state.task.repoId,
+                commit: state.pr.headSha,
+                level,
+              });
+              verificationAudit.succeeded([]);
+              return hostVerificationPending(
+                taskId,
+                state.pr.number,
+                state.pr.headSha,
+                level,
+                "running",
+                {
+                  jobId: dispatch.jobId,
+                  coalesced: dispatch.coalesced,
+                  staticPlanDigest: dispatch.staticPlanDigest,
+                  retryOf: attempt?.kind === "infrastructure" ? attempt.jobId : null,
+                },
+                attempt?.kind === "infrastructure"
+                  ? `host verifier infrastructure retry 已启动：${dispatch.jobId}（retryOf=${attempt.jobId}）。本 SHA 不会再自动重试第二次。`
+                  : `host verifier ${dispatch.coalesced ? "仍在运行" : "已启动"}：${dispatch.jobId}。PASS 后不会后台 merge；再次调用 grande_pr_merge 会重新读取 PR/CI/SHA。`,
+              );
+            } catch (error) {
+              verificationAudit.failed(error instanceof Error ? error.message : String(error));
+              throw error;
+            }
+          }
         }
 
         audit = beginAudit(deps.db, {

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import type { GithubLifecycleApi, GithubPullRequestDetail } from "../src/githubApi.ts";
+import { TRUSTED_HOST_MANIFEST } from "../src/hostVerification.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { createPrMergeTool } from "../src/prLifecycle.ts";
 import { createTask } from "../src/tasks.ts";
@@ -13,6 +14,7 @@ import type { ToolDeps } from "../src/toolsCore.ts";
 const taskId = "task_s18_verification";
 const branch = "grande/s18-verification";
 let headSha: string;
+let baseCommit: string;
 const token = "github_pat_s18_abcdefghijklmnopqrstuvwxyz";
 
 let root: string;
@@ -88,7 +90,7 @@ function writeOuterTestReceipt(commit: string): void {
     taskId,
     commit,
     profile: "unit-selfhost",
-    files: ["tests/sandbox.test.ts"],
+    files: TRUSTED_HOST_MANIFEST.map((entry) => entry.file),
     passedAt: now,
   }), now);
 }
@@ -102,9 +104,9 @@ function mergeTool(api: ReturnType<typeof fakeApi>) {
       action: "none",
       relation: "equal",
       branch: "main",
-      before: "base",
-      after: "base",
-      remoteHead: null,
+      before: baseCommit,
+      after: "merge-sha",
+      remoteHead: "merge-sha",
     }),
   });
 }
@@ -127,15 +129,18 @@ beforeEach(() => {
   execFileSync("git", ["init", "-b", branch], { cwd: worktreePath, stdio: "ignore" });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: worktreePath });
   execFileSync("git", ["config", "user.name", "Grande Test"], { cwd: worktreePath });
-  writeFileSync(join(worktreePath, "README.md"), "verification fixture\n");
-  execFileSync("git", ["add", "README.md"], { cwd: worktreePath });
+  execFileSync("git", ["commit", "--allow-empty", "-m", "base"], { cwd: worktreePath, stdio: "ignore" });
+  baseCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8" }).trim();
+  mkdirSync(join(worktreePath, "src"), { recursive: true });
+  writeFileSync(join(worktreePath, "src", "verification.ts"), "export const verified = true;\n");
+  execFileSync("git", ["add", "src/verification.ts"], { cwd: worktreePath });
   execFileSync("git", ["commit", "-m", "fixture"], { cwd: worktreePath, stdio: "ignore" });
   headSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktreePath, encoding: "utf8" }).trim();
   createTask(deps.db, {
     taskId,
     repoId: "grande-gpt",
     branch,
-    baseCommit: "base",
+    baseCommit,
     worktreePath,
     state: "READY",
   });
@@ -152,8 +157,9 @@ describe("S18 Verification Integrity", () => {
     const api = fakeApi();
     const envelope = (await mergeTool(api).handler({ taskId })).structuredContent as Record<string, any>;
 
-    expect(envelope.ok).toBe(false);
-    expect(JSON.stringify(envelope)).toMatch(/outer-test|外层测试|receipt/i);
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toMatchObject({ merged: false, verification: { state: "manual_required", level: "smoke" } });
+    expect(JSON.stringify(envelope)).toMatch(/outer-test|receipt|manual/i);
     expect(api.mergeCalls).toEqual([]);
   });
 
@@ -162,8 +168,9 @@ describe("S18 Verification Integrity", () => {
     const api = fakeApi();
     const envelope = (await mergeTool(api).handler({ taskId })).structuredContent as Record<string, any>;
 
-    expect(envelope.ok).toBe(false);
-    expect(JSON.stringify(envelope)).toMatch(/outer-test|receipt/i);
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data).toMatchObject({ merged: false, verification: { state: "manual_required" } });
+    expect(JSON.stringify(envelope)).toMatch(/outer-test|manual/i);
     expect(api.mergeCalls).toEqual([]);
   });
 

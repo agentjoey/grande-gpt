@@ -5,8 +5,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "../src/cli.ts";
 import { openDb } from "../src/db.ts";
+import { buildHostVerifierStaticPlan } from "../src/hostVerifier.ts";
 import { TRUSTED_HOST_MANIFEST } from "../src/hostVerification.ts";
+import { createJob, finishJob } from "../src/jobs.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
+import { getOuterTestReceipt, persistTrustedOuterTestPassV2 } from "../src/outerTestReceipt.ts";
 import { createTask } from "../src/tasks.ts";
 
 let ws: string;
@@ -15,10 +18,8 @@ let savedWs: string | undefined;
 let savedCtrl: string | undefined;
 let lines: string[];
 
-function syncCli(argv: string[]): number {
-  const result = runCli(argv, (line) => lines.push(line));
-  if (typeof result !== "number") throw new Error("outer-test 应同步返回退出码");
-  return result;
+async function cli(argv: string[], options: Record<string, unknown> = {}): Promise<number> {
+  return await runCli(argv, (line) => lines.push(line), options as any);
 }
 
 type TestOuterSpawn = (
@@ -27,24 +28,13 @@ type TestOuterSpawn = (
   options: { cwd: string; stdio: "inherit"; encoding: "utf8" },
 ) => { status: number | null; error?: Error };
 
-function syncCliWithOuterTestSpawn(argv: string[], spawn: TestOuterSpawn): number {
-  const callable = runCli as unknown as (
-    argv: string[],
-    out: (line: string) => void,
-    options: { outerTestSpawn: TestOuterSpawn },
-  ) => number | Promise<number>;
-  const result = callable(argv, (line) => lines.push(line), { outerTestSpawn: spawn });
-  if (typeof result !== "number") throw new Error("outer-test 应同步返回退出码");
-  return result;
-}
-
 const git = (cwd: string, ...args: string[]) => execFileSync(
   "git",
   ["-c", "core.hooksPath=/dev/null", ...args],
   { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-);
+).trim();
 
-function prepareRunnableTask(taskId: string): { worktreePath: string; head: string } {
+function prepareRunnableTask(taskId: string, changedPath = "src/feature.ts"): { worktreePath: string; base: string; head: string } {
   const layout = loadLayout();
   const worktreePath = join(ws, ".grande-work", "worktrees", "grande-gpt", taskId);
   mkdirSync(worktreePath, { recursive: true });
@@ -55,19 +45,57 @@ function prepareRunnableTask(taskId: string): { worktreePath: string; head: stri
     "-c", "user.email=grande@example.com",
     "commit", "--allow-empty", "-q", "-m", "base",
   );
-  const head = git(worktreePath, "rev-parse", "HEAD").trim();
+  const base = git(worktreePath, "rev-parse", "HEAD");
+  const absolute = join(worktreePath, changedPath);
+  mkdirSync(join(absolute, ".."), { recursive: true });
+  writeFileSync(absolute, "change\n", "utf8");
+  git(worktreePath, "add", changedPath);
+  git(
+    worktreePath,
+    "-c", "user.name=GrandeGPT",
+    "-c", "user.email=grande@example.com",
+    "commit", "-q", "-m", "change",
+  );
+  const head = git(worktreePath, "rev-parse", "HEAD");
 
   const db = openDb(layout);
   createTask(db, {
     taskId,
     repoId: "grande-gpt",
     branch: "grande/s18",
-    baseCommit: head,
+    baseCommit: base,
     worktreePath,
     state: "READY",
   });
   db.close();
-  return { worktreePath, head };
+  return { worktreePath, base, head };
+}
+
+function persistManualV2(taskId: string, commit: string, level: "smoke" | "full"): string {
+  const db = openDb(loadLayout());
+  const plan = buildHostVerifierStaticPlan(level);
+  const jobId = `job_cli_${taskId}_${level}`;
+  createJob(db, { jobId, taskId, profile: "host-verifier", argv: ["trusted-host-verifier"], pgid: 321 });
+  finishJob(db, jobId, {
+    state: "passed",
+    exitCode: 0,
+    artifactPath: null,
+    summary: {
+      kind: "host-verifier-v2",
+      mode: "manual",
+      repoId: "grande-gpt",
+      commit,
+      level,
+      files: plan.files,
+      policyVersion: plan.policyVersion,
+      resourceLimits: plan.resourceLimits,
+      loopbackPorts: [49173],
+      hostToolchain: { node: "v24.14.0", pnpm: "10.33.0", lockfileSha256: "b".repeat(64) },
+    },
+  });
+  persistTrustedOuterTestPassV2(db, taskId, jobId);
+  db.close();
+  return jobId;
 }
 
 beforeEach(() => {
@@ -105,89 +133,95 @@ afterEach(() => {
 });
 
 describe("grande outer-test --task", () => {
-  it("显式 taskId 时把验收目标锁定到 task.worktreePath，而不是 canonical checkout", () => {
-    const layout = loadLayout();
-    const db = openDb(layout);
-    const worktreePath = join(ws, ".grande-work", "worktrees", "grande-gpt", "task_phase4");
-    createTask(db, {
-      taskId: "task_phase4",
-      repoId: "grande-gpt",
-      branch: "grande/phase4",
-      baseCommit: "abc123",
-      worktreePath,
-      state: "READY",
-    });
-    db.close();
-
-    expect(syncCli(["outer-test", "--task", "task_phase4"])).toBe(0);
+  it("显式 taskId 时把验收目标锁定到 task.worktreePath，而不是 canonical checkout", async () => {
+    const { worktreePath } = prepareRunnableTask("task_phase4");
+    expect(await cli(["outer-test", "--task", "task_phase4"])).toBe(0);
     expect(lines.join("\n")).toContain(worktreePath);
   });
 
-  it("--task 后没有值时 fail closed，不退化成验收 canonical", () => {
-    expect(syncCli(["outer-test", "--task"])).not.toBe(0);
+  it("--task 后没有值时 fail closed，不退化成验收 canonical", async () => {
+    expect(await cli(["outer-test", "--task"])).not.toBe(0);
     expect(lines.join("\n")).toContain("--task");
   });
 
-  it("--run uses the dedicated host config and manifest-selected files", () => {
-    prepareRunnableTask("task_host_plan");
-    let seenArgs: readonly string[] = [];
-    expect(syncCliWithOuterTestSpawn(
+  it("auto-safe --run uses the restricted verifier path and never calls legacy host spawn", async () => {
+    const { head } = prepareRunnableTask("task_host_plan");
+    let restrictedCalls = 0;
+    let legacyCalls = 0;
+    const code = await cli(
       ["outer-test", "--task", "task_host_plan", "--run"],
-      (_command, args) => {
-        seenArgs = args;
-        return { status: 0 };
+      {
+        restrictedOuterTestRun: async (input: any) => {
+          restrictedCalls += 1;
+          expect(input).toMatchObject({ taskId: "task_host_plan", commit: head, level: "smoke" });
+          const jobId = persistManualV2("task_host_plan", head, "smoke");
+          return { jobId };
+        },
+        outerTestSpawn: (() => { legacyCalls += 1; return { status: 0 }; }) as TestOuterSpawn,
       },
-    )).toBe(0);
+    );
+    expect(code).toBe(0);
+    expect(restrictedCalls).toBe(1);
+    expect(legacyCalls).toBe(0);
+    const db = openDb(loadLayout());
+    expect(getOuterTestReceipt(db, "task_host_plan")).toMatchObject({ version: 2, mode: "manual", commit: head });
+    db.close();
+  });
+
+  it("manual-only --run uses the fixed trusted legacy host suite and does not start restricted auto verifier", async () => {
+    prepareRunnableTask("task_manual_only", "src/hostVerifierRuntime.ts");
+    let restrictedCalls = 0;
+    let seenArgs: readonly string[] = [];
+    const code = await cli(
+      ["outer-test", "--task", "task_manual_only", "--run"],
+      {
+        restrictedOuterTestRun: async () => { restrictedCalls += 1; return { jobId: "nope" }; },
+        outerTestSpawn: ((_command: string, args: readonly string[]) => { seenArgs = args; return { status: 0 }; }) as TestOuterSpawn,
+      },
+    );
+    expect(code).toBe(0);
+    expect(restrictedCalls).toBe(0);
     expect(seenArgs).toEqual([
       "vitest", "run", "--config", "vitest.host.config.ts",
       ...TRUSTED_HOST_MANIFEST.map((entry) => entry.file),
     ]);
   });
 
-  it("--run 成功后把 host outer-test receipt 绑定到运行前锁定的 task HEAD", () => {
-    const { head } = prepareRunnableTask("task_s18_receipt");
-
-    expect(syncCliWithOuterTestSpawn(
-      ["outer-test", "--task", "task_s18_receipt", "--run"],
-      () => ({ status: 0 }),
-    )).toBe(0);
-
-    const db = openDb(loadLayout());
-    const row = db.prepare("SELECT receiptJson FROM outer_test_receipt WHERE taskId=?").get("task_s18_receipt") as
-      | { receiptJson: string }
-      | undefined;
-    db.close();
-    expect(row).toBeDefined();
-    expect(JSON.parse(row!.receiptJson)).toMatchObject({
-      taskId: "task_s18_receipt",
-      commit: head,
-      profile: "unit-selfhost",
-      files: TRUSTED_HOST_MANIFEST.map((entry) => entry.file),
-    });
-    expect(lines.join("\n")).toMatch(/receipt|凭据|验证记录/i);
-  });
-
-  it("--run 期间 task HEAD 改变时即使测试进程 exit 0 也不签发 receipt", () => {
-    const { worktreePath } = prepareRunnableTask("task_s18_drift");
-
-    const code = syncCliWithOuterTestSpawn(
-      ["outer-test", "--task", "task_s18_drift", "--run"],
-      () => {
-        git(
-          worktreePath,
-          "-c", "user.name=Other",
-          "-c", "user.email=other@example.com",
-          "commit", "--allow-empty", "-q", "-m", "concurrent change",
-        );
-        return { status: 0 };
+  it("restricted --run requires a persisted exact-SHA V2 manual receipt", async () => {
+    const { head } = prepareRunnableTask("task_restricted_receipt");
+    const code = await cli(
+      ["outer-test", "--task", "task_restricted_receipt", "--run"],
+      {
+        restrictedOuterTestRun: async () => ({ jobId: "job-without-receipt" }),
+        outerTestSpawn: (() => { throw new Error("legacy spawn must not run"); }) as TestOuterSpawn,
       },
     );
+    expect(code).toBe(1);
+    expect(lines.join("\n")).toMatch(/receipt|验证记录|不要合并/i);
 
+    const db = openDb(loadLayout());
+    expect(getOuterTestReceipt(db, "task_restricted_receipt")).toBeNull();
+    db.close();
+    expect(head).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it("manual-only legacy run still rejects HEAD drift before issuing transitional receipt", async () => {
+    const { worktreePath } = prepareRunnableTask("task_manual_drift", "src/hostVerifierRuntime.ts");
+    const code = await cli(
+      ["outer-test", "--task", "task_manual_drift", "--run"],
+      {
+        outerTestSpawn: (() => {
+          git(
+            worktreePath,
+            "-c", "user.name=Other",
+            "-c", "user.email=other@example.com",
+            "commit", "--allow-empty", "-q", "-m", "concurrent change",
+          );
+          return { status: 0 };
+        }) as TestOuterSpawn,
+      },
+    );
     expect(code).toBe(1);
     expect(lines.join("\n")).toMatch(/receipt.*失败|HEAD.*变化|不要合并/i);
-    const db = openDb(loadLayout());
-    const row = db.prepare("SELECT receiptJson FROM outer_test_receipt WHERE taskId=?").get("task_s18_drift");
-    db.close();
-    expect(row).toBeUndefined();
   });
 });

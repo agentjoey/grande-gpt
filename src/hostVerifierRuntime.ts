@@ -80,6 +80,12 @@ export interface HostVerifierRuntimeDeps {
   layout: Layout;
 }
 
+/** Trusted launcher policy selected only by control-plane code, never by HostVerifierRequest. */
+export interface HostVerifierLauncherOptions {
+  receiptMode?: "auto" | "manual";
+  requirePrHead?: boolean;
+}
+
 function executionState(result: HostVerifierExecutionResult): Exclude<JobState, "running"> {
   if (result.killedBy === "timeout") return "timeout";
   if (result.killedBy === "rss") return "killed";
@@ -109,10 +115,11 @@ function trustedSummary(
   request: HostVerifierRequest,
   plan: HostVerifierStaticPlan,
   prepared: HostVerifierPreparedRun,
+  mode: "auto" | "manual",
 ): TrustedHostVerifierSummary {
   return {
     kind: "host-verifier-v2",
-    mode: "auto",
+    mode,
     repoId: request.repoId,
     commit: request.commit,
     level: request.level,
@@ -127,11 +134,15 @@ function trustedSummary(
 /**
  * Trusted one-shot launcher. Its caller can choose only task/repo/exact-SHA/level;
  * argv/cwd/env/Seatbelt/receipt fields remain behind the runtime adapter boundary.
+ * The optional receipt policy is also trusted control-plane configuration, not request data.
  */
 export function createHostVerifierLauncher(
   deps: HostVerifierRuntimeDeps,
   adapter: HostVerifierRuntimeAdapter,
+  options: HostVerifierLauncherOptions = {},
 ): (request: HostVerifierRequest, plan: HostVerifierStaticPlan) => HostVerifierLaunchResult {
+  const receiptMode = options.receiptMode ?? "auto";
+  const requirePrHead = options.requirePrHead ?? true;
   return (request, plan) => {
     if (request.repoId !== "grande-gpt") {
       throw new Error(`host verifier is scoped to grande-gpt, received repo ${request.repoId}`);
@@ -162,6 +173,7 @@ export function createHostVerifierLauncher(
         repoId: request.repoId,
         commit: request.commit,
         level: request.level,
+        receiptMode,
         staticPlanDigest: plan.staticPlanDigest,
         disposableRoot,
       });
@@ -193,6 +205,7 @@ export function createHostVerifierLauncher(
           repoId: request.repoId,
           commit: request.commit,
           level: request.level,
+          receiptMode,
           staticPlanDigest: plan.staticPlanDigest,
           disposableRoot,
           loopbackPorts: [...prepared.loopbackPorts],
@@ -227,13 +240,15 @@ export function createHostVerifierLauncher(
         }
 
         const heads = await adapter.readCurrentHeads(request);
-        const exactHeadStillCurrent = heads.taskHead === request.commit && heads.prHead === request.commit;
+        const exactHeadStillCurrent = heads.taskHead === request.commit
+          && (!requirePrHead || heads.prHead === request.commit);
+        const baseSummary = trustedSummary(request, plan, prepared, receiptMode);
         const summary = exactHeadStillCurrent
-          ? trustedSummary(request, plan, prepared)
+          ? baseSummary
           : {
-              ...trustedSummary(request, plan, prepared),
+              ...baseSummary,
               kind: "host-verifier-v2-stale",
-              staleReason: "task-or-pr-sha-drift",
+              staleReason: requirePrHead ? "task-or-pr-sha-drift" : "task-sha-drift",
               observedTaskHead: heads.taskHead,
               observedPrHead: heads.prHead,
             };
