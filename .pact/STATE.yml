@@ -171,7 +171,7 @@ features:
         deps: [binding-a-3-encoding]
       - id: binding-a-5-budgets
         owner: w1
-        status: awaiting_review
+        status: accepted
         reviewer: rev
         spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
         evidence: TDD RED observed; GREEN after 3 review rounds: targeted 132/132 plus cursor regression 25/25, full suite 849/849, typecheck passed; commits af01e3a,4d06e41,2477c3c,b0d331e; all findings addressed.
