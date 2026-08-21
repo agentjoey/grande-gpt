@@ -13,10 +13,12 @@ let root: string;
 let db: DatabaseSync;
 let savedWorkspace: string | undefined;
 let savedControl: string | undefined;
+let monotonicMs: number;
 
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-08-21T00:00:00Z"));
+  monotonicMs = 0;
   savedWorkspace = process.env.GRANDE_WORKSPACE;
   savedControl = process.env.GRANDE_CONTROL;
   root = mkdtempSync(join(tmpdir(), "job-wait-"));
@@ -68,7 +70,9 @@ describe("waitForTerminalJob", () => {
     await waitForTerminalJob(db, "job_transition", {
       timeoutMs: 15,
       intervalMs: 5,
+      now: () => monotonicMs,
       sleep: async (ms) => {
+        monotonicMs += ms;
         vi.advanceTimersByTime(ms);
         finishJob(db, "job_transition", {
           state: "passed", exitCode: 0, artifactPath: null, summary: null,
@@ -77,6 +81,7 @@ describe("waitForTerminalJob", () => {
     });
 
     expect(getJob(db, "job_transition")!.state).toBe("passed");
+    expect(monotonicMs).toBe(5);
     expect(Date.now() - startedAt).toBe(5);
   });
 
@@ -86,11 +91,37 @@ describe("waitForTerminalJob", () => {
 
     await waitForTerminalJob(db, "job_deadline", {
       intervalMs: 5_000,
-      sleep: async (ms) => { vi.advanceTimersByTime(ms); },
+      now: () => monotonicMs,
+      sleep: async (ms) => {
+        monotonicMs += ms;
+        vi.advanceTimersByTime(ms);
+      },
     });
 
     expect(getJob(db, "job_deadline")!.state).toBe("running");
+    expect(monotonicMs).toBe(15_000);
     expect(Date.now() - startedAt).toBe(15_000);
+  });
+
+  it("uses monotonic elapsed time when the wall clock rolls backward", async () => {
+    runningJob("job_clock_rollback");
+    const wallStartedAt = Date.now();
+    const monotonicStartedAt = performance.now();
+
+    await waitForTerminalJob(db, "job_clock_rollback", {
+      intervalMs: 5_000,
+      sleep: async (ms) => {
+        vi.advanceTimersByTime(ms);
+        vi.setSystemTime(Date.now() - 60_000);
+        if (performance.now() - monotonicStartedAt > 15_000) {
+          throw new Error("wait exceeded the 15-second monotonic deadline");
+        }
+      },
+    });
+
+    expect(getJob(db, "job_clock_rollback")!.state).toBe("running");
+    expect(performance.now() - monotonicStartedAt).toBe(15_000);
+    expect(Date.now()).toBeLessThan(wallStartedAt);
   });
 
   it("returns at once when the job is missing", async () => {

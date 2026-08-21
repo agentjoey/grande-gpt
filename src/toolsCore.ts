@@ -149,6 +149,19 @@ function wrap(deps: ToolDeps, taskId: string | null, fn: () => unknown): { struc
   }
 }
 
+async function wrapAsync(
+  deps: ToolDeps,
+  taskId: string | null,
+  fn: () => Promise<unknown>,
+): Promise<{ structuredContent: unknown }> {
+  try {
+    const data = await fn();
+    return wrap(deps, taskId, () => data);
+  } catch (error) {
+    return wrap(deps, taskId, () => { throw error; });
+  }
+}
+
 /**
  * BUG 4：`getProfile` 未注册时的报错早就列出可选 profile 了，但那只在**调用之后**
  * 才看得到——模型第一次选名字时手里没有这份列表，只能猜（实测：猜了 "test"，
@@ -685,13 +698,13 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           required: ["jobId"],
         },
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-        handler: async (args) => {
-          const jobId = args.jobId as string;
-          const initialJob = getJob(db, jobId);
-          if (initialJob && !TERMINAL.has(initialJob.state)) {
-            await waitForTerminalJob(db, jobId);
-          }
-          return wrap(deps, null, () => {
+        handler: (args) =>
+          wrapAsync(deps, null, async () => {
+            const jobId = args.jobId as string;
+            const initialJob = getJob(db, jobId);
+            if (initialJob && !TERMINAL.has(initialJob.state)) {
+              await waitForTerminalJob(db, jobId);
+            }
             const r = jobReport(db, jobId);
             const j = getJob(db, jobId);
             const taskId = j?.taskId ?? null;
@@ -712,8 +725,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
               truncated: r.truncated,
               taskContext: taskId ? makeTaskContext(db, layout, taskId) : null,
             });
-          });
-        },
+          }),
       },
       {
         name: "grande_task_close",

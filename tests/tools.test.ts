@@ -539,6 +539,27 @@ describe("grande_run / grande_run_result", () => {
       vi.useRealTimers();
     }
   });
+
+  it("初次读取 job 行解码失败时返回规范 INTERNAL 信封而不是 rejected promise", async () => {
+    createJob(deps.db, {
+      jobId: "job_bad_row", taskId: "task_abcd", profile: "ok",
+      argv: ["/bin/sh", "-c", "true"], pgid: 123,
+    });
+    deps.db.prepare("UPDATE job SET argv = ? WHERE jobId = ?").run("{invalid-json", "job_bad_row");
+
+    const result = JSON.parse(await callTool("grande_run_result", { jobId: "job_bad_row" }));
+
+    expect(result).toEqual({
+      ok: false,
+      taskId: null,
+      error: {
+        code: "INTERNAL",
+        message: "Gateway 内部错误。详情见服务端日志。",
+        retryable: false,
+        details: {},
+      },
+    });
+  });
 }, 15_000);
 
 describe("工具注解必须逐字匹配当前 contract", () => {

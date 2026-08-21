@@ -7,6 +7,7 @@ const DEFAULT_INTERVAL_MS = 250;
 
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
+const defaultNow = (): number => performance.now();
 
 /**
  * Wait briefly for an existing running job to reach a terminal state.
@@ -19,6 +20,7 @@ export async function waitForTerminalJob(
     timeoutMs?: number;
     intervalMs?: number;
     sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
   },
 ): Promise<void> {
   const timeoutMs = Math.min(
@@ -27,11 +29,16 @@ export async function waitForTerminalJob(
   );
   const intervalMs = Math.max(1, options?.intervalMs ?? DEFAULT_INTERVAL_MS);
   const sleep = options?.sleep ?? defaultSleep;
-  const deadline = Date.now() + timeoutMs;
+  const now = options?.now ?? defaultNow;
 
   let job = getJob(db, jobId);
-  while (job && !TERMINAL.has(job.state) && Date.now() < deadline) {
-    await sleep(Math.min(intervalMs, deadline - Date.now()));
+  if (!job || TERMINAL.has(job.state)) return;
+
+  const deadline = now() + timeoutMs;
+  while (job && !TERMINAL.has(job.state)) {
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) return;
+    await sleep(Math.min(intervalMs, remainingMs));
     job = getJob(db, jobId);
   }
 }
