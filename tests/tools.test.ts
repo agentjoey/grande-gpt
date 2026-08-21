@@ -9,7 +9,7 @@ import { createTask, getTask } from "../src/tasks.ts";
 import { createJob, finishJob, getJob } from "../src/jobs.ts";
 import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
-import { buildTools, type ToolDeps } from "../src/tools.ts";
+import { buildTools, TOOLSET_EPOCH, type ToolDeps } from "../src/tools.ts";
 import { MCP_WRITE_TOOLS } from "../src/contract.ts";
 
 let ws: string, ctrl: string, layout: Layout, deps: ToolDeps;
@@ -178,6 +178,40 @@ describe("工具注解", () => {
     const profileProp = tool.inputSchema.properties.profile as { description?: string } | undefined;
     const haystack = tool.description + " " + (profileProp?.description ?? "");
     expect(haystack).toMatch(/\bok\b|\bslow\b|curl-probe|\bfail\b/);
+  });
+
+  it("repo_read/repo_search 描述明确给出默认值、硬上限与搜索结果字节预算，且 epoch 仍为 2", () => {
+    const tools = buildTools(deps);
+    const read = tools.find((t) => t.name === "grande_repo_read")!;
+    const search = tools.find((t) => t.name === "grande_repo_search")!;
+    const readLimit = read.inputSchema.properties.maxBytes as { description?: string };
+    const searchLimit = search.inputSchema.properties.maxMatches as { description?: string };
+
+    expect(`${read.description} ${readLimit.description ?? ""}`).toMatch(/16\s*KiB.*24\s*KiB/s);
+    expect(`${search.description} ${searchLimit.description ?? ""}`).toMatch(/20.*25.*16\s*KiB/s);
+    expect(TOOLSET_EPOCH).toBe(2);
+  });
+
+  it("repo_read 截断时给出保留 taskId、path、maxBytes 的下一次 lineRange 精确调用", async () => {
+    const worktree = join(layout.worktreesRoot, "demo", "task_abcd");
+    const full = Array.from({ length: 300 }, (_, i) => `${String(i + 1).padStart(3, "0")}:${"x".repeat(96)}`).join("\n");
+    writeFileSync(join(worktree, "budget.ts"), full, "utf8");
+
+    const r = JSON.parse(await callTool("grande_repo_read", { path: "budget.ts", taskId: "task_abcd" }));
+
+    expect(r.ok).toBe(true);
+    expect(r.truncated).toBe(true);
+    expect(r.hint).toContain(
+      'grande_repo_read({"path":"budget.ts","lineRange":[163,300],"maxBytes":16384,"taskId":"task_abcd"})',
+    );
+  });
+
+  it("repo_read/repo_search 对越过硬上限的调用返回 INVALID_INPUT，不静默钳制", async () => {
+    const read = JSON.parse(await callTool("grande_repo_read", { path: "a.ts", maxBytes: 24 * 1024 + 1 }));
+    const search = JSON.parse(await callTool("grande_repo_search", { pattern: "v1", maxMatches: 26 }));
+
+    expect(read.error.code).toBe("INVALID_INPUT");
+    expect(search.error.code).toBe("INVALID_INPUT");
   });
 
   it("grande_repo_edit 的 description 与 JSON Schema 明确暴露 delete，且 expectedSha256 必填", () => {

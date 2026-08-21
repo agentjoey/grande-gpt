@@ -27,8 +27,9 @@ export interface ReadResult {
   content: string;
 }
 
-const DEFAULT_MAX_BYTES = 64 * 1024;
-const MAX_READ_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_REPO_READ_BYTES = 16 * 1024;
+export const MAX_REPO_READ_BYTES = 24 * 1024;
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 function sha256Of(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
@@ -76,6 +77,13 @@ export function repoRead(
   relativePath: string,
   opts?: { maxBytes?: number; lineRange?: [number, number] },
 ): ReadResult {
+  const maxBytes = opts?.maxBytes ?? DEFAULT_REPO_READ_BYTES;
+  if (!Number.isInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_REPO_READ_BYTES) {
+    throw new EditError(
+      "INVALID_INPUT",
+      `maxBytes 必须是 1..${MAX_REPO_READ_BYTES} 的整数，收到：${String(maxBytes)}`,
+    );
+  }
   const abs = resolveInRepo(root, relativePath);
   if (!existsSync(abs) || !statSync(abs).isFile()) {
     throw new EditError("FILE_NOT_FOUND", `文件不存在：${relativePath}`);
@@ -85,8 +93,8 @@ export function repoRead(
   // 校验哈希的是同一个解码结果 —— sha256 会「对得上」，modify 于是放行，二进制文件
   // 被一堆 U+FFFD 覆盖。S0 没有 Checkpoint（§5.3），这一步不可逆。
   const raw = readFileSync(abs);
-  if (raw.byteLength > MAX_READ_BYTES) {
-    throw new EditError("INVALID_INPUT", `${relativePath} 超过 ${MAX_READ_BYTES} 字节，拒绝整文件读入`);
+  if (raw.byteLength > MAX_FILE_BYTES) {
+    throw new EditError("INVALID_INPUT", `${relativePath} 超过 ${MAX_FILE_BYTES} 字节，拒绝整文件读入`);
   }
   if (isBinary(raw)) {
     throw new EditError(
@@ -111,7 +119,7 @@ export function repoRead(
     truncated = from > 1 || to < lines.length - (full.endsWith("\n") ? 1 : 0);
   }
 
-  const capped = truncateText(body, opts?.maxBytes ?? DEFAULT_MAX_BYTES);
+  const capped = truncateText(body, maxBytes);
   return {
     truncated: truncated || capped.truncated,
     path: relativePath,

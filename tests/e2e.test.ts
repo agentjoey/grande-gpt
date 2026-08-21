@@ -335,6 +335,45 @@ describe("E2E：完整工具闭环", () => {
     const matches = (r.data as Record<string, unknown>).matches as Array<unknown>;
     expect(matches.length).toBeGreaterThanOrEqual(1);
   });
+
+  it("repo_search 在真实工具边界按 16 KiB 分页，逐页续取不会重复或跳过匹配", async () => {
+    const worktree = join(layout.worktreesRoot, "demo", "task_e2e");
+    const expectedPaths: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const path = `budget-${String(i).padStart(2, "0")}.ts`;
+      expectedPaths.push(path);
+      writeFileSync(
+        join(worktree, path),
+        `before-${i}\nBUDGET_NEEDLE-${i}-${"界".repeat(1_600)}\nafter-${i}\n`,
+        "utf8",
+      );
+    }
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 30; page++) {
+      const r = await callTool("grande_repo_search", {
+        pattern: "BUDGET_NEEDLE",
+        maxMatches: 25,
+        taskId: "task_e2e",
+        ...(cursor === null ? {} : { cursor }),
+      });
+      expect(r.ok).toBe(true);
+      const data = r.data as {
+        matches: Array<{ path: string }>;
+        truncated: boolean;
+        nextCursor: string | null;
+      };
+      expect(Buffer.byteLength(JSON.stringify(data), "utf8")).toBeLessThanOrEqual(16 * 1024);
+      seen.push(...data.matches.map((match) => match.path));
+      if (!data.truncated) break;
+      expect(data.nextCursor).toBe(String(seen.length));
+      cursor = data.nextCursor;
+    }
+
+    expect(seen).toEqual(expectedPaths);
+    expect(new Set(seen).size).toBe(seen.length);
+  });
 });
 
 describe("E2E：启动流程", () => {

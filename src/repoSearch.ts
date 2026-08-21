@@ -31,6 +31,9 @@ const SKIP_DIRS = new Set([".git", "node_modules", ".grande-work"]);
 // 规格 §5.4②：每条 3 行上下文 = 1 行前 + 命中行本身 + 1 行后。
 const CONTEXT_LINES = 1;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+export const DEFAULT_SEARCH_MATCHES = 20;
+export const MAX_SEARCH_MATCHES = 25;
+export const MAX_SEARCH_RESULT_BYTES = 16 * 1024;
 
 function listFiles(root: string, dir: string, out: string[], stats: { skippedOversized: number }): void {
   // 根目录读不到是调用方的错，要报出来；子目录读不到（权限/竞态删除）不该让
@@ -104,7 +107,13 @@ export function repoSearch(
         "超时机制），违反铁律二「没有通用逃生舱」。",
     );
   }
-  const maxMatches = opts?.maxMatches ?? 50;
+  const maxMatches = opts?.maxMatches ?? DEFAULT_SEARCH_MATCHES;
+  if (!Number.isInteger(maxMatches) || maxMatches <= 0 || maxMatches > MAX_SEARCH_MATCHES) {
+    throw new SearchError(
+      "INVALID_INPUT",
+      `maxMatches 必须是 1..${MAX_SEARCH_MATCHES} 的整数，收到：${String(maxMatches)}`,
+    );
+  }
   const budgetMs = opts?.budgetMs ?? 4000;
   const offset = opts?.cursor ? Number.parseInt(opts.cursor, 10) : 0;
   if (!Number.isInteger(offset) || offset < 0) {
@@ -173,15 +182,23 @@ export function repoSearch(
     }
   }
 
-  const slice = found.slice(offset, offset + maxMatches);
-  const consumed = offset + slice.length;
-  const truncated = timedOut || consumed < found.length;
+  let slice = found.slice(offset, offset + maxMatches);
+  for (;;) {
+    const consumed = offset + slice.length;
+    const truncated = timedOut || consumed < found.length;
+    const result: SearchResult = {
+      truncated,
+      nextCursor: truncated ? String(consumed) : null,
+      timedOut,
+      skippedOversized: stats.skippedOversized,
+      matches: slice,
+    };
+    if (Buffer.byteLength(JSON.stringify(result), "utf8") <= MAX_SEARCH_RESULT_BYTES) return result;
 
-  return {
-    truncated,
-    nextCursor: truncated ? String(consumed) : null,
-    timedOut,
-    skippedOversized: stats.skippedOversized,
-    matches: slice,
-  };
+    // The budget applies to the actual serialized SearchResult, including metadata and
+    // nextCursor. Drop only trailing matches, then rebuild the result so the cursor advances
+    // by exactly the matches the caller really received.
+    if (slice.length === 0) return result;
+    slice = slice.slice(0, -1);
+  }
 }

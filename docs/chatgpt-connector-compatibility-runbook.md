@@ -47,6 +47,20 @@ Gateway 通过现有 `grande_task_status` 暴露以下字段，不新增额外 i
 
 description、handler 实现、日志、CLI 文本、内部重构不进入 `toolsDigest`。不要为了普通 patch release bump `toolsetEpoch`。
 
+### Release A 仓库读取预算（epoch 2 行为补丁）
+
+Release A 收紧现有 `grande_repo_read.maxBytes` 与 `grande_repo_search.maxMatches` 的运行时行为，
+但不新增、删除或重命名 schema 字段，因此仍属于 epoch 2 patch：
+
+- `grande_repo_read` 默认返回 16 KiB，调用方最多请求 24 KiB；非正整数或超过 24 KiB 一律
+  `INVALID_INPUT`，不静默钳制。截断响应保留完整文件的 `sha256`、`bytes`、`totalLines`，
+  `hint` 给出带原仓库/任务绑定的下一次 `lineRange` 精确调用。
+- `grande_repo_search` 默认 20 条，调用方最多请求 25 条；非正整数或超过 25 一律
+  `INVALID_INPUT`。实际序列化后的 `SearchResult` 不超过 16 KiB；若字节预算移除尾部匹配，
+  `nextCursor` 只按本页实际返回的匹配数推进，后续页不重不漏。
+- 这是 description 与 handler 语义更新，不改变 tool name、input schema shape、required fields
+  或 annotations；`TOOLSET_EPOCH` 保持 `2`，Gateway restart 后不执行 App Refresh/Scan Tools。
+
 ## 3. Release 决策表
 
 ### Patch release：tool contract 未变化

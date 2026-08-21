@@ -8,8 +8,7 @@ import { loadProfiles } from "./profiles.ts";
 import { getJob, listJobs, TERMINAL } from "./jobs.ts";
 import { JOB_RESULT_WAIT_MS, waitForTerminalJob } from "./jobWait.ts";
 import { jobReport, jobStateToError, startJob } from "./runner.ts";
-import { repoRead } from "./repoFile.ts";
-import { repoEdit, type EditOp } from "./repoFile.ts";
+import { DEFAULT_REPO_READ_BYTES, repoEdit, repoRead, type EditOp } from "./repoFile.ts";
 import { repoSearch } from "./repoSearch.ts";
 import { repoMap } from "./repoMap.ts";
 import { listChangedFiles, repoDiff, openWorktree, removeWorktree } from "./worktree.ts";
@@ -303,14 +302,15 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
     {
       name: "grande_repo_search",
-      description: "在仓库中搜索字面量（非正则），返回匹配行与上下文，支持分页与时间预算。" +
+      description: "在仓库中搜索字面量（非正则），返回匹配行与上下文，支持分页与时间预算；" +
+        "默认 20 条、硬上限 25 条，序列化 SearchResult 硬上限 16 KiB。" +
         "带 taskId 时搜索该任务的 worktree（能搜到你自己刚写入的改动）；不带 taskId 时按" +
         "repoId（或端点默认仓库）搜索 canonical，两者都没有则报错并列出已注册仓库。",
       inputSchema: {
         type: "object",
         properties: {
           pattern: { type: "string", description: "要搜索的字面量文本（不支持正则）" },
-          maxMatches: { type: "number", description: "单次返回的最大匹配数（默认50）" },
+          maxMatches: { type: "number", description: "单次返回的最大匹配数（默认20，硬上限25，必须为正整数）" },
           budgetMs: { type: "number", description: "时间预算，毫秒（默认4000）" },
           cursor: { type: "string", description: "分页游标" },
           taskId: { type: "string", description: "可选：任务ID。带上时搜索该任务 worktree 而非 canonical" },
@@ -348,14 +348,14 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
     {
       name: "grande_repo_read",
-      description: "读取仓库内文件内容，支持行区间与字节上限。" +
+      description: "读取仓库内文件内容，支持行区间与字节上限；默认 16 KiB，硬上限 24 KiB。" +
         "带 taskId 时读取该任务的 worktree（能看到你自己刚写入的改动）；不带 taskId 时按" +
         "repoId（或端点默认仓库）读取 canonical，两者都没有则报错并列出已注册仓库。",
       inputSchema: {
         type: "object",
         properties: {
           path: { type: "string", description: "仓库内的相对文件路径" },
-          maxBytes: { type: "number", description: "最大返回字节数（默认64KB）" },
+          maxBytes: { type: "number", description: "最大返回字节数（默认 16 KiB，硬上限 24 KiB，必须为正整数）" },
           lineRange: {
             type: "array",
             items: { type: "number" },
@@ -386,10 +386,25 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             maxBytes: args.maxBytes as number | undefined,
             lineRange,
           });
+          const maxBytes = (args.maxBytes as number | undefined) ?? DEFAULT_REPO_READ_BYTES;
+          const returnedBytes = Buffer.byteLength(r.content, "utf8");
+          const startLine = lineRange?.[0] ?? 1;
+          const byteLimited = returnedBytes >= maxBytes - 3;
+          const nextLine = byteLimited
+            ? startLine + (r.content.match(/\n/g)?.length ?? 0)
+            : Math.min((lineRange?.[1] ?? startLine) + 1, r.totalLines);
+          const continuationArgs: Record<string, unknown> = {
+            path: r.path,
+            lineRange: [nextLine, r.totalLines],
+            maxBytes,
+          };
+          if (args.taskId !== undefined) continuationArgs.taskId = args.taskId;
+          else if (args.repoId !== undefined) continuationArgs.repoId = args.repoId;
           return ok({
             data: r,
             hint: r.truncated
-              ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），内容已截断（返回了 ${Buffer.byteLength(r.content, "utf8")} 字节）`
+              ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），内容已截断（返回了 ${returnedBytes} 字节）；` +
+                `续取请调用 grande_repo_read(${JSON.stringify(continuationArgs)})`
               : `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节）`,
               truncated: r.truncated,
             });

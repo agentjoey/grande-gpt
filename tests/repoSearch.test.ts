@@ -92,10 +92,58 @@ describe("repoSearch()", () => {
     const first = repoSearch(root, "NEEDLE", { maxMatches: 4 });
     expect(first.truncated).toBe(true);
     expect(first.matches).toHaveLength(4);
-    const second = repoSearch(root, "NEEDLE", { maxMatches: 100, cursor: first.nextCursor });
+    const second = repoSearch(root, "NEEDLE", { maxMatches: 25, cursor: first.nextCursor });
     expect(second.truncated).toBe(false);
     const allPaths = [...first.matches, ...second.matches].map((m) => m.path);
     expect(new Set(allPaths).size).toBe(10);
+  });
+
+  it("默认返回 20 条，显式硬上限 25 条可用，游标按实际返回数稳定推进", () => {
+    for (let i = 0; i < 30; i++) file(`src/f${String(i).padStart(2, "0")}.ts`, "NEEDLE\n");
+
+    const defaultPage = repoSearch(root, "NEEDLE");
+    expect(defaultPage.matches).toHaveLength(20);
+    expect(defaultPage.truncated).toBe(true);
+    expect(defaultPage.nextCursor).toBe("20");
+
+    const maxPage = repoSearch(root, "NEEDLE", { maxMatches: 25 });
+    expect(maxPage.matches).toHaveLength(25);
+    expect(maxPage.truncated).toBe(true);
+    expect(maxPage.nextCursor).toBe("25");
+  });
+
+  it.each([0, -1, 1.5, 26, Number.NaN])(
+    "maxMatches=%s 不是 1..25 内的正整数时返回 INVALID_INPUT，而不是钳制",
+    (maxMatches) => {
+      file("src/a.ts", "NEEDLE\n");
+      expect(() => repoSearch(root, "NEEDLE", { maxMatches }))
+        .toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    },
+  );
+
+  it("按实际序列化后的 SearchResult 强制 16 KiB 上限，移除尾部匹配后游标只推进已返回数", () => {
+    for (let i = 0; i < 8; i++) {
+      file(
+        `src/large-${i}.ts`,
+        `before-${i}\nNEEDLE-${i}-${"界".repeat(1_600)}\nafter-${i}\n`,
+      );
+    }
+
+    const first = repoSearch(root, "NEEDLE", { maxMatches: 25 });
+    const firstBytes = Buffer.byteLength(JSON.stringify(first), "utf8");
+
+    expect(firstBytes).toBeLessThanOrEqual(16 * 1024);
+    expect(first.matches.length).toBeGreaterThan(0);
+    expect(first.matches.length).toBeLessThan(8);
+    expect(first.truncated).toBe(true);
+    expect(first.nextCursor).toBe(String(first.matches.length));
+
+    const second = repoSearch(root, "NEEDLE", {
+      maxMatches: 25,
+      cursor: first.nextCursor,
+    });
+    expect(Buffer.byteLength(JSON.stringify(second), "utf8")).toBeLessThanOrEqual(16 * 1024);
+    expect(second.matches[0]!.path).toBe(`src/large-${first.matches.length}.ts`);
   });
 
   it("顺序确定且是全局字典序（跨目录也成立）", () => {
@@ -119,7 +167,7 @@ describe("repoSearch()", () => {
     expect(r.matches[0]!.path).toBe("src/f00.ts");
     expect(r.nextCursor).toBe("1"); // 可续取
 
-    const rest = repoSearch(root, "NEEDLE", { cursor: r.nextCursor, maxMatches: 100 });
+    const rest = repoSearch(root, "NEEDLE", { cursor: r.nextCursor, maxMatches: 25 });
     expect(rest.matches.map((m) => m.path)).not.toContain("src/f00.ts");
   });
 

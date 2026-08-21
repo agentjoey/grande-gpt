@@ -5,7 +5,7 @@ import { err, ok } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import { getJob, TERMINAL } from "./jobs.ts";
 import { getProfile } from "./profiles.ts";
-import { repoRead } from "./repoFile.ts";
+import { MAX_REPO_READ_BYTES, repoRead } from "./repoFile.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
@@ -92,8 +92,14 @@ function parseAction(value: unknown, field: string): DeploymentAction {
 export function loadDeploymentSpec(worktreePath: string): DeploymentSpec {
   let parsed: unknown;
   try {
-    const source = repoRead(worktreePath, ".grande/deploy.yaml", { maxBytes: 64 * 1024 }).content;
-    parsed = parse(source);
+    const result = repoRead(worktreePath, ".grande/deploy.yaml", { maxBytes: MAX_REPO_READ_BYTES });
+    if (result.truncated) {
+      throw new StateError(
+        "INVALID_INPUT",
+        `.grande/deploy.yaml 超过 ${MAX_REPO_READ_BYTES} 字节，拒绝解析截断的部署配置。`,
+      );
+    }
+    parsed = parse(result.content);
   } catch (error) {
     if (error instanceof StateError) throw error;
     throw new StateError(

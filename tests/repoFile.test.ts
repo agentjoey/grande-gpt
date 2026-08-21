@@ -95,6 +95,38 @@ describe("repoRead()", () => {
     expect(r.sha256).toBe(sha(big));
   });
 
+  it("默认最多返回 16 KiB，同时保留完整文件的 sha256、bytes 与 totalLines", () => {
+    const full = Array.from({ length: 300 }, (_, i) => `${String(i + 1).padStart(3, "0")}:${"x".repeat(96)}`).join("\n");
+    file("budget.ts", full);
+
+    const r = repoRead(root, "budget.ts");
+
+    expect(Buffer.byteLength(r.content, "utf8")).toBeLessThanOrEqual(16 * 1024);
+    expect(r.truncated).toBe(true);
+    expect(r.sha256).toBe(sha(full));
+    expect(r.bytes).toBe(Buffer.byteLength(full, "utf8"));
+    expect(r.totalLines).toBe(300);
+  });
+
+  it("显式 24 KiB 上限被接受且不会把调用方请求静默压回默认 16 KiB", () => {
+    const full = "x".repeat(24 * 1024);
+    file("max.ts", full);
+
+    const r = repoRead(root, "max.ts", { maxBytes: 24 * 1024 });
+
+    expect(Buffer.byteLength(r.content, "utf8")).toBe(24 * 1024);
+    expect(r.truncated).toBe(false);
+  });
+
+  it.each([0, -1, 1.5, 24 * 1024 + 1, Number.NaN])(
+    "maxBytes=%s 不是 1..24 KiB 内的正整数时返回 INVALID_INPUT，而不是钳制",
+    (maxBytes) => {
+      file("invalid-limit.ts", "content\n");
+      expect(() => repoRead(root, "invalid-limit.ts", { maxBytes }))
+        .toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    },
+  );
+
   it("lineRange 取指定行区间（1 基、闭区间）", () => {
     file("a.ts", "l1\nl2\nl3\nl4\nl5\n");
     const r = repoRead(root, "a.ts", { lineRange: [2, 4] });
