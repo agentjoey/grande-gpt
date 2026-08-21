@@ -4,14 +4,17 @@ Task: `task-reliability-hostverifier-20260821-001`
 
 ## Gate purpose
 
-Slice B requires real trusted-host evidence for four load-bearing properties before Slice C is allowed:
+Slice B requires real trusted-host evidence before Slice C is allowed. The original gate assumptions were revised by Human Owner approval after the fifth real-host run. The active criteria are now:
 
-1. nested Seatbelt produces a true inner allow/deny result;
+1. one outer Seatbelt boundary proves child inheritance/non-escape: allowed fixture behavior succeeds while sensitive-path and non-loopback behavior remains denied;
 2. a real Git hook executes without Safe Git overrides and is suppressed by Safe Git;
-3. ephemeral loopback works while LAN/non-loopback and the production Gateway port are denied;
-4. timeout kills the whole process group with no residual orphan.
+3. a trusted-parent allocated exact loopback port works while LAN/non-loopback and the production Gateway port are denied by default because they are absent from the allowlist;
+4. timeout kills the whole process group with no residual orphan;
+5. recursive-Seatbelt host cases are explicitly `manualOnly` and cannot be counted by an auto-safe receipt.
 
 The trusted host suite also contains negative probes for control/workspace/canonical/task/DB/credential-store reads and inherited credential/proxy/SSH state.
+
+Approved override: `docs/superpowers/specs/2026-08-21-grande-gpt-reliability-host-verifier-platform-amendment.md`.
 
 ## Evidence history
 
@@ -48,8 +51,8 @@ The fork and remote-LAN probe corrections were committed as `20064b6a5d27ad41ab4
 
 The fork and remote-LAN changes improved the evidence again: the distinct same-subnet LAN peer assertion passed, as did the sensitive-path/environment, Git hook, and process-group probes. Two failures remained.
 
-1. Nested Seatbelt now spawned `/usr/bin/sandbox-exec`, but both inner `cat` invocations exited `71`; the nominal allow branch did not reach the file read. The outer verifier grants `process-exec` only to canonical executable literals, while the inner probe still hard-coded `/bin/cat`. This is the same class of path-spelling hazard already proven by the `/var` versus `/private/var` failure. The probe now passes `realpathSync("/bin/cat")` into the inner script and executes that exact canonical path, without adding any executable permission.
-2. The production Gateway connection to `127.0.0.1:8787` still succeeded even though LAN/non-loopback was denied. The previous carve-out used `(remote ip "localhost:8787")`; the real host proved that this filter did not override the broader `(remote ip "localhost:*")` allow for this TCP connection. The policy now uses the TCP-specific `(deny network-outbound (remote tcp "localhost:8787"))` filter while leaving the broad loopback allow and LAN deny behavior unchanged. A RED unit contract for this exact policy shape was observed in `job_b70b68c1-1815-46d9-a4e0-a0bdbc321d06`.
+1. Nested Seatbelt now spawned `/usr/bin/sandbox-exec`, but both inner `cat` invocations exited `71`; the nominal allow branch did not reach the file read. The outer verifier grants `process-exec` only to canonical executable literals, while the inner probe still hard-coded `/bin/cat`. This is the same class of path-spelling hazard already proven by the `/var` versus `/private/var` failure. The probe was changed to pass the canonical executable path, without adding executable permission.
+2. The production Gateway connection to `127.0.0.1:8787` still succeeded even though LAN/non-loopback was denied. The previous carve-out used `(remote ip "localhost:8787")`; the real host proved that this filter did not override the broader `(remote ip "localhost:*")` allow for this TCP connection. A TCP-specific deny was tried next. A RED unit contract for that exact policy shape was observed in `job_b70b68c1-1815-46d9-a4e0-a0bdbc321d06`.
 
 After those two corrections, sandboxed `unit-selfhost` returned to `78 files / 726 tests PASS` in `job_8b9829ed-526c-43a7-804c-472f908600a2`. The final attestation-bound verification was then run and committed as `7cbffa73c7ce6a0d508abd2afaa19545467633fb` with attestation `att_419a6dce-5d9a-4a09-b2bb-08591cfadab3`.
 
@@ -57,28 +60,47 @@ After those two corrections, sandboxed `unit-selfhost` returned to `78 files / 7
 
 The two remaining failures were unchanged on exact SHA `7cbffa73c7ce6a0d508abd2afaa19545467633fb`:
 
-1. The nested `sandbox-exec` nominal allow branch still exits `71`, while the denied branch also exits `71`. The canonical executable change therefore did not address the root cause. This matches current macOS Seatbelt behavior documented independently in multiple contemporary sandbox implementations and reports: a process that is already under Seatbelt cannot reliably call `sandbox-exec`/`sandbox_apply` again; the inner apply fails with `Operation not permitted` and exit `71`. The approved gate requirement "nested Seatbelt produces a true inner allow/deny result" is therefore not satisfiable by recursive `sandbox-exec` on this host/platform.
-2. The distinct LAN peer remains denied correctly, but `127.0.0.1:8787` still connects successfully even with the TCP-specific deny rule. Contemporary macOS sandbox implementations document the same limitation: localhost outbound is effectively an allowlist capability, and macOS does not provide a reliable deny-within-broad-localhost-allow carve-out for one host loopback port. The approved gate requirement "arbitrary ephemeral loopback works while the production Gateway port is denied" therefore cannot be proven with the current broad localhost Seatbelt rule plus a narrow deny.
+1. The nested `sandbox-exec` nominal allow branch still exited `71`, while the denied branch also exited `71`. Canonical executable paths did not address the root cause. A process already under Seatbelt cannot reliably apply a second Seatbelt profile on the target host; recursive `sandbox-exec` is therefore not a valid required proof.
+2. The distinct LAN peer remained denied correctly, but `127.0.0.1:8787` still connected successfully even with the TCP-specific deny rule. The target macOS behavior therefore cannot support broad localhost allow plus a reliable one-port carve-out.
 
-These are platform/design constraints, not reasons to weaken assertions. No further policy widening or test neutralization is permitted. Slice B is now at a mandatory Human Gate requiring an approved design amendment before further implementation.
+These are platform/design constraints, not reasons to weaken assertions. No further policy widening or test neutralization is permitted.
+
+### Human Owner decision
+
+On 2026-08-21 the Human Owner approved the platform amendment:
+
+- replace recursive nested-Seatbelt success with child inheritance/non-escape under one outer Seatbelt boundary;
+- replace broad ephemeral localhost with trusted parent allocation of exact loopback ports, so the production Gateway port is absent from the allowlist by construction;
+- recursive-Seatbelt host cases are a predefined `manualOnly` Human Gate and cannot be represented as auto-safe coverage;
+- bump verifier policy version to 2 and bind exact runtime port allocation into the trusted execution-plan/receipt digest.
+
+The approved design and executable plan are:
+
+- `docs/superpowers/specs/2026-08-21-grande-gpt-reliability-host-verifier-platform-amendment.md`
+- `docs/superpowers/plans/2026-08-21-host-verifier-platform-amendment.md`
 
 ## Current gate state
 
-Slice B is **BLOCKED by two approved-design assumptions that do not hold on the target macOS Seatbelt platform**. The verified properties that remain valid are:
+The previous design-level blocker is **resolved by Owner approval**, but Slice B is **not yet PASS**. Implementation and fresh real-host proof of the amended criteria are still required.
+
+Already proven and retained:
 
 - Safe Git hook suppression: PASS;
-- remote LAN/non-loopback deny: PASS;
+- remote LAN/non-loopback deny under deny-default: PASS;
 - sensitive control/workspace/canonical/task/DB/credential/env isolation: PASS;
 - timeout process-group cleanup with no residual orphan: PASS;
 - Node/V8 startup under the verifier sandbox: PASS.
 
-The two unresolved requirements are design changes, not implementation bugs:
+Required before Slice C:
 
-- replace recursive nested-Seatbelt proof with a child-inheritance/non-escape proof under one outer Seatbelt boundary;
-- replace broad ephemeral-localhost-minus-8787 with a trusted exact-loopback-port allowlist (ports allocated by trusted parent before sandbox launch), so `8787` is absent from the allowlist by construction.
+- policy v2 uses only trusted exact loopback ports and no broad localhost;
+- child inheritance/non-escape probe PASS;
+- exact allocated loopback port PASS, LAN peer DENY, production port DENY;
+- recursive-Seatbelt cases are trusted `manualOnly` and excluded from auto-safe receipt coverage;
+- fresh `unit-selfhost`, `typecheck`, clean exact-SHA attestation, and trusted host suite evidence all PASS.
 
-Until the Owner explicitly approves that amendment:
+Until those amended requirements pass:
 
 - Slice C must not start;
-- no push/PR/merge should occur;
+- no PR/merge should occur;
 - `hostVerification.mode` remains `manual`.
