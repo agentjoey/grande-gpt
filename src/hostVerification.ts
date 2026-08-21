@@ -79,6 +79,12 @@ export const TRUSTED_HOST_MANIFEST: readonly HostManifestEntry[] = [
     levels: ["full"],
     execution: "manualOnly",
   },
+  {
+    file: "tests/host/verifier-recovery.host.test.ts",
+    reason: "Validates Gateway restart recovery for recorded verifier process groups and disposable resources from the trusted host layer.",
+    levels: ["full"],
+    execution: "manualOnly",
+  },
 ] as const;
 
 const FULL_SOURCE_BASENAMES = new Set([
@@ -100,6 +106,7 @@ const FULL_SOURCE_BASENAMES = new Set([
   "hostVerification.ts",
   "hostVerifier.ts",
   "hostVerifierRuntime.ts",
+  "hostVerifierRecovery.ts",
   "hostVerifierSandbox.ts",
   "outerTest.ts",
   "outerTestReceipt.ts",
@@ -117,6 +124,7 @@ const MANUAL_ONLY_SOURCE_BASENAMES = new Set([
   "hostVerification.ts",
   "hostVerifier.ts",
   "hostVerifierRuntime.ts",
+  "hostVerifierRecovery.ts",
   "hostVerifierSandbox.ts",
   "profiles.ts",
   "tools.ts",

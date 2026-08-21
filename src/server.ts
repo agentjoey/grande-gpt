@@ -10,6 +10,7 @@ import type { Layout } from "./layout.ts";
 import { createOAuth, OAuthError, type OAuthConfig } from "./oauth.ts";
 import { registeredIds } from "./registry.ts";
 import { reconcileRunningJobs } from "./jobs.ts";
+import { reconcileHostVerifierJobsAtStartup } from "./hostVerifierRecovery.ts";
 import { buildTools, type ToolDef } from "./tools.ts";
 import { createAccessGate, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
 import { assertDistinctAudience } from "./consoleAuth.ts";
@@ -476,6 +477,7 @@ export function createApp(cfg: AppConfig): Hono {
 }
 
 export async function startGateway(cfg: AppConfig): Promise<{ app: Hono; close: () => Promise<void> }> {
+  await reconcileHostVerifierJobsAtStartup({ db: cfg.db, layout: cfg.layout });
   reconcileRunningJobs(cfg.db, (pgid) => {
     try { process.kill(-pgid, 0); return true; } catch { return false; }
   });
