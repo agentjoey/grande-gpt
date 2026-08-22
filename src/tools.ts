@@ -6,6 +6,7 @@ import { refreshCanonical } from "./canonicalRefresh.ts";
 import { addDeploymentTools } from "./deployment.ts";
 import { err } from "./envelope.ts";
 import { toToolError, redact, StateError } from "./errors.ts";
+import { addFlowSimplification } from "./flowSimplification.ts";
 import { loadGuidance } from "./guidance.ts";
 import { projectHostVerifierOperationalStatus } from "./hostVerifierStatus.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
@@ -69,7 +70,7 @@ function withTaskRepoWriteLocks(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
 
 /**
  * 生产工具列表的唯一组装点。Task 始终是中心：
- * core → local loop → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
+ * core → local loop → Phase 8 flow projection → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
  *
  * S7 的 handler 运行时需要复用 S5 capability tools，而 S5 的 native discovery 又应该
  * 看见 S7 deployment tools。这里用一个共享的 `deploymentDeps` 数组解决这个接线顺序：
@@ -153,7 +154,8 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
   const local = addLocalLoopTools(deps, tools, {
     hostVerificationMode: options.hostVerificationMode,
   });
-  const githubBase = [...local, createPrStatusTool(deps), createPrMergeTool(deps, options)];
+  const simplified = addFlowSimplification(deps, local);
+  const githubBase = [...simplified, createPrStatusTool(deps), createPrMergeTool(deps, options)];
   const github = addPrMergeD2Reconciliation(deps, githubBase);
   const withBrief = addTaskBriefSupport(deps, github);
   const withOnboarding = addOnboardingTools(deps, withBrief);

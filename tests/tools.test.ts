@@ -9,6 +9,7 @@ import { createTask, getTask } from "../src/tasks.ts";
 import { createJob, finishJob, getJob } from "../src/jobs.ts";
 import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
+import { RUN_BOUNDED_WAIT_MS } from "../src/flowSimplification.ts";
 import { buildTools, TOOLSET_EPOCH, toolsetIdentity, type ToolDeps } from "../src/tools.ts";
 import { MCP_WRITE_TOOLS } from "../src/contract.ts";
 import {
@@ -68,7 +69,7 @@ beforeEach(() => {
     join(layout.configDir, "profiles.yaml"),
     "repos:\n  demo:\n" +
     '    ok: { argv: ["/bin/sh", "-c", "echo hello; exit 0"], timeoutSeconds: 30 }\n' +
-    '    slow: { argv: ["/bin/sh", "-c", "sleep 5"], timeoutSeconds: 30 }\n' +
+    '    slow: { argv: ["/bin/sh", "-c", "sleep 6"], timeoutSeconds: 30 }\n' +
     '    curl-probe: { argv: ["/usr/bin/curl", "-sS", "--max-time", "3", "http://example.com"], timeoutSeconds: 10 }\n' +
     '    fail: { argv: ["/bin/sh", "-c", "echo boom >&2; exit 1"], timeoutSeconds: 30 }\n',
     "utf8",
@@ -610,19 +611,32 @@ describe("D18：grande_task_status 的无参数发现形式（注册表可见性
 });
 
 describe("grande_run / grande_run_result", () => {
-  it("grande_run 立刻返回 jobId 与 pollAfterSeconds，不等命令跑完，且真的 spawn 了", async () => {
+  it("grande_run 对超过 bounded wait 的长 job 返回稳定 jobId，而不是强行等到命令结束", async () => {
     const t0 = Date.now();
     const r = JSON.parse(await callTool("grande_run", { taskId: "task_abcd", profile: "slow" }));
     started.push(r.data.jobId);
-    expect(Date.now() - t0).toBeLessThan(1000);
+    const elapsed = Date.now() - t0;
+    expect(elapsed).toBeGreaterThanOrEqual(RUN_BOUNDED_WAIT_MS - 500);
+    expect(elapsed).toBeLessThan(RUN_BOUNDED_WAIT_MS + 1500);
     expect(r.data.jobId).toMatch(/^job_/);
     expect(r.data.pollAfterSeconds).toBeGreaterThan(0);
+    expect(r.data.state).toBe("running");
     expect(r.hint).toContain("grande_run_result");
     const row = getJob(deps.db, r.data.jobId);
     expect(row).toBeDefined();
     expect(row!.state).toBe("running");
     await settle(r.data.jobId);
   }, 15_000);
+
+  it("grande_run 对短 job 在第一次调用里直接返回完整终态", async () => {
+    const r = JSON.parse(await callTool("grande_run", { taskId: "task_abcd", profile: "ok" }));
+    started.push(r.data.jobId);
+    expect(r.ok).toBe(true);
+    expect(r.data.state).toBe("passed");
+    expect(r.data.terminalResult).toMatchObject({ state: "passed", exitCode: 0 });
+    expect(r.data.boundedWaitMs).toBe(RUN_BOUNDED_WAIT_MS);
+    expect(r.hint).toContain("已包含终态结果");
+  });
 
   it("联网尝试产生 NETWORK_DENIED，而不是与普通测试失败混在一起", async () => {
     const r = JSON.parse(await callTool("grande_run", { taskId: "task_abcd", profile: "curl-probe" }));
@@ -723,7 +737,7 @@ describe("工具注解必须逐字匹配当前 contract", () => {
     grande_push:              { readOnly: false, destructive: false, openWorld: true },
     grande_pr_open:           { readOnly: false, destructive: false, openWorld: true },
     grande_capability_list:   { readOnly: true,  destructive: false, openWorld: true },
-    grande_capability_inspect:{ readOnly: true,  destructive: false, openWorld: true },
+    grande_capability_inspect:{ readOnly: true, destructive: false, openWorld: true },
     grande_capability_invoke: { readOnly: false, destructive: true,  openWorld: true },
     grande_pr_status:         { readOnly: true,  destructive: false, openWorld: true },
     grande_pr_merge:          { readOnly: false, destructive: true,  openWorld: true },
