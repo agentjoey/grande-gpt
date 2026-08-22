@@ -54,6 +54,79 @@
 - **外部平台**：用 `OBS / OBSERVATION`；不要为了适配平台偶发现象降低 Gateway policy、`readOnlyHint` / `destructiveHint` 或绕过安全边界。
 - **详细文档不双写状态**：`docs/research/**` 只保存时间线、复现和设计背景；若其中旧状态与本文件冲突，以本文件为准。
 
+## Roadmap after Phase 6
+
+本区只维护 **Phase 顺序、范围与进入/退出条件**；每个 backlog 的实时 `Priority / Status` 仍以对应条目为唯一权威。不要再建立第二份维护当前状态的 roadmap 文档。
+
+### Phase 7 — Reliability Foundation
+
+**范围**：`GG-BL-007`、`GG-BL-017`、`GG-BL-018`、`GG-BL-019`。
+
+目标是在继续压缩流程或改变公开 tool contract 前，先补齐控制状态恢复、跨进程写互斥、独立 CI 与 durable production activation evidence。
+
+**进入条件**：Phase 6 已关闭，Automated Host Verifier 已在 production controlled auto mode 运行；不重新设计 verifier execution plane。
+
+**退出条件**：
+
+- SQLite schema upgrade 有顺序 migration、迁移前 backup、失败回滚与真实 restore evidence；
+- Gateway/CLI 对同一 repo 的跨进程写操作可以 fail-closed 互斥，不同 repo 仍可并行；
+- GrandeGPT 自身 PR 有最小独立 CI，`unit-selfhost`、`typecheck` 与 tool-contract checks 不再长期依赖 `CI=none`；
+- production activation 有 durable evidence，能绑定 target/runtime build、toolset identity、restart 与 read probe，不靠聊天人工推断。
+
+### Phase 8 — Flow Simplification
+
+**范围**：`GG-BL-020`、`GG-BL-021`、`GG-BL-022`、`GG-BL-023`。
+
+目标是在 **不改变当前公开 `tools/list`** 的前提下减少正常开发轮次和无意义 Human Gate：按真实交付目标投影流程，短 job bounded wait，PR/verifier 自动续跑，并按 L1/L2/L3 风险分级开发与 review。
+
+**进入条件**：Phase 7 的可靠性基础已具备，不需要靠流程简化掩盖底层恢复、锁、CI 或 activation 缺口。
+
+**退出条件**：
+
+- `local / pr / deploy` 只执行各自必要阶段，status 保持一个 blocker + 一个 nextAction；
+- 普通短测试通常一次 `grande_run` 即可获得终态，长任务和恢复才需要 `grande_run_result`；
+- 正常 PR flow 不再要求无意义的 `pr_status → merge → verifier → Human → merge` 往返，同一授权任务可自动完成 verifier 后第二次 merge gate；
+- L1/L2/L3 正式落地，普通 bug 不再承担 L3 级 spec/plan/reviewer/host ceremony；
+- 整个 Phase 保持当前公开 tool contract 冻结，不 bump toolset epoch。
+
+### Phase 9 — Tool Surface Convergence
+
+**范围**：`GG-BL-024`。
+
+目标是把已经在 Phase 8 内部验证成熟的流程语义，在 **一次正式 Tool Epoch** 中收敛公开 MCP surface，而不是零散增删工具。
+
+**进入条件**：
+
+1. Phase 7、Phase 8 完成；
+2. `GG-BL-010` 至少达到 release-ready 稳定门槛：当前 Web、fresh Web、iOS fresh conversation 的真实调用可用，server tool identity 与 client/session binding snapshot 可区分，已有可靠 App refresh/new-session release procedure，且最近没有新的 unexplained `tool disabled` recurrence；
+3. 在满足以上条件前，production **25-tool contract 冻结**，除阻断性安全/可靠性修复外不主动改变工具快照。
+
+**一次性变更目标**：
+
+- `grande_repo_add_propose` + `grande_repo_add_apply` → 单一 `grande_repo_register`，但继续保留 proposalDigest + Human Gate 两阶段语义；
+- `grande_capability_inspect` → `grande_capability_list` filter；
+- `grande_deploy_verify` → 可重入 `grande_deploy`；
+- 正常完成路径将 `grande_task_close` 移出公开 MCP，异常/放弃任务继续走 CLI/Console；
+- 不长期同时暴露新旧 alias，不为了整数目标合并风险不同的核心工具。
+
+**退出条件**：新 tool count/epoch/digest 稳定；Dev App 与 Production App 完成 refresh；Web/iOS 新聊天完成真实任务；失败时可直接回滚上一 Gateway build/tool epoch。
+
+### Phase 10 — Internal Convergence
+
+**范围**：`GG-BL-025`。
+
+目标是只根据最新代码的真实重复与耦合证据，收敛内部 process supervision、receipt eligibility、tool assembly 与 deployment/capability 调用路径。
+
+**进入条件**：Phase 9 的新公开 contract 已稳定，或某个独立内部缺陷有足够证据证明必须提前处理。
+
+**退出条件**：只关闭仍真实存在的重复实现；没有为了“架构更漂亮”新增 workflow engine、通用 middleware framework、第二套状态系统、第二个 Gateway 或新的 provider graph。若最新代码已消除某个子问题，直接从 scope 删除。
+
+### Maintenance lane
+
+- `GG-BL-006`、`GG-BL-008`、`GG-BL-009` 保持独立 maintenance lane，不为凑 Phase 范围强行并入 Phase 7–10。
+- `GG-BL-010` 继续保持 P0 / MITIGATED，并作为 Phase 9 的 release gate；Phase 7/8 不等待其永久关闭，也不得用改变 tool contract 的方式“试试看能不能修”。
+- `GG-BL-011`、`GG-BL-012` 继续保持 observation，不因 roadmap 自动升格工程项。
+
 ## Active backlog
 
 ### GG-BL-006 — `selfcheck` 对交互 shell 的 `GRANDE_ISSUER` 依赖易误判
@@ -66,15 +139,15 @@
 - **Next**: 不降低 issuer/audience 校验；优先改善诊断文本和 `gateway status` 的可信 issuer 展示；只有能证明可信来源时才考虑显式复用 LaunchAgent/config issuer。
 - **Done when**: shell 缺 issuer 时输出能清楚区分“CLI 环境缺失”和“Gateway 不健康”，并保持 fail-closed。
 
-### GG-BL-007 — 控制平面缺少备份方案
+### GG-BL-007 — Control-plane backup、SQLite migration 与 restore 路径不完整
 
-- **Priority**: P2
+- **Priority**: P1
 - **Status**: OPEN
-- **Category**: resilience / operations
-- **Problem**: `~/.grande-control/` 不在 Git 中，包含不可从 repo 重建的状态/审计数据；机器故障会丢失。历史记录里“grande-gpt 代码无 remote”已过时，不再属于本项。
-- **Evidence / Detail**: `CLAUDE.md` 历史 S0.5 遗留 #9；Human Owner 已指定未来目标为本地 NAS。
-- **Next**: 定义本地 NAS 备份/恢复 runbook 或最小命令；`secrets/` 必须明确排除或采用独立安全处理，不能进入普通备份仓库。
-- **Done when**: 有一次真实 backup + restore 验证，明确哪些 control-plane 数据可恢复、哪些 secrets 不进入普通备份。
+- **Category**: resilience / state migration / operations
+- **Problem**: `~/.grande-control/` 包含 Task、audit、OAuth、attestation、job、receipt 等不可完全从 Git 重建的状态，但当前缺少完整的顺序 schema migration、迁移前 backup 与经过真实验证的 restore 路径；机器故障或 schema 升级失败仍可能把 Human 推回人工恢复。
+- **Evidence / Detail**: `CLAUDE.md` 历史 S0.5 遗留 #9；Human Owner 已指定本地 NAS 为长期备份目标。2026-08-22 post-Phase-6 architecture review 进一步确认 DB migration 与 backup/restore 属于同一控制平面恢复问题，不另开重复 ID。
+- **Next**: 保持 SQLite，不引入 ORM/外部数据库。实现最小顺序 `N → N+1` migration：迁移前创建可验证 backup，单事务执行 migration，成功后更新 `PRAGMA user_version`，失败时原库与 backup 保持可用；同时定义固定 backup root、有限保留策略和显式 Human restore。`secrets/` 必须排除或采用独立安全处理，不能进入普通 backup。
+- **Done when**: ① 至少支持当前前一 schema version → current 且 Task/audit/OAuth/attestation/receipt 不丢失；② migration 中途失败时事务回滚且旧库仍可由旧版本打开；③ backup 创建失败时原库零修改；④ 新建库与迁移后库 schema digest 一致；⑤ 完成一次真实 backup + restore；⑥ 明确哪些 control-plane 数据可恢复、哪些 secrets 不进入普通备份。
 
 ### GG-BL-008 — GitHub fine-grained PAT least-privilege 与生命周期
 
@@ -108,7 +181,98 @@
 - **2026-08-22 post-activation recurrence**: Automated Host Verifier 已 activation 后，在一个已有 GrandeGPT conversation 中尝试 direct `grande_task_status`，ChatGPT 再次返回 `The GrandeGPT tool has been disabled.`。这次复现进一步证明 verification execution plane 与 ChatGPT conversation/App binding plane 是独立问题：Host Verifier 自动执行能力正常投产并不能消除或证明修复 client/session binding drift。
 - **Mitigation**: 保留 server-side toolset identity、32 KiB result budget、单次终态 result、有界轮询/分页、connector compatibility runbook 与长会话真实工具调用回归；不降低 annotations、不绕过 Gateway、不增加第二执行通道。
 - **Remaining**: ChatGPT Web/iOS/fresh-Web 的完整两任务 release gate 与七天观察期仍属于根因关闭前的后续验证；平台侧 binding 故障并未宣称彻底消除。Automated Host Verifier 的 execution-plane hardening 不作为本项关闭条件的替代品。
+- **Related / Roadmap gate**: 本项保持独立 P0/MITIGATED，不阻塞 Phase 7/8；但 Phase 9 改变公开 tool snapshot 前必须达到 roadmap 定义的 release-ready 稳定门槛。不得通过频繁改变 tools/list、降低 annotations、绕过 Gateway 或增加第二执行通道来试探性规避 binding drift。
 - **Done when**: 完成跨客户端两任务 release gate 和稳定观察，或获得可控根因并证明长期稳定后再转 DONE；当前按 Human Owner closeout 决策保持 MITIGATED。
+
+### GG-BL-017 — Gateway / CLI 缺少跨进程 repo write lock
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: reliability / Git lifecycle / concurrency
+- **Problem**: 现有 repo write mutex 主要约束单个 Gateway 进程内的写操作；Gateway 与 `grande gc --apply` 或其他写 CLI 属于不同进程时，缺少共享的 repo 级排他边界，理论上可以同时修改同一 repo 的 worktree、branch 或 canonical。
+- **Evidence / Detail**: 2026-08-22 post-Phase-6 architecture review 将该跨进程缺口列为连续运行基础项；实施前必须重新读取最新 `repoWriteLock`、GC 和 CLI wiring，确认当前代码仍存在该缺口，不因旧设计快照机械重构。
+- **Next**: 增加一个窄的 per-repo cross-process advisory lock，Gateway 与会写 Git/worktree 的 CLI 共用；记录足够的 owner/process metadata 以诊断 busy/stale，获取失败快速返回结构化 busy；进程内 Promise mutex 继续保留。不增加持久队列、daemon、分布式锁或后台调度器。
+- **Done when**: ① 两个独立 Node 进程不能同时进入同一 repo 写临界区；② 不同 repo 可并行；③ Gateway 与 `gc --apply`/其他写 CLI 共用同一锁；④ 进程被强杀后 stale lock 可安全恢复；⑤ busy/timeout 零部分 Git/worktree 副作用；⑥ read-only tools 不受影响。
+
+### GG-BL-018 — GrandeGPT 自身缺少最小独立 CI gate
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: verification / GitHub CI
+- **Problem**: GrandeGPT 自身核心变更仍可能出现 PR `CI=none`，基础 unit/typecheck/tool-contract 主要依赖本机 agent/attestation；Host Verifier 能证明 Mac/host 边界，但不应代替一条独立、不可遗漏的普通 CI 基线。
+- **Evidence / Detail**: 2026-08-22 PR #20 在候选与 Host Verifier 均通过时仍观察到 `CI=none`；这不是 Host Verifier 缺陷，而是远程基础 CI 缺口。
+- **Next**: 增加最小 GitHub CI：固定 Node 24 与 pnpm lockfile，`pnpm install --frozen-lockfile`，运行 `unit-selfhost`、`typecheck` 和 tool-contract/diff check。Seatbelt、loopback、LaunchAgent 等 Mac host suite 继续由 trusted Host Verifier 承担，不建设复杂 matrix。
+- **Done when**: ① GrandeGPT PR 可稳定获得真实 CI 状态而非长期 `none`；② fresh install 后 `unit-selfhost`、`typecheck`、tool-contract checks PASS；③ merge gate 对 exact PR head 读取该 CI；④ Mac-only host suite 仍由 Host Verifier 承担；⑤ 不引入与轻量定位无关的复杂 CI matrix/release train。
+
+### GG-BL-019 — Production activation 缺少 durable evidence / receipt
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: production activation / evidence
+- **Problem**: `GG-BL-004` 已解决“merged 不等于 activated”的识别和 runtime identity 展示，但 activation 证据仍主要依赖即时 restart/read probe 与状态读取，没有一个 durable evidence object 把 target build、实际 runtime build、toolset identity 与 activation probe 绑定起来；跨会话 closeout 仍需要人工重新拼接这些事实。
+- **Evidence / Detail**: `GG-BL-004` 已证明当前 `gatewayBuild/toolsetEpoch/toolsCount/toolsDigest` 可以正确区分 merge 与 runtime activation；2026-08-22 PR #20 merge 后仍需 Human restart，再由新会话读取 production status 才证明 build `eb020384...` 已真正运行。新项只收敛 durable activation evidence，不重新打开 GG-BL-004。
+- **Next**: 复用现有 runtime identity 与 restart/readiness/read-probe primitives，定义最小 activation receipt/evidence；至少绑定 target build、runtime build、toolset epoch/digest、activation/restart 时间和 trusted read probe。不要把 merge receipt、deploy receipt 与 activation receipt 混成大型 release workflow，也不要自动更换 issuer/credential/policy。
+- **Done when**: ① merge、deploy、activation 在 status/evidence 中明确分开；② activation evidence 至少绑定 target build、runtime build、toolset epoch/digest、restart/activation 时间和 read probe；③ runtime build/toolset 与 target 不一致时 activation 明确失败；④ restart success 只有在 LaunchAgent/endpoint/read probe 恢复后成立；⑤ 后续会话可读取 durable evidence 判断目标 build 是否已 activated，而不需要人工重建时间线。
+
+### GG-BL-020 — Task 缺少 `deliveryTarget = local | pr | deploy`
+
+- **Priority**: P2
+- **Status**: OPEN
+- **Category**: developer flow / task projection
+- **Problem**: 当前开发闭环仍偏向固定 Golden Path，纯本地修改、只需 PR 的任务与需要 production deploy 的任务会被同一组阶段概念包围，造成无关 blocker、状态噪声和额外调用。
+- **Evidence / Detail**: 2026-08-22 owner-approved capability/flow simplification proposal 明确要求按实际交付目标选择 `local / pr / deploy`，且不把缺少 deploy spec 误报为 local/pr readiness failure。
+- **Next**: 在稳定 TaskBrief/TaskProgress 语义中加入 `deliveryTarget`，不扩大小型生命周期状态机。local 只要求本地 acceptance/tests/attestation；pr 再要求 push/PR/CI/exact-SHA merge/refresh/cleanup；deploy 在 pr 之上要求可信 deploy spec + deploy/verify。target 扩大外部副作用必须重新 Human confirmation。
+- **Done when**: ① local 不要求 PR/CI/deploy；② pr 不要求 deploy；③ deploy 必须存在可信 deploy spec；④ doctor/task_status 只评估当前 target 所需阶段；⑤ target 扩大需要 Human confirmation，缩小不能伪造已发生外部结果；⑥ status 始终只返回一个 blocker 与一个 nextAction。
+
+### GG-BL-021 — 短 job 普遍需要 `grande_run → grande_run_result` 两次调用
+
+- **Priority**: P2
+- **Status**: OPEN
+- **Category**: agent UX / runner efficiency
+- **Problem**: `grande_run` 当前立即返回 jobId，即使 profile 很快完成，agent 仍需要第二次 `grande_run_result`；短测试因此承担与长任务相同的 MCP 往返成本。
+- **Evidence / Detail**: 2026-08-22 owner-approved flow simplification proposal 将 bounded wait 列为不改变 tool contract 即可获得的高收益优化；现有 async job/recovery 语义仍有价值，不能为了少一次调用删除 `run_result`。
+- **Next**: 为 `grande_run` 增加固定、较短的 server-side bounded wait；预算内终态直接返回 result summary + attestation context，超预算返回 jobId。保持现有 artifact、shutdown、timeout/RSS 与 recovery 语义，不把 MCP 请求拖到不可控 timeout。
+- **Done when**: ① bounded wait 有固定上限并有 timeout regression；② 短 job 在预算内一次调用返回 terminal result；③ 超预算稳定返回 jobId；④ 长任务/recovery 继续使用 `grande_run_result`；⑤ 不增加高频轮询、不破坏 artifact/attestation/job terminal semantics。
+
+### GG-BL-022 — 正常 PR / verifier 流程存在不必要状态往返
+
+- **Priority**: P2
+- **Status**: OPEN
+- **Category**: developer flow / PR lifecycle
+- **Problem**: 正常 PR 流程仍可能要求 agent 先显式读 `pr_status`，再调用 merge；auto verifier 启动并 PASS 后又需要再次推进 merge。对同一已授权任务，这些安全检查应由 merge gate 观察和返回 blocker，而不是变成人工确认节点。
+- **Evidence / Detail**: Automated Host Verifier 已证明 verifier execution plane 可以在 merge gate 下异步完成且绝不自行 merge；PR #20 的真实流程是第一次 merge 启 verifier、PASS 后第二次 merge 成功，说明剩余优化是 agent continuation，而不是放宽 exact-SHA gate。
+- **Next**: 正常路径允许直接 `grande_pr_merge`，内部读取 exact PR head、CI、attestation、host receipt；只有 blocker 需要展开 CI/PR 诊断时才使用 `grande_pr_status`。verifier PASS 后 agent 在同一次 task authorization 下自动再次调用 merge；每次 merge 都重新读取全部门禁。不要增加 workflow engine，也不要让 verifier 子进程自行 merge。
+- **Done when**: ① 正常 green PR 可不经预先 `pr_status` 进入 merge gate；② blocker 返回结构化 nextAction；③ verifier PASS 后 agent 自动执行第二次 merge，无重复 Human confirmation；④第二次 merge 重新检查 PR head/CI/attestation/receipt；⑤ verifier/runner 永不拥有 merge 权限。
+
+### GG-BL-023 — 开发风险等级未正式落地，普通修改流程过重
+
+- **Priority**: P2
+- **Status**: OPEN
+- **Category**: development process / review policy
+- **Problem**: 普通文档、常规 bug 与 sandbox/auth/verifier 等核心高风险修改容易沿用近似完整的 spec/plan/reviewer/host 流程，重复维护文档与 review gate，增加 token、调用和 Human 等待而不增加对应安全收益。
+- **Evidence / Detail**: 2026-08-22 两份 owner-reviewed optimization design 均提出 L1/L2/L3 分级，并明确 Pact/independent reviewer 不应成为普通轻量任务的永久 ceremony。
+- **Next**: 以现有 host-verification classifier 和产品安全边界为基础定义 L1/L2/L3：L1 文档/非运行资源走基础检查；L2 常规业务源码/bug 使用简短 TaskBrief、行为测试和普通 review，按 classifier none/smoke；L3 才要求 design spec + implementation plan + independent reviewer + full verifier，无法分类默认 L3。Pact 仅用于 GrandeGPT L3、多 agent 或 Human 明确要求。
+- **Done when**: ① classifier/文档明确 L1/L2/L3；② L1 不要求独立 spec/plan/reviewer/host verifier；③ L2 只要求简短 TaskBrief + tests + ordinary review + none/smoke；④ L3 强制完整设计、独立 reviewer、full gates；⑤无法分类不会被 agent 自行降级；⑥真实普通 bug dogfood 证明中间文档/Human gate 减少且安全 gate 无退化。
+
+### GG-BL-024 — 下一次 Tool Epoch 收敛公开 MCP surface
+
+- **Priority**: P2
+- **Status**: OPEN
+- **Category**: MCP contract / tool surface
+- **Problem**: 当前 25-tool contract 中仍有 onboarding 两工具、capability inspect、deploy verify、task close 等可在保持风险语义的前提下合并或内部化的公开面；但零散修改 tools/list 会放大 ChatGPT binding/snapshot 排障变量。
+- **Evidence / Detail**: 2026-08-22 owner-approved capability/flow simplification proposal 目标约从 25 tools 收敛到 21，明确要求一个正式 tool epoch 一次切换、不长期暴露新旧 alias。`GG-BL-010` 已证明 session/app binding 与 server tool identity 可分叉，因此本项必须在稳定 release gate 后执行。
+- **Next**: 在 Phase 7/8 完成且 GG-BL-010 达到 roadmap release-ready 门槛后，一次 release 完成：① `repo_add_propose/apply → grande_repo_register`，仍使用 proposalDigest + Human Gate；② capability inspect 并入 list filter；③ deploy verify 并入可重入 deploy；④正常完成路径移除公开 task_close；⑤ bump toolset epoch 并执行 Dev/Production App refresh。不要为整数目标合并风险不同的工具，也不要长期保留 alias。
+- **Done when**: ①旧 25-tool identity 与新 identity 明确不同且新 count/epoch/digest 稳定；②删除工具不再出现在 tools/list；③ `repo_register` 不接受 path/force，scan/proposal 零写入，register 保持 Human Gate/stale protection；④ deploy 重入不重复外部副作用；⑤ task 自动 cleanup 不暴露通用 delete；⑥ Dev/Production App refresh 后 Web/iOS 新聊天完成真实任务；⑦失败可直接 rollback 上一 Gateway build/tool epoch。
+
+### GG-BL-025 — 内部执行、receipt 与 tool assembly 存在潜在重复和隐式耦合
+
+- **Priority**: P3
+- **Status**: OPEN
+- **Category**: architecture / maintainability
+- **Problem**: 2026-08-22 架构评审指出 runner/host verifier process supervision、job/receipt JSON eligibility、公开 tool handler 互调以及 handler wrapping/assembly 可能存在重复实现或隐式顺序耦合；这些问题有维护成本，但设计文档基线早于部分 Phase 6/P1 改动，不能把旧快照直接当成当前代码事实。
+- **Evidence / Detail**: owner-reviewed lightweight architecture design 提出窄 `ProcessSupervisor`、typed receipt codec/eligibility、deployment 调领域服务、静态 ToolSpec/fixed middleware order 等方向；本项明确 evidence-driven，实施前先逐项确认最新 canonical 仍有重复/耦合。
+- **Next**: 先做 code evidence review。只对仍存在且至少有两个真实使用者的重复 primitive 做收敛：process supervision 若重复则抽窄 supervisor；receipt/job JSON 若漂移则建立单一 codec/eligibility；deployment/capability 内部调用领域函数而非包装后的公开 handler；tool assembly 若仍依赖对象原地替换则固定最小 middleware 顺序。禁止借此建设 workflow engine、通用 interceptor framework、第二状态系统或 capability marketplace。
+- **Done when**: ①逐项 evidence review 完成并删除已经不存在的 scope；②若 runner/verifier 确有重复，仅保留一套窄 process lifecycle primitive；③ receipt/job eligibility 有单一 fail-closed parser/validator；④ deployment 不通过公开 MCP handler 触发内部领域动作；⑤写工具 wrapper 顺序有集中测试且不依赖共享可变 ToolDef；⑥没有新增与轻量定位冲突的通用框架。
 
 ## Observations
 
