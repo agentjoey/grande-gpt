@@ -16,7 +16,7 @@
 - Keep SQLite; no ORM or external database.
 - Keep the process-local repo mutex; add a narrow per-repo cross-process boundary below it.
 - Different repos must remain independently writable in parallel.
-- Host-only Seatbelt/loopback/LaunchAgent checks stay in the trusted Host Verifier, not ordinary Linux CI.
+- Host-only Seatbelt/loopback/LaunchAgent checks stay in the trusted Host Verifier, not ordinary GitHub CI.
 - `.github/workflows/**` is intentionally read-only to candidate repo writes. The actual workflow file is a Human Gate and must not be written through a bypass path.
 - Secrets are not part of ordinary control-plane backup.
 - Every behavior change follows RED → verify RED → minimal GREEN → verify GREEN.
@@ -87,15 +87,21 @@
 - Human Gate: `.github/workflows/ci.yml` because candidate writes to `.github/workflows/**` are intentionally denied by policy.
 
 **Interfaces:**
-- CI runs on Node 24 with pnpm 10.33.0, `pnpm install --frozen-lockfile`, the same selfhost-safe Vitest selection as the registered `unit-selfhost` profile, `pnpm typecheck`, and focused tool-contract identity tests.
+- CI runs on pinned `macos-15`, Node 24 with pnpm 10.33.0, `pnpm install --frozen-lockfile`, the same selfhost-safe Vitest selection as the registered `unit-selfhost` profile, `pnpm typecheck`, and focused tool-contract identity tests.
+- The macOS runner preserves existing GrandeGPT runtime assumptions used by the selfhost-safe suite (Darwin CLI semantics and `cp -Rc` clonefile behavior) without moving trusted host suites into CI.
 - Ordinary CI never runs Seatbelt, LaunchAgent, loopback port ownership, or trusted Host Verifier suites.
 
 - [x] **Step 1: Add a failing CI-contract test/documented command** proving the repository has one deterministic command for the selfhost-safe test selection plus tool-contract checks.
 - [x] **Step 2: Verify RED**, then add the minimal package script/config needed to make that command stable outside local control-plane profiles.
-- [ ] **Step 3: Verify GREEN** on a clean task worktree.
+- [x] **Step 3: Verify GREEN** on the task worktree.
+  - After the runner correction contract was added, fresh registered `unit-selfhost`: 109 files / 859 tests PASS.
+  - `typecheck`: PASS.
 - [x] **Step 4: Stop at the real Human Gate for `.github/workflows/ci.yml`**. Do not use GitHub or filesystem bypasses to defeat the existing read-only-path policy.
 - [ ] **Step 5: After the Human-applied workflow commit is present on this task branch, run the same commands locally, open PR, and require a real exact-head CI status before merge.**
-  - Human-applied `.github/workflows/ci.yml` is now present on the task worktree and matches the reviewed Node 24 / pnpm 10.33.0 / `pnpm ci:verify` design. It still needs to be committed on the exact candidate SHA and proven by GitHub CI.
+  - PR #22 on exact head `653b156a8cca1f85d0b1b2b2b58d0eefcc2a1f5b` produced a real GitHub Actions result rather than `CI=none`, but the first workflow used `ubuntu-latest` and failed 5 tests because the selfhost-safe suite still contains deliberate macOS runtime assumptions (`sandbox-exec`/LaunchAgent CLI behavior and Darwin `/bin/cp -Rc` clonefile semantics).
+  - Added a RED CI-contract assertion requiring pinned `macos-15`; it failed exactly against the old `ubuntu-latest` workflow. Human then changed only the protected workflow runner line to `macos-15`.
+  - Local GREEN after the protected workflow correction: registered `unit-selfhost` 109 files / 859 tests PASS; `typecheck` PASS.
+  - Remaining for Step 5: commit/push the corrected exact candidate and require the rerun GitHub CI to PASS on that exact PR head.
 
 ### Task 3: GG-BL-017 — fail-closed per-repo cross-process write lock
 

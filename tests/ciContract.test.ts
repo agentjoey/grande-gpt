@@ -20,6 +20,10 @@ function pkg(): PackageJson {
   return JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as PackageJson;
 }
 
+function workflow(): string {
+  return readFileSync(join(process.cwd(), ".github", "workflows", "ci.yml"), "utf8");
+}
+
 describe("GG-BL-018 minimal independent CI contract", () => {
   it("pins the same Node/pnpm baseline used by GrandeGPT", () => {
     const value = pkg();
@@ -47,5 +51,13 @@ describe("GG-BL-018 minimal independent CI contract", () => {
       "pnpm test:selfhost-safe && pnpm typecheck && pnpm test:tool-contract",
     );
     expect(scripts["ci:verify"]).not.toMatch(/outer-test|hostVerifier|tests\/host|sandbox-exec|launchctl/);
+  });
+
+  it("pins ordinary CI to macOS without moving trusted host suites into GitHub Actions", () => {
+    const value = workflow();
+    expect(value).toContain("runs-on: macos-15");
+    expect(value).not.toMatch(/runs-on:\s*ubuntu/i);
+    expect(value).toContain("run: pnpm ci:verify");
+    expect(value).not.toMatch(/outer-test|hostVerifier|tests\/host|sandbox-exec|launchctl/);
   });
 });
