@@ -190,6 +190,7 @@ export function createHostVerifierLauncher(
       let prepared: HostVerifierPreparedRun | undefined;
       let cleaned = false;
       let result: HostVerifierExecutionResult | undefined;
+      let phase: "prepare" | "execute" | "cleanup" | "head_check" = "prepare";
       try {
         prepared = await adapter.prepare({ request, plan, jobId, disposableRoot });
         if (prepared.disposableRoot !== disposableRoot) {
@@ -211,6 +212,7 @@ export function createHostVerifierLauncher(
           loopbackPorts: [...prepared.loopbackPorts],
         });
 
+        phase = "execute";
         result = await adapter.execute(prepared, (pgid) => {
           if (!setRunningJobPgid(deps.db, jobId, pgid)) {
             throw new Error("verifier pgid arrived after job stopped or was already attached");
@@ -218,17 +220,25 @@ export function createHostVerifierLauncher(
         });
         writeFileSync(artifactPath, artifactBody(result), "utf8");
 
+        phase = "cleanup";
         await adapter.cleanup(prepared);
         cleaned = true;
 
         const state = executionState(result);
         if (state !== "passed") {
+          const failureClass = state === "failed" ? "candidate" : "infrastructure";
+          const reason = state === "failed"
+            ? "test_failed"
+            : result.killedBy === "timeout" ? "timeout" : "rss_limit";
           finishJob(deps.db, jobId, {
             state,
             exitCode: result.exitCode,
             artifactPath,
             summary: failureSummary(request, prepared, {
+              failureClass,
+              reason,
               testFailure: state === "failed",
+              infrastructureFailure: state !== "failed",
               killedBy: result.killedBy,
               truncated: result.truncated,
               durationMs: result.durationMs,
@@ -239,6 +249,7 @@ export function createHostVerifierLauncher(
           return;
         }
 
+        phase = "head_check";
         const heads = await adapter.readCurrentHeads(request);
         const exactHeadStillCurrent = heads.taskHead === request.commit
           && (!requirePrHead || heads.prHead === request.commit);
@@ -287,6 +298,8 @@ export function createHostVerifierLauncher(
             exitCode: result?.exitCode ?? null,
             artifactPath,
             summary: failureSummary(request, prepared, {
+              failureClass: "infrastructure",
+              reason: `${phase}_failed`,
               infrastructureFailure: true,
               error: error instanceof Error ? error.message : String(error),
               cleaned,

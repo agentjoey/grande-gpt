@@ -191,7 +191,10 @@ describe("host verifier trusted launcher", () => {
     }));
     const first = failed(request(), buildHostVerifierStaticPlan("full"));
     await first.settled;
-    expect(getJob(db, first.jobId)?.state).toBe("failed");
+    expect(getJob(db, first.jobId)).toMatchObject({
+      state: "failed",
+      summary: { failureClass: "candidate", reason: "test_failed" },
+    });
     expect(cleaned).toBe(1);
     expect(getOuterTestReceipt(db, taskId)).toBeNull();
 
@@ -200,7 +203,11 @@ describe("host verifier trusted launcher", () => {
     }));
     const second = cleanupFails(request(), buildHostVerifierStaticPlan("full"));
     await second.settled;
-    expect(getJob(db, second.jobId)).toMatchObject({ state: "failed", exitCode: 0 });
+    expect(getJob(db, second.jobId)).toMatchObject({
+      state: "failed",
+      exitCode: 0,
+      summary: { failureClass: "infrastructure", reason: "cleanup_failed" },
+    });
     expect(getOuterTestReceipt(db, taskId)).toBeNull();
   });
 

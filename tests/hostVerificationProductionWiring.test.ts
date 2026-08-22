@@ -42,6 +42,30 @@ function attest(commit: string): void {
   ).run("att_activation", taskId, commit, "unit-selfhost", jobId, 0, now - 10, now, toolchain);
 }
 
+function hostJob(input: {
+  jobId: string;
+  sha: string;
+  state: "running" | "passed" | "failed";
+  startedAt: number;
+  endedAt?: number;
+  summary: Record<string, unknown>;
+}): void {
+  deps.db.prepare(
+    `INSERT INTO job (jobId,taskId,profile,argv,state,exitCode,startedAt,endedAt,summary)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    input.jobId,
+    taskId,
+    "host-verifier",
+    JSON.stringify(["trusted-host-verifier", "smoke", input.sha]),
+    input.state,
+    input.state === "passed" ? 0 : input.state === "failed" ? 1 : null,
+    input.startedAt,
+    input.endedAt ?? null,
+    JSON.stringify({ repoId: "grande-gpt", commit: input.sha, level: "smoke", ...input.summary }),
+  );
+}
+
 function json(value: unknown): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
 }
@@ -156,6 +180,112 @@ describe("production Host Verifier lifecycle wiring", () => {
       },
       blocker: null,
       nextAction: "调用 grande_pr_status 查看当前 exact-head CI；失败则按 bounded diagnostics 修复",
+    });
+    expect(envelope.data.hostVerifier).toMatchObject({
+      mode: "auto",
+      enabled: true,
+      state: "idle",
+      lastAttemptAt: null,
+      lastAttemptSha: null,
+      lastResult: null,
+      lastDurationMs: null,
+      lastSuccessAt: null,
+      lastSuccessSha: null,
+      lastFailureAt: null,
+      lastFailureClass: null,
+      lastFailureReason: null,
+      activeJobId: null,
+      queueDepth: 0,
+      currentSha: headSha,
+      currentResult: null,
+    });
+    expect(envelope.data.hostVerifier.verifierBuild).toMatch(/^(git:[0-9a-f]{40}|dev)$/);
+    expect(envelope.data.hostVerifier.verifierVersion).toEqual(expect.any(Number));
+  });
+
+  it("projects a trusted PASS with SHA and duration, but does not reuse it as the current SHA result", async () => {
+    const startedAt = 1000;
+    const endedAt = 1123;
+    hostJob({
+      jobId: "job-old-pass",
+      sha: baseCommit,
+      state: "passed",
+      startedAt,
+      endedAt,
+      summary: { kind: "host-verifier-v2", mode: "auto" },
+    });
+
+    const tools = (buildTools as any)(deps, { hostVerificationMode: "auto" });
+    const status = tools.find((tool: { name: string }) => tool.name === "grande_task_status");
+    const envelope = (await status.handler({ taskId })).structuredContent as Record<string, any>;
+
+    expect(envelope.data.hostVerifier).toMatchObject({
+      state: "idle",
+      lastAttemptAt: startedAt,
+      lastAttemptSha: baseCommit,
+      lastResult: "passed",
+      lastDurationMs: 123,
+      lastSuccessAt: endedAt,
+      lastSuccessSha: baseCommit,
+      currentSha: headSha,
+      currentResult: null,
+    });
+  });
+
+  it("projects a running verifier from persisted control-plane state", async () => {
+    hostJob({
+      jobId: "job-running-visible",
+      sha: headSha,
+      state: "running",
+      startedAt: 2000,
+      summary: { kind: "host-verifier-running", receiptMode: "auto" },
+    });
+
+    const tools = (buildTools as any)(deps, { hostVerificationMode: "auto" });
+    const status = tools.find((tool: { name: string }) => tool.name === "grande_task_status");
+    const envelope = (await status.handler({ taskId })).structuredContent as Record<string, any>;
+
+    expect(envelope.data.hostVerifier).toMatchObject({
+      state: "running",
+      lastAttemptSha: headSha,
+      lastResult: "running",
+      activeJobId: "job-running-visible",
+      queueDepth: 0,
+      currentSha: headSha,
+      currentResult: "running",
+    });
+  });
+
+  it("projects candidate failure class/reason as blocked without reading artifact logs", async () => {
+    hostJob({
+      jobId: "job-candidate-red",
+      sha: headSha,
+      state: "failed",
+      startedAt: 3000,
+      endedAt: 3042,
+      summary: {
+        kind: "host-verifier-failure",
+        failureClass: "candidate",
+        reason: "test_failed",
+        testFailure: true,
+      },
+    });
+
+    const tools = (buildTools as any)(deps, { hostVerificationMode: "auto" });
+    const status = tools.find((tool: { name: string }) => tool.name === "grande_task_status");
+    const envelope = (await status.handler({ taskId })).structuredContent as Record<string, any>;
+
+    expect(envelope.data.hostVerifier).toMatchObject({
+      state: "blocked",
+      lastAttemptSha: headSha,
+      lastResult: "candidate_failed",
+      lastDurationMs: 42,
+      lastFailureAt: 3042,
+      lastFailureClass: "candidate",
+      lastFailureReason: "test_failed",
+      activeJobId: null,
+      currentSha: headSha,
+      currentResult: "candidate_failed",
     });
   });
 

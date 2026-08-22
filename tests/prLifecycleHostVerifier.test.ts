@@ -109,9 +109,15 @@ function writeEligibleAutoReceipt(commit = headSha, level: "smoke" | "full" = "s
   persistTrustedOuterTestPassV2(deps.db, taskId, jobId);
 }
 
-function writeVerifierFailure(kind: "test" | "infrastructure", suffix: string): string {
+function writeVerifierFailure(kind: "test" | "infrastructure" | "integrity", suffix: string): string {
   const jobId = `job_${kind}_${suffix}`;
   createJob(deps.db, { jobId, taskId, profile: "host-verifier", argv: ["trusted-host-verifier"], pgid: 2000 });
+  const failureClass = kind === "test" ? "candidate" : kind;
+  const reason = kind === "test"
+    ? "test_failed"
+    : kind === "infrastructure"
+      ? "transient_infrastructure"
+      : "sha_mismatch";
   finishJob(deps.db, jobId, {
     state: "failed",
     exitCode: kind === "test" ? 1 : null,
@@ -121,8 +127,11 @@ function writeVerifierFailure(kind: "test" | "infrastructure", suffix: string): 
       repoId: "grande-gpt",
       commit: headSha,
       level: "smoke",
+      failureClass,
+      reason,
       testFailure: kind === "test",
       infrastructureFailure: kind === "infrastructure",
+      integrityFailure: kind === "integrity",
       error: kind === "infrastructure" ? "sandbox infrastructure unavailable" : undefined,
       cleaned: true,
     },
@@ -253,7 +262,7 @@ describe("C3 host verification merge gate", () => {
     expect(mergeCalls).toEqual([]);
   });
 
-  it("code test failure is actionable and never auto-retried for the same SHA", async () => {
+  it("candidate RED is classified, actionable, and never auto-retried for the same SHA", async () => {
     const failedJob = writeVerifierFailure("test", "red");
     let launches = 0;
     const coordinator = new HostVerifierCoordinator(() => {
@@ -263,7 +272,17 @@ describe("C3 host verification merge gate", () => {
     const envelope = (await tool({ hostVerificationMode: "auto", hostVerifierCoordinator: coordinator }).handler({ taskId })).structuredContent as Record<string, any>;
     expect(envelope).toMatchObject({
       ok: true,
-      data: { merged: false, verification: { state: "failed", kind: "test", jobId: failedJob, retryable: false } },
+      data: {
+        merged: false,
+        verification: {
+          state: "failed",
+          kind: "test",
+          failureClass: "candidate",
+          reason: "test_failed",
+          jobId: failedJob,
+          retryable: false,
+        },
+      },
     });
     expect(launches).toBe(0);
     expect(mergeCalls).toEqual([]);
@@ -285,6 +304,29 @@ describe("C3 host verification merge gate", () => {
     expect(mergeCalls).toEqual([]);
   });
 
+  it("transient infrastructure RED can recover through the one bounded retry and later merge", async () => {
+    const failedJob = writeVerifierFailure("infrastructure", "transient");
+    let launches = 0;
+    const coordinator = new HostVerifierCoordinator(() => {
+      launches += 1;
+      return { jobId: "job-infra-recovery", settled: Promise.resolve() };
+    });
+    const merge = tool({ hostVerificationMode: "auto", hostVerifierCoordinator: coordinator });
+
+    const retry = (await merge.handler({ taskId })).structuredContent as Record<string, any>;
+    expect(retry).toMatchObject({
+      ok: true,
+      data: { merged: false, verification: { state: "running", jobId: "job-infra-recovery", retryOf: failedJob } },
+    });
+    expect(launches).toBe(1);
+    expect(mergeCalls).toEqual([]);
+
+    writeEligibleAutoReceipt();
+    const merged = (await merge.handler({ taskId })).structuredContent as Record<string, any>;
+    expect(merged).toMatchObject({ ok: true, data: { merged: true, headSha } });
+    expect(mergeCalls).toEqual([headSha]);
+  });
+
   it("two consecutive infrastructure failures stop auto retry and become a Human Gate", async () => {
     writeVerifierFailure("infrastructure", "first");
     const second = writeVerifierFailure("infrastructure", "second");
@@ -298,11 +340,63 @@ describe("C3 host verification merge gate", () => {
       ok: true,
       data: {
         merged: false,
-        verification: { state: "human_gate", kind: "infrastructure", jobId: second, consecutiveFailures: 2 },
+        verification: {
+          state: "human_gate",
+          kind: "infrastructure",
+          failureClass: "infrastructure",
+          reason: "transient_infrastructure",
+          jobId: second,
+          consecutiveFailures: 2,
+        },
       },
     });
     expect(JSON.stringify(envelope)).toContain(`grande outer-test --task ${taskId} --run`);
     expect(launches).toBe(0);
+    expect(mergeCalls).toEqual([]);
+  });
+
+  it("integrity RED is zero-retry, fail-closed, and immediately escalated to Human", async () => {
+    const failedJob = writeVerifierFailure("integrity", "sha-mismatch");
+    let launches = 0;
+    const coordinator = new HostVerifierCoordinator(() => {
+      launches += 1;
+      return { jobId: "must-not-retry-integrity", settled: Promise.resolve() };
+    });
+    const envelope = (await tool({ hostVerificationMode: "auto", hostVerifierCoordinator: coordinator }).handler({ taskId })).structuredContent as Record<string, any>;
+    expect(envelope).toMatchObject({
+      ok: true,
+      data: {
+        merged: false,
+        verification: {
+          state: "human_gate",
+          kind: "integrity",
+          failureClass: "integrity",
+          reason: "sha_mismatch",
+          jobId: failedJob,
+          retryable: false,
+        },
+      },
+    });
+    expect(launches).toBe(0);
+    expect(mergeCalls).toEqual([]);
+  });
+
+  it("an integrity failure from the previous exact SHA is not reused after candidate SHA changes", async () => {
+    writeVerifierFailure("integrity", "old-sha");
+    commitChange("src/next.ts");
+    attest(headSha);
+    let launches = 0;
+    const coordinator = new HostVerifierCoordinator(() => {
+      launches += 1;
+      return { jobId: "job-new-sha", settled: new Promise<void>(() => {}) };
+    });
+
+    const envelope = (await tool({ hostVerificationMode: "auto", hostVerifierCoordinator: coordinator }).handler({ taskId })).structuredContent as Record<string, any>;
+    expect(envelope).toMatchObject({
+      ok: true,
+      data: { merged: false, verification: { state: "running", jobId: "job-new-sha" } },
+    });
+    expect(launches).toBe(1);
     expect(mergeCalls).toEqual([]);
   });
 

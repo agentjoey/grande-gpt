@@ -21,6 +21,7 @@ function current(overrides: Partial<CurrentHostVerification> = {}): CurrentHostV
     },
     receiptEligible: false,
     latestAttempt: null,
+    integrityFailure: null,
     ...overrides,
   };
 }
@@ -47,6 +48,25 @@ describe("D3 host verification status semantics", () => {
       state: "passed", receiptEligible: true, requiredLevel: "full",
     });
     expect(projectHostVerificationProgress(current(), "manual")).toMatchObject({ state: "manual-required" });
+  });
+
+  it("projects integrity failure as zero-retry blocked state with explicit reason", () => {
+    const projected = projectHostVerificationProgress(current({
+      integrityFailure: {
+        failureClass: "integrity",
+        reason: "receipt_result_binding_mismatch",
+        jobId: "job-integrity",
+      },
+    }), "auto");
+
+    expect(projected).toMatchObject({
+      state: "integrity-failure",
+      failureClass: "integrity",
+      failureReason: "receipt_result_binding_mismatch",
+      jobId: "job-integrity",
+      retryCount: 0,
+      receiptEligible: false,
+    });
   });
 });
 
@@ -123,6 +143,39 @@ describe("D3 task progress projection", () => {
     });
     expect(progress.blocker).toBe("hostVerification: verifier infrastructure retry exhausted (2/2)");
     expect(progress.nextAction).toBe("运行 grande outer-test --task task-d3 --run；不要自动重试 verifier");
+    db.close();
+  });
+
+  it("projects integrity failure as Human blocker and never recommends automatic retry", () => {
+    const db = openDb(loadLayout());
+    const task = makeTask(db);
+    addAttestation(db);
+    succeeded(db, "grande_pr_open");
+    const progress = projectTaskProgress(db, task, {
+      ...progressOptions,
+      worktreeExists: () => true,
+      hostVerificationMode: "auto",
+      inspectHostVerification: () => current({
+        integrityFailure: {
+          failureClass: "integrity",
+          reason: "verifier_identity_mismatch",
+          jobId: "job-integrity",
+        },
+      }),
+    });
+
+    expect(progress).toMatchObject({
+      phase: "host-verification",
+      hostVerification: {
+        state: "integrity-failure",
+        failureClass: "integrity",
+        failureReason: "verifier_identity_mismatch",
+        retryCount: 0,
+        jobId: "job-integrity",
+      },
+    });
+    expect(progress.blocker).toBe("hostVerification: integrity failure (verifier_identity_mismatch)");
+    expect(progress.nextAction).toBe("停止自动重试；由 Human 检查 verifier/receipt/SHA/policy identity 后再继续");
     db.close();
   });
 

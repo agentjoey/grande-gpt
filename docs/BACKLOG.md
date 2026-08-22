@@ -115,8 +115,9 @@
 - **Evidence / Detail**: 早期样本见 [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md) 与 [`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)。现有样本包括 89 次与 256 次 Gateway tool calls 后出现 pre-Gateway disable，以及 `installed=true / status=ENABLED`、schema discovery 可见 25 tools 时首次真实调用即 disabled 的独立样本；这些证据不支持把 256 当作确认配额，也不能证明单一 server-side 根因。另有会话观察到 ChatGPT App tool snapshot 为 23 tools，而同一 production Gateway 报告 `toolsCount=25 / toolsetEpoch=2`，说明 session/app binding 与 server toolset identity 可以分叉。
 - **Release A evidence (2026-08-21)**: candidate 已加入真实 `buildTools` handler/fixture 行为回归，覆盖 `repo_read`、`repo_search`、`run_result` 与 error envelopes；canonical `toMcpTextResult` 完整编码后逐个执行 32 KiB 上限，并要求同一序列比 legacy duplicated wire encoding 至少小 30%。记录包括 targeted 10 files / 205 tests PASS、`pnpm typecheck` PASS、完整 77 files / 850 tests PASS；exact candidate host boundary tests 绑定 code commit `7b98f7dce2f0b10723b29be64ca28e1438f1a779`，5 files / 160 tests PASS。
 - **2026-08-22 closeout regression**: 当前会话成功重新绑定 GrandeGPT，server identity 为 `toolsetEpoch=2 / toolsCount=25`，并连续完成 status、read/search/diff、edit、run/result、commit、push、PR 等多轮真实调用，未发生 disabled。
+- **2026-08-22 post-activation recurrence**: Automated Host Verifier 已 activation 后，在一个已有 GrandeGPT conversation 中尝试 direct `grande_task_status`，ChatGPT 再次返回 `The GrandeGPT tool has been disabled.`。这次复现进一步证明 verification execution plane 与 ChatGPT conversation/App binding plane 是独立问题：Host Verifier 自动执行能力正常投产并不能消除或证明修复 client/session binding drift。
 - **Mitigation**: 保留 server-side toolset identity、32 KiB result budget、单次终态 result、有界轮询/分页、connector compatibility runbook 与长会话真实工具调用回归；不降低 annotations、不绕过 Gateway、不增加第二执行通道。
-- **Remaining**: ChatGPT Web/iOS/fresh-Web 的完整两任务 release gate 与七天观察期仍属于根因关闭前的后续验证；平台侧 binding 故障并未宣称彻底消除。
+- **Remaining**: ChatGPT Web/iOS/fresh-Web 的完整两任务 release gate 与七天观察期仍属于根因关闭前的后续验证；平台侧 binding 故障并未宣称彻底消除。Automated Host Verifier 的 execution-plane hardening 不作为本项关闭条件的替代品。
 - **Done when**: 完成跨客户端两任务 release gate 和稳定观察，或获得可控根因并证明长期稳定后再转 DONE；当前按 Human Owner closeout 决策保持 MITIGATED。
 
 ### GG-BL-014 — 长任务可能在只读分析后静默停滞
@@ -194,6 +195,20 @@
 ### GG-BL-013 — Host outer-test 自动形成 exact-SHA merge gate
 
 - **DONE date**: 2026-08-22
-- **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
-- **Fix**: S18 增加 `OuterTestReceipt`，绑定 task/repo/exact commit/plan/toolchain；HEAD 或 plan 变化使旧 receipt 失效；`grande_pr_merge` 对 GrandeGPT self-host task 要求 current-plan exact-SHA host verification receipt，并保持无通用 `host_exec`/unsandboxed escape hatch 的安全边界。
-- **Verification evidence**: receipt persistence/expiry、merge fail-closed、load-bearing host verification tests 已纳入 Phase 5.5；closeout 的最终 host verification 对 closeout commit 再生成 exact-SHA receipt。
+- **Phase / task**: Phase 5.5 S18，后续由 Reliability & Automated Host Verifier supersede
+- **Fix**: S18 先建立 `OuterTestReceipt` exact-SHA/current-plan merge gate；随后 Reliability & Automated Host Verifier 将原 Human 手工 outer-test 路径升级为 `eligible exact SHA → controlled automatic Host Verifier → trusted V2 result/receipt → merge gate`。自动路径仍保持固定 manifest、受限 host verifier、无通用 `host_exec`/unsandboxed escape hatch；manual CLI 只作为受信 fallback / manual-only Human Gate。
+- **Verification evidence**: Phase 5.5 已证明 receipt persistence/expiry 与 merge fail-closed；Reliability 实现随后加入 restricted async verifier、Receipt V2、startup reconciliation 与 bounded infra retry。2026-08-22 Human Owner 已确认 production controlled auto mode 正式 activation；Phase 6 以 post-activation hardening 为起点，不重新打开“如何自动执行 host verification”。
+
+### GG-BL-015 — Auto Verifier 缺少最小可信运行可观察性
+
+- **DONE date**: 2026-08-22
+- **Phase / task**: Phase 6 S19 / `task-p6-20260822-001`
+- **Fix**: 在既有 `grande_task_status` response 上增加由 trusted host-verifier job/runtime identity 派生的最小 operational snapshot，覆盖 mode/enabled/state、last attempt/result/SHA/duration、last success/failure、failure class/reason、active job、固定 queueDepth=0、verifier build/version，以及 task current-SHA correlation；未新增 MCP tool、metrics store、日志抓取或 queue。
+- **Verification evidence**: 行为测试证明 trusted PASS、running job、candidate RED 与 old-SHA historical result 投影；Phase 6 code gate 为 97 files / 817 tests PASS、`typecheck` PASS。最终候选的 exact-SHA production auto verifier receipt/merge audit 作为运行时关闭证据，且 PASS 后不再修改候选 SHA。
+
+### GG-BL-016 — Auto Verifier 失败分类与升级语义不完整
+
+- **DONE date**: 2026-08-22
+- **Phase / task**: Phase 6 S20 / `task-p6-20260822-001`
+- **Fix**: 统一 `candidate | infrastructure | integrity` failure taxonomy；trusted runtime 持久化 class/reason；candidate zero retry；同 SHA infrastructure 最多一次 bounded retry、第二次 Human escalation；current-SHA receipt/result/SHA/policy identity mismatch 作为 integrity zero-retry immediate fail-closed；old-SHA verification/retry state 不复用。修复了一个 RED-first 暴露的真实缺口：integrity attempt 原会从 merge gate 漏入 coordinator dispatch，现在显式在 dispatch 前 Human-gate fail closed。
+- **Verification evidence**: load-bearing tests 覆盖 candidate no-retry、transient infra retry+recovery、persistent infra escalation、integrity zero-retry/fail-closed、SHA change isolation；Phase 6 code gate 为 97 files / 817 tests PASS、`typecheck` PASS。最终 exact-SHA production auto verifier receipt/merge audit 作为 host-only关闭证据。

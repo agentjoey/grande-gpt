@@ -1,8 +1,14 @@
 import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
 import { buildHostVerifierStaticPlan } from "./hostVerifier.ts";
+import {
+  readHostVerifierFailureClass,
+  type HostVerifierFailureClass,
+  type HostVerifierIntegrityFailure,
+  type HostVerifierIntegrityReason,
+} from "./hostVerifierFailure.ts";
 import type { HostVerificationPlan, RunnableHostVerificationLevel } from "./hostVerification.ts";
-import { getJob, listJobs, TERMINAL, type JobState } from "./jobs.ts";
+import { getJob, listJobs, TERMINAL, type JobRow, type JobState } from "./jobs.ts";
 import { planTaskHostVerification, type TaskHostVerificationPlan } from "./outerTest.ts";
 import {
   computeOuterTestPlanDigest,
@@ -53,35 +59,53 @@ function validPorts(value: unknown, productionPort: number): value is number[] {
     && new Set(value).size === value.length;
 }
 
+type V2Validation = { ok: true } | { ok: false; reason: HostVerifierIntegrityReason };
+
 function v2MatchesTrustedJob(
   db: DatabaseSync,
   receipt: OuterTestReceiptV2,
   plan: HostVerificationPlan,
   productionPort: number,
-): boolean {
+): V2Validation {
   const job = getJob(db, receipt.jobId);
-  if (!job || job.taskId !== receipt.taskId || job.profile !== "host-verifier") return false;
-  if (job.state !== "passed" || job.exitCode !== 0 || job.endedAt === null || !job.summary) return false;
+  if (!job || job.taskId !== receipt.taskId || job.profile !== "host-verifier") {
+    return { ok: false, reason: "receipt_result_binding_mismatch" };
+  }
+  if (job.state !== "passed" || job.exitCode !== 0 || job.endedAt === null || !job.summary) {
+    return { ok: false, reason: "receipt_result_binding_mismatch" };
+  }
   const summary = job.summary;
-  if (summary.kind !== "host-verifier-v2") return false;
-  if (summary.mode !== receipt.mode || summary.repoId !== receipt.repoId || summary.commit !== receipt.commit) return false;
-  if (!sufficientLevel(summary.level, plan.level as RunnableHostVerificationLevel)) return false;
-  if (!Array.isArray(summary.files) || !summary.files.every((file) => typeof file === "string")) return false;
-  if (!Number.isInteger(summary.policyVersion) || (summary.policyVersion as number) < 1) return false;
-  if (!validLimits(summary.resourceLimits)) return false;
-  if (!validPorts(summary.loopbackPorts, productionPort)) return false;
+  if (summary.kind !== "host-verifier-v2") return { ok: false, reason: "receipt_result_binding_mismatch" };
+  if (summary.mode !== receipt.mode || summary.repoId !== receipt.repoId || summary.commit !== receipt.commit) {
+    return { ok: false, reason: "receipt_result_binding_mismatch" };
+  }
+  if (!sufficientLevel(summary.level, plan.level as RunnableHostVerificationLevel)) {
+    return { ok: false, reason: "verifier_identity_mismatch" };
+  }
+  if (!Array.isArray(summary.files) || !summary.files.every((file) => typeof file === "string")) {
+    return { ok: false, reason: "verifier_identity_mismatch" };
+  }
+  if (!Number.isInteger(summary.policyVersion) || (summary.policyVersion as number) < 1) {
+    return { ok: false, reason: "verifier_identity_mismatch" };
+  }
+  if (!validLimits(summary.resourceLimits)) return { ok: false, reason: "verifier_identity_mismatch" };
+  if (!validPorts(summary.loopbackPorts, productionPort)) return { ok: false, reason: "policy_rejection" };
 
   const summaryLevel = summary.level as RunnableHostVerificationLevel;
   const currentStatic = buildHostVerifierStaticPlan(summaryLevel);
-  if (summary.policyVersion !== currentStatic.policyVersion) return false;
-  if (!sameLimits(summary.resourceLimits, currentStatic.resourceLimits)) return false;
+  if (summary.policyVersion !== currentStatic.policyVersion) {
+    return { ok: false, reason: "verifier_identity_mismatch" };
+  }
+  if (!sameLimits(summary.resourceLimits, currentStatic.resourceLimits)) {
+    return { ok: false, reason: "verifier_identity_mismatch" };
+  }
 
   if (plan.manualOnlyRequired) {
-    if (receipt.mode !== "manual") return false;
+    if (receipt.mode !== "manual") return { ok: false, reason: "policy_rejection" };
     const required = [...plan.autoFiles, ...plan.manualOnlyFiles];
-    if (!includesAll(summary.files as string[], required)) return false;
+    if (!includesAll(summary.files as string[], required)) return { ok: false, reason: "policy_rejection" };
   } else if (!sameStrings(summary.files as string[], currentStatic.files)) {
-    return false;
+    return { ok: false, reason: "verifier_identity_mismatch" };
   }
 
   const finalDigest = computeOuterTestPlanDigest({
@@ -91,17 +115,21 @@ function v2MatchesTrustedJob(
     resourceLimits: summary.resourceLimits,
     loopbackPorts: summary.loopbackPorts,
   });
-  if (receipt.planDigest !== finalDigest) return false;
-  if (!sameStrings(receipt.files, summary.files as string[])) return false;
-  if (receipt.level !== summaryLevel) return false;
-  if (receipt.startedAt !== job.startedAt || receipt.endedAt !== job.endedAt) return false;
-  return true;
+  if (receipt.planDigest !== finalDigest) return { ok: false, reason: "receipt_result_binding_mismatch" };
+  if (!sameStrings(receipt.files, summary.files as string[])) return { ok: false, reason: "receipt_result_binding_mismatch" };
+  if (receipt.level !== summaryLevel) return { ok: false, reason: "receipt_result_binding_mismatch" };
+  if (receipt.startedAt !== job.startedAt || receipt.endedAt !== job.endedAt) {
+    return { ok: false, reason: "receipt_result_binding_mismatch" };
+  }
+  return { ok: true };
 }
 
 export interface HostVerifierAttempt {
   jobId: string;
   state: JobState;
-  kind: "running" | "test" | "infrastructure";
+  kind: "running" | "test" | "infrastructure" | "integrity";
+  failureClass?: HostVerifierFailureClass | null;
+  reason?: string | null;
   infrastructureFailures: number;
   artifactPath: string | null;
   artifactExcerpt: string | null;
@@ -117,6 +145,27 @@ function boundedArtifactExcerpt(path: string | null): string | null {
   }
 }
 
+function jobFailureClass(job: JobRow): HostVerifierFailureClass | null {
+  const explicit = readHostVerifierFailureClass(job.summary?.failureClass);
+  if (explicit) return explicit;
+  if (job.summary?.kind === "host-verifier-v2-stale") return "integrity";
+  if (job.summary?.testFailure === true && job.summary.infrastructureFailure !== true) return "candidate";
+  if (job.summary?.infrastructureFailure === true || job.state === "timeout" || job.state === "killed") return "infrastructure";
+  return null;
+}
+
+function jobFailureReason(job: JobRow, failureClass: HostVerifierFailureClass): string {
+  if (typeof job.summary?.reason === "string") return job.summary.reason;
+  if (failureClass === "candidate") return "test_failed";
+  if (failureClass === "infrastructure") {
+    if (job.state === "timeout") return "timeout";
+    if (job.state === "killed") return "process_killed";
+    return "infrastructure_failure";
+  }
+  if (job.summary?.kind === "host-verifier-v2-stale") return "sha_mismatch";
+  return "unrecognized_verifier_result";
+}
+
 function latestMatchingAttempt(db: DatabaseSync, taskId: string, commit: string): HostVerifierAttempt | null {
   const jobs = listJobs(db, taskId).filter((job) => {
     if (job.profile !== "host-verifier" || !job.summary) return false;
@@ -129,47 +178,76 @@ function latestMatchingAttempt(db: DatabaseSync, taskId: string, commit: string)
       jobId: latest.jobId,
       state: latest.state,
       kind: "running",
+      failureClass: null,
+      reason: null,
       infrastructureFailures: 0,
       artifactPath: latest.artifactPath,
       artifactExcerpt: null,
     };
   }
-  if (latest.summary?.kind !== "host-verifier-failure") return null;
-  if (latest.summary.testFailure === true && latest.summary.infrastructureFailure !== true) {
+
+  const failureClass = jobFailureClass(latest);
+  if (!failureClass) return null;
+  const reason = jobFailureReason(latest, failureClass);
+  if (failureClass === "candidate") {
     return {
       jobId: latest.jobId,
       state: latest.state,
       kind: "test",
+      failureClass,
+      reason,
       infrastructureFailures: 0,
       artifactPath: latest.artifactPath,
       artifactExcerpt: boundedArtifactExcerpt(latest.artifactPath),
     };
   }
-  if (latest.summary.infrastructureFailure === true) {
-    let infrastructureFailures = 0;
-    for (const job of jobs) {
-      if (job.summary?.kind === "host-verifier-failure" && job.summary.infrastructureFailure === true) {
-        infrastructureFailures += 1;
-        continue;
-      }
-      break;
-    }
+  if (failureClass === "integrity") {
     return {
       jobId: latest.jobId,
       state: latest.state,
-      kind: "infrastructure",
-      infrastructureFailures,
+      kind: "integrity",
+      failureClass,
+      reason,
+      infrastructureFailures: 0,
       artifactPath: latest.artifactPath,
       artifactExcerpt: boundedArtifactExcerpt(latest.artifactPath),
     };
   }
-  return null;
+
+  let infrastructureFailures = 0;
+  for (const job of jobs) {
+    if (jobFailureClass(job) === "infrastructure") {
+      infrastructureFailures += 1;
+      continue;
+    }
+    break;
+  }
+  return {
+    jobId: latest.jobId,
+    state: latest.state,
+    kind: "infrastructure",
+    failureClass,
+    reason,
+    infrastructureFailures,
+    artifactPath: latest.artifactPath,
+    artifactExcerpt: boundedArtifactExcerpt(latest.artifactPath),
+  };
 }
 
 export interface CurrentHostVerification {
   plan: TaskHostVerificationPlan;
   receiptEligible: boolean;
   latestAttempt: HostVerifierAttempt | null;
+  integrityFailure: HostVerifierIntegrityFailure | null;
+}
+
+function attemptIntegrityFailure(attempt: HostVerifierAttempt | null): HostVerifierIntegrityFailure | null {
+  if (attempt?.kind !== "integrity") return null;
+  return {
+    failureClass: "integrity",
+    reason: attempt.reason ?? "unrecognized_verifier_result",
+    jobId: attempt.jobId,
+  };
 }
 
 /**
@@ -186,9 +264,14 @@ export function inspectCurrentHostVerification(
 ): CurrentHostVerification {
   const plan = planTaskHostVerification(task, commit);
   const latestAttempt = latestMatchingAttempt(db, task.taskId, commit);
-  if (plan.level === "none") return { plan, receiptEligible: true, latestAttempt };
+  const attemptIntegrity = attemptIntegrityFailure(latestAttempt);
+  if (plan.level === "none") {
+    return { plan, receiptEligible: true, latestAttempt, integrityFailure: null };
+  }
   const receipt = getOuterTestReceipt(db, task.taskId);
-  if (!receipt) return { plan, receiptEligible: false, latestAttempt };
+  if (!receipt) {
+    return { plan, receiptEligible: false, latestAttempt, integrityFailure: attemptIntegrity };
+  }
 
   if (!("version" in receipt)) {
     const required = plan.manualOnlyRequired
@@ -197,6 +280,7 @@ export function inspectCurrentHostVerification(
     return {
       plan,
       latestAttempt,
+      integrityFailure: attemptIntegrity,
       receiptEligible: receipt.taskId === task.taskId
         && receipt.commit === commit
         && receipt.profile === "unit-selfhost"
@@ -204,11 +288,37 @@ export function inspectCurrentHostVerification(
     };
   }
 
-  if (receipt.taskId !== task.taskId || receipt.repoId !== task.repoId || receipt.commit !== commit) {
-    return { plan, receiptEligible: false, latestAttempt };
+  // A V2 receipt for another exact SHA is simply stale historical evidence. It must
+  // not be reused, but it is not itself an integrity escalation for the new SHA.
+  if (receipt.commit !== commit) {
+    return { plan, receiptEligible: false, latestAttempt, integrityFailure: attemptIntegrity };
   }
-  if (!sufficientLevel(receipt.level, plan.level)) return { plan, receiptEligible: false, latestAttempt };
-  return { plan, receiptEligible: v2MatchesTrustedJob(db, receipt, plan, productionPort), latestAttempt };
+  if (receipt.taskId !== task.taskId || receipt.repoId !== task.repoId) {
+    return {
+      plan,
+      receiptEligible: false,
+      latestAttempt,
+      integrityFailure: { failureClass: "integrity", reason: "receipt_result_binding_mismatch", jobId: receipt.jobId },
+    };
+  }
+  if (!sufficientLevel(receipt.level, plan.level)) {
+    return {
+      plan,
+      receiptEligible: false,
+      latestAttempt,
+      integrityFailure: { failureClass: "integrity", reason: "verifier_identity_mismatch", jobId: receipt.jobId },
+    };
+  }
+  const validation = v2MatchesTrustedJob(db, receipt, plan, productionPort);
+  if (!validation.ok) {
+    return {
+      plan,
+      receiptEligible: false,
+      latestAttempt,
+      integrityFailure: { failureClass: "integrity", reason: validation.reason, jobId: receipt.jobId },
+    };
+  }
+  return { plan, receiptEligible: true, latestAttempt, integrityFailure: null };
 }
 
 export function manualOuterTestCommand(taskId: string): string {
