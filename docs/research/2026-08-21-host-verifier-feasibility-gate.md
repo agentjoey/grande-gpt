@@ -43,3 +43,24 @@ Result:
 - no background merge and no production auto-mode activation occurred.
 
 **Slice C3 host gate: PASS.** Slice D recovery/reconciliation work is unblocked. `hostVerification.mode` remains `manual` pending the approved activation/soak gate.
+
+## Slice D1 real-host startup recovery gate — PASS
+
+The Owner executed the full trusted-host outer-test against exact clean D1 follow-up commit:
+
+`8bcd0386c395fd6d5dd573fab273f72b9938bbe1`
+
+Result:
+
+- Test Files: **10 passed / 10**
+- Tests: **171 passed / 171**
+- outer-test exit: **0**
+- `tests/host/verifier-recovery.host.test.ts` passed the real detached-process-group restart recovery probe: the recorded verifier process group was terminated, its canonical disposable root was removed, and the real task worktree was preserved;
+- `tests/host/verifier-runtime.host.test.ts`: **3 / 3 PASS**, including exact-SHA auto-safe execution plus timeout/RSS whole-group cleanup;
+- `tests/host/runner.host.test.ts`: **28 / 28 PASS**;
+- `tests/host/tools.host.test.ts`: **52 / 52 PASS**;
+- the trusted manual path recorded a transitional exact-SHA host receipt for `8bcd0386c395fd6d5dd573fab273f72b9938bbe1`.
+
+The first D1 host attempt exposed only a fixture mismatch: the probe stored macOS `/var/...` before canonicalization while production stores `realpathSync(...)` (`/private/var/...`). The production cleanup guard correctly rejected the alias. The fixture was changed to mirror the production writer, and a unit regression now preserves fail-closed behavior for genuine symlink/non-canonical summary paths. Production recovery permissions were not broadened.
+
+**Slice D1 host gate: PASS.** D2 observe-before-retry and post-merge cleanup work is unblocked. `hostVerification.mode` remains `manual`.
