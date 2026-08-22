@@ -4,7 +4,7 @@
 >
 > 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md` 中的历史“已知遗留”、`docs/research/**` 的事故记录、PR/TaskBrief 和聊天结论都只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
 
-最后整理：2026-08-20
+最后整理：2026-08-22
 
 ## 维护规范
 
@@ -55,49 +55,6 @@
 - **详细文档不双写状态**：`docs/research/**` 只保存时间线、复现和设计背景；若其中旧状态与本文件冲突，以本文件为准。
 
 ## Active backlog
-
-### GG-BL-001 — PR 已 merge，但 local canonical `main` 仍旧
-
-- **Priority**: P0
-- **Status**: OPEN
-- **Category**: reliability / Git lifecycle
-- **Problem**: GitHub PR 已成功 merge 到 remote `main`，本机 canonical checkout 仍可能停在旧 HEAD；后续 `grande_task_open` 会从 stale local canonical 建 task。
-- **Evidence / Detail**: [`docs/research/2026-08-19-canonical-main-staleness-backlog.md`](research/2026-08-19-canonical-main-staleness-backlog.md)。已在 Phase 4 closeout、Phase 5 PR #7 后重复复现；PR #10 后本地 canonical 再次未立即包含刚合并内容。
-- **Related**: GG-BL-003。
-- **Next**: 设计窄语义 safe canonical refresh：固定 registered repo / `origin` / default branch，仅 clean + fast-forward-only；禁止 arbitrary ref、force、`reset --hard`。即使暂不自动 refresh，也要让 stale remote/local 成为显式状态，不能静默开新 Task。
-- **Done when**: 连续 Task A→B 的真实 GitHub/host 探针证明 A merge 后 B 不会从 merge 前 local HEAD 启动；dirty/diverged canonical 明确 fail closed 且无副作用。
-
-### GG-BL-002 — `grande gateway restart` 非 failure-safe
-
-- **Priority**: P0
-- **Status**: MITIGATED
-- **Category**: production operations
-- **Problem**: `restart` 可先成功 `bootout` 旧 LaunchAgent，再因 `bootstrap` error 5 失败，把 production 留在线下；单独 `gateway start` 才恢复。
-- **Evidence / Detail**: [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md)。plist 当时存在且 `plutil -lint` 为 OK，job 已 unloaded。S17 已把 loaded restart 改为 `kickstart -k`（不再先 `bootout`），unloaded bootstrap 对 error 5 做最多 3 次有限重试，并在 restart 返回成功前等待 Gateway endpoint readiness；2026-08-20 fresh `unit-selfhost` 为 67 files / 628 tests PASS，`typecheck` PASS。当前 production `gatewayBuild=git:5fc26be272e3ece97b4d2e97690c82b454f615a2` 已包含 readiness gate。
-- **Next**: 只剩 host acceptance：连续 10 次受控 production restart，每轮记录 LaunchAgent loaded/running、Gateway endpoint/health 恢复、runtime identity，并在同一 ChatGPT 会话继续做真实 GrandeGPT read probe；任何一轮失败都保持本项未关闭。
-- **Done when**: 行为测试/宿主探针覆盖 bootout→bootstrap race；restart 成功必须验证新 Gateway running，失败不得被误报成功并必须给可执行恢复路径；连续 10 次 production restart/activation 真实探针全绿。
-
-### GG-BL-003 — `grande_sync_base` 方向与 `up-to-date` 文案误导
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: reliability / tool semantics
-- **Problem**: 实现实际是 **local canonical → task worktree**，从不写 canonical；公开描述“把任务分支同步到本机 canonical HEAD”容易被理解为 task→canonical。`up-to-date` 实际只表示 `canonical HEAD` 是 task HEAD 的祖先，并不表示两个 HEAD 相等，但 hint 说“已与本机 canonical HEAD 保持一致”。
-- **Evidence / Detail**: `src/syncBase.ts` 的 `isAncestor(canonical, before)` 分支；`src/localLoopTools.ts` 的 tool description/hint；真实调用曾出现 task HEAD `8446ff8…`、canonical HEAD `c5c4c34…` 仍返回 `action=up-to-date`。PR #10 已记录该语义缺陷。
-- **Related**: GG-BL-001；误导文案会掩盖 stale canonical，因为模型可能把 `up-to-date` 理解成 canonical 已追上。
-- **Next**: description 明确“把当前 local canonical HEAD 合入/快进到 task，绝不修改 canonical”；hint 改为“task 已包含当前 canonical HEAD”；保留 `before/after/canonicalHead`；新增 task-ahead + canonical-ancestor 回归测试。
-- **Done when**: tool contract/文案与实现方向一致，task-ahead 场景不再声称 HEAD 一致，并有行为测试钉住。
-
-### GG-BL-004 — Merge 与 production runtime activation 仍是两步
-
-- **Priority**: P1
-- **Status**: MITIGATED
-- **Category**: release / production operations
-- **Problem**: canonical/remote 代码 merge 后，长期运行的 Gateway 不会自动加载新实现；若 tool contract 未变，仅看 `toolsCount` 可能误以为 production 已升级。
-- **Evidence / Detail**: [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md)。Phase 5 merge 后 production 仍运行旧进程，restart/start 后 S10 `progress` 才出现。
-- **Mitigation already shipped**: production 现已暴露 `gatewayBuild / toolsetEpoch / toolsCount / toolsDigest`，并有 [`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)，所以“运行的是哪个 build”已经可观测。
-- **Next**: 收敛剩余问题到 release activation：GrandeGPT 自身 release/closeout 必须显式 `restart/start → gatewayBuild/selfcheck → behavior probe`；是否自动 restart 需和 GG-BL-002 一起设计，避免自动化一个不 failure-safe 的动作。
-- **Done when**: 每次 GrandeGPT production release 都能从 release evidence 证明运行 build 等于目标 build，且不会把“merged”误记为“activated”。
 
 ### GG-BL-005 — GC 看不到 `CLOSED` 但 worktree 残留
 
@@ -155,22 +112,11 @@
 - **Status**: MITIGATED
 - **Category**: reliability / ChatGPT App session binding
 - **Problem**: GrandeGPT App/插件仍显示 installed/enabled、server schema/tool discovery 仍正常时，某个已经运行中的 ChatGPT 会话可能在首次或后续真实 `grande_*` 调用时直接返回 `The GrandeGPT tool has been disabled. Do not send any more messages to GrandeGPT.`；随后该会话无法继续使用 GrandeGPT，只能新建会话或重新绑定。该故障会直接中断长任务，因此已不再是低优先级 platform observation。
-- **Evidence / Detail**: 早期样本见 [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md) 与 [`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)。S17 再次重复出现：受影响会话中 GrandeGPT `installed=true / status=ENABLED`，schema discovery 可发现 25 tools，但第一次真实执行 `grande_task_status(task-p55-20260819-001)` 即收到 tool disabled；本轮在故障前**没有执行任何 Gateway restart/bootout**，因此不能归因于 GG-BL-002/S17-3-2 的 launchd restart race。当前另一会话还观察到 ChatGPT 暴露的 App tool snapshot 为 23 tools，而同一个 production Gateway 通过 `grande_task_status` 报告 `toolsCount=25 / toolsetEpoch=2`，说明 session/app binding 与 server toolset identity 可以发生分叉；这条分叉是否是 disable 的直接触发条件仍需验证，不能先当根因。2026-08-20 Human Owner 报告该 binding 问题已在另一 Work 会话修复；本会话随后做独立复验：production identity 持续为 `gatewayBuild=git:5fc26be272e3ece97b4d2e97690c82b454f615a2 / toolsetEpoch=2 / toolsCount=25 / toolsDigest=sha256:ec07c95e5e537958e49e99e3aaae708348c2f610b6c3c21e0ec5d1f8dcdea804`，并在同一会话连续完成 status、repo read/search/diff、edit、run、run_result、capability discovery 等多轮真实工具调用，未再发生 disabled。
+- **Evidence / Detail**: 早期样本见 [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md) 与 [`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)。S17 再次重复出现：受影响会话中 GrandeGPT `installed=true / status=ENABLED`，schema discovery 可发现 25 tools，但第一次真实执行 `grande_task_status(task-p55-20260819-001)` 即收到 tool disabled；本轮在故障前**没有执行任何 Gateway restart/bootout**，因此不能归因于 GG-BL-002/S17-3-2 的 launchd restart race。当前另一会话还观察到 ChatGPT 暴露的 App tool snapshot 为 23 tools，而同一个 production Gateway 通过 `grande_task_status` 报告 `toolsCount=25 / toolsetEpoch=2`，说明 session/app binding 与 server toolset identity 可以发生分叉；这条分叉是否是 disable 的直接触发条件仍需验证，不能先当根因。2026-08-20 Human Owner 报告该 binding 问题已在另一 Work 会话修复；随后独立复验持续显示 production 为 25-tool / epoch 2，并在同一会话连续完成 status、read/search/diff、edit、run/result、capability discovery 等真实调用未再 disabled。2026-08-22 closeout 会话再次成功绑定 GrandeGPT，`grande_task_status` 报告 `toolsCount=25 / toolsetEpoch=2 / toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`，并连续完成多轮真实工具调用。
 - **Related**: GG-BL-004（runtime/toolset identity 可观测）与 GG-BL-002（restart reliability）都能提供诊断上下文，但此前证据明确表明本项可以在**没有 restart**时独立发生。
-- **Next**: 当前长任务 binding 回归已通过；只剩和 GG-BL-002 共用的 host acceptance：连续 10 次受控 Gateway restart/activation，并在每次恢复后由同一 ChatGPT 会话继续真实 GrandeGPT probe。不要为了恢复调用降低 `readOnlyHint/destructiveHint/openWorldHint`、绕过 Gateway 或增加第二套执行通道。
-- **Done when**: 修复/规避后用长任务连续验证证明同一会话在多轮 `run → result → edit → verify` 以及至少 10 次受控 Gateway restart/activation 场景中不会被无故 disable。若最终确认完全属于 ChatGPT 平台且 server-side 无可控修复，则必须有经过重复验证的 release/session operational mitigation，并把状态从 OPEN 改为 BLOCKED，而不是静默关闭。
-
-### GG-BL-013 — Host outer-test 自动形成 exact-SHA merge gate
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: verification / reliability / security boundary
-- **Problem**: `grande outer-test --task <id> --run` 当前只能由 Human 在宿主显式执行并打印结果，不会在可信 control plane 生成与当前 task HEAD 绑定的 host verification receipt；`grande_pr_merge` 也只要求当前 SHA 存在某个本机 attestation，并不强制 host outer-test 已对同一 SHA 通过。因此“合并前必须跑 outer-test”仍部分依赖 Human/agent 记忆。
-- **Evidence / Detail**: `src/outerTest.ts` 从 `unit-selfhost` 的 `--exclude tests/...` 反推当前外层测试集合；`src/cli.ts` 的 `cmdOuterTest` 在 task worktree 直接执行 `npx vitest run ...`，成功后只输出“外层测试全部通过”；`src/prLifecycle.ts` 的 merge gate 检查 `attested`，没有 outer-test receipt 条件。outer-test 必须在 sandbox 外执行，因为这些测试包含 nested `sandbox-exec`、真实 job、真实端口/完整闭环，并且历史上已有 sandbox 导致 git hook protection 假阴性的 load-bearing 证据。
-- **Security boundary**: 不允许通过新增通用 `host_exec`、`unsandboxed: true` profile 或直接 MCP `grande_outer_test`，让 ChatGPT/Gateway 在当前用户宿主身份下执行可被 task 修改的 candidate repo code；这会破坏“仓库内容不可信”和“没有通用逃生舱”的既有边界。
-- **Next (Phase 1)**: 保留 Human 对宿主执行的显式触发，但让成功结果自动写入可信 `OuterTestReceipt`（至少绑定 `taskId / repoId / commitSha / startedAt / endedAt / exitCode / files or planDigest / host toolchain`）；HEAD 变化后旧 receipt 自动失效。`grande_pr_merge` 对需要 selfhost outer verification 的 task 必须要求当前 PR head SHA 存在有效 receipt，并在缺失时 fail closed、返回唯一明确的 host command。这样 Human 只负责触发一次，不再负责记忆、复制结果或判断 receipt 是否仍匹配当前 SHA。
-- **Future automation boundary**: 如果以后要做到完全无人值守，只能通过独立隔离 host verifier：不能读取 `~/.grande-control/secrets` / `~/.ssh`，不能写 canonical/control plane，执行目标固定到 exact task/commit，无任意 argv/shell；结果再以受控 receipt 回传。没有该隔离边界前，不做全自动 unsandboxed candidate-code execution。
-- **Done when**: (1) Human 运行一次 host outer-test 后自动产生 exact-SHA receipt；(2) 修改/重新 commit 导致旧 receipt 失效；(3) 缺失/过期 receipt 时 `grande_pr_merge` 对适用 task 明确拒绝，当前 SHA receipt + 既有 CI/attestation 门禁都满足后才允许 merge；(4) load-bearing test/probe 证明移除 receipt gate 会使验收变红；(5) 未新增通用宿主任意执行能力。
+- **Mitigation**: 以 server-side toolset identity（`gatewayBuild/toolsetEpoch/toolsCount/toolsDigest`）+ connector compatibility runbook + 长会话真实调用回归作为 operational mitigation；不降低工具 annotations，不引入旁路执行通道。
+- **Remaining**: 根因仍涉及 ChatGPT session/app binding，server 侧尚不能证明彻底消除所有平台侧 disable；如再次复现，继续保留同一 ID 并追加 binding identity evidence。
+- **Done when**: 只有在能证明平台/服务端根因及长期稳定性后才转 DONE；当前保持 MITIGATED。
 
 ## Observations
 
@@ -205,4 +151,37 @@
 
 ## Archive
 
-当前标准化时不把大量历史已修事项重新编号。今后从 Active/Observations 关闭的 `GG-BL-*` 条目统一移动到这里，并保留：`ID / DONE date / fix PR or commit / verification evidence`。
+### GG-BL-001 — PR 已 merge，但 local canonical `main` 仍旧
+
+- **DONE date**: 2026-08-22
+- **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
+- **Fix**: S16 引入受控 canonical refresh：固定 registered repo、origin/current canonical branch、clean precondition、fetch+compare+fast-forward-only；dirty/diverged fail closed；`task_open` 基于 refresh 后 canonical。
+- **Verification evidence**: canonical refresh / task-open 行为与 fail-closed 测试纳入 Phase 5.5 `unit-selfhost`；host verification 由 Phase 5.5 outer-test/receipt gate 覆盖。
+
+### GG-BL-002 — `grande gateway restart` 非 failure-safe
+
+- **DONE date**: 2026-08-22
+- **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
+- **Fix**: S17 对 loaded restart 使用 `kickstart -k`，避免先 bootout；unloaded bootstrap 对 error 5 有限重试；restart success 前等待 endpoint readiness，并暴露 runtime identity。
+- **Verification evidence**: 2026-08-20 fresh `unit-selfhost` 67 files / 628 tests PASS、`typecheck` PASS；S17 production acceptance 连续 10/10 restart 全绿，LaunchAgent 保持 loaded/running，readiness 与 MCP probe 恢复，selfcheck 正常。
+
+### GG-BL-003 — `grande_sync_base` 方向与 `up-to-date` 文案误导
+
+- **DONE date**: 2026-08-22
+- **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
+- **Fix**: tool contract 改为明确 canonical → task，绝不修改 canonical；relation 明确为 `equal/task_ahead/canonical_ahead/diverged`，不再用含混的 `up-to-date` 表示 HEAD 相等。
+- **Verification evidence**: task-ahead / canonical-ahead / diverged 行为回归纳入 Phase 5.5 tests，当前 production tool description 已反映新语义。
+
+### GG-BL-004 — Merge 与 production runtime activation 仍是两步
+
+- **DONE date**: 2026-08-22
+- **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
+- **Fix**: S17 将 release activation evidence 显式化：restart/readiness 后通过 `gatewayBuild/toolsetEpoch/toolsCount/toolsDigest` 识别实际 runtime；selfcheck/doctor/status 可读取 toolset identity，不再把 merged 等同于 activated。
+- **Verification evidence**: S17 10/10 production restart acceptance 与真实 ChatGPT read probes；2026-08-22 closeout session 可见 `gatewayBuild=git:e47c4b37ba66a75eaff42d1102f8f5c41a306998 / toolsetEpoch=2 / toolsCount=25`。
+
+### GG-BL-013 — Host outer-test 自动形成 exact-SHA merge gate
+
+- **DONE date**: 2026-08-22
+- **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
+- **Fix**: S18 增加 `OuterTestReceipt`，绑定 task/repo/exact commit/plan/toolchain；HEAD 或 plan 变化使旧 receipt 失效；`grande_pr_merge` 对 GrandeGPT self-host task 要求 current-plan exact-SHA host verification receipt，并保持无通用 `host_exec`/unsandboxed escape hatch 的安全边界。
+- **Verification evidence**: receipt persistence/expiry、merge fail-closed、load-bearing host verification tests 已纳入 Phase 5.5；closeout 的最终 host verification 对 closeout commit 再生成 exact-SHA receipt。
