@@ -64,3 +64,24 @@ Result:
 The first D1 host attempt exposed only a fixture mismatch: the probe stored macOS `/var/...` before canonicalization while production stores `realpathSync(...)` (`/private/var/...`). The production cleanup guard correctly rejected the alias. The fixture was changed to mirror the production writer, and a unit regression now preserves fail-closed behavior for genuine symlink/non-canonical summary paths. Production recovery permissions were not broadened.
 
 **Slice D1 host gate: PASS.** D2 observe-before-retry and post-merge cleanup work is unblocked. `hostVerification.mode` remains `manual`.
+
+## Slice D2 real-host observe-before-retry / merge-reconciliation gate — PASS
+
+The Owner executed the full trusted-host outer-test against exact clean D2 implementation commit:
+
+`d20c63c2c6c2af8262f3aed77561b9d865ac25f6`
+
+Result:
+
+- Test Files: **10 passed / 10**
+- Tests: **171 passed / 171**
+- outer-test exit: **0**
+- `tests/host/verifier-runtime.host.test.ts`: **3 / 3 PASS**, including exact-SHA auto-safe execution and timeout/RSS whole-process-group cleanup;
+- `tests/host/runner.host.test.ts`: **28 / 28 PASS**;
+- `tests/host/tools.host.test.ts`: **52 / 52 PASS**;
+- the trusted manual path recorded a transitional exact-SHA host receipt for `d20c63c2c6c2af8262f3aed77561b9d865ac25f6`;
+- D2 introduced no second merge write entry point: production `mergePullRequest` remains owned by `src/prLifecycle.ts`; the D2 wrapper only observes ambiguous outcomes and reconciles confirmed remote merge state;
+- post-merge automatic cleanup remains fail-closed: clean task worktree + exact confirmed PR head are required before cleanup; otherwise status is `merged-but-local-stale` and the worktree is preserved;
+- production-capability deploy response loss remains `uncertain` and is not blindly reinvoked.
+
+**Slice D2 host gate: PASS.** D3 status/activation-ready closeout is unblocked. `hostVerification.mode` remains `manual`.
