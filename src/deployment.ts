@@ -31,6 +31,8 @@ interface DeploymentReceipt {
   verifyRef: string;
   rollbackRef?: string;
   deployComplete: boolean;
+  /** D2: production capability may have committed remotely even if its response was lost. */
+  deployUncertain?: boolean;
   deployJobId?: string;
   deployedAt?: number;
   verifyComplete: boolean;
@@ -225,6 +227,21 @@ async function assertCapabilityRole(
   }
 }
 
+async function invokeCapabilityAction(
+  tools: ToolDef[],
+  task: TaskRow,
+  action: Extract<DeploymentAction, { kind: "capability" }>,
+  role: "deploy" | "verify" | "rollback",
+): Promise<void> {
+  const invoke = toolByName(tools, "grande_capability_invoke");
+  unwrap(await invoke.handler({
+    provider: action.provider,
+    name: action.name,
+    taskId: task.taskId,
+    arguments: action.arguments,
+  }), `${role} capability`);
+}
+
 interface ActionResult {
   complete: boolean;
   jobId?: string;
@@ -247,13 +264,7 @@ async function executeAction(
     return { complete: false, jobId: data.jobId };
   }
 
-  const invoke = toolByName(tools, "grande_capability_invoke");
-  unwrap(await invoke.handler({
-    provider: action.provider,
-    name: action.name,
-    taskId: task.taskId,
-    arguments: action.arguments,
-  }), `${role} capability`);
+  await invokeCapabilityAction(tools, task, action, role);
   return { complete: true };
 }
 
@@ -270,7 +281,8 @@ function profileJobState(deps: ToolDeps, task: TaskRow, jobId: string, expectedP
   return job.state === "passed" && job.exitCode === 0 ? "passed" : "failed";
 }
 
-function currentState(receipt: DeploymentReceipt): "deploying" | "deployed" | "verifying" | "DONE" {
+function currentState(receipt: DeploymentReceipt): "uncertain" | "deploying" | "deployed" | "verifying" | "DONE" {
+  if (receipt.deployUncertain) return "uncertain";
   if (receipt.verifyComplete) return "DONE";
   if (receipt.verifyJobId) return "verifying";
   return receipt.deployComplete ? "deployed" : "deploying";
@@ -306,6 +318,33 @@ function beginToolAudit(deps: ToolDeps, taskId: string, tool: string, input: Rec
   return audit;
 }
 
+function baseReceipt(
+  taskId: string,
+  spec: DeploymentSpec,
+  merged: { merged: boolean; mergeSha?: string },
+): DeploymentReceipt {
+  return {
+    taskId,
+    specDigest: digestSpec(spec),
+    ...(merged.mergeSha ? { mergeSha: merged.mergeSha } : {}),
+    deployRef: actionRef(spec.deploy)!,
+    verifyRef: actionRef(spec.verify)!,
+    ...(spec.rollback ? { rollbackRef: actionRef(spec.rollback) } : {}),
+    deployComplete: false,
+    verifyComplete: false,
+  };
+}
+
+function uncertainDeployEnvelope(taskId: string, existing: boolean, deployRef: string) {
+  return {
+    structuredContent: ok({
+      taskId,
+      data: { state: "uncertain", existing, retryable: false, deployRef },
+      hint: "production deploy capability 的响应未能确认。远端可能已经产生副作用；GrandeGPT 不会自动重试。Human Owner 必须先在部署平台确认真实状态，再决定后续动作。",
+    }),
+  };
+}
+
 export function createDeploymentTools(
   deps: ToolDeps,
   tools: ToolDef[],
@@ -333,6 +372,9 @@ export function createDeploymentTools(
         const existing = loadReceipt(deps, taskId);
         if (existing) {
           ensureReceiptMatches(existing, spec);
+          if (existing.deployUncertain) {
+            return uncertainDeployEnvelope(taskId, true, existing.deployRef);
+          }
           return {
             structuredContent: ok({
               taskId,
@@ -354,18 +396,40 @@ export function createDeploymentTools(
         }
 
         audit = beginToolAudit(deps, taskId, "grande_deploy", { taskId, specDigest: digestSpec(spec) });
+
+        if (spec.deploy.kind === "capability") {
+          // Validate the approved production capability before persisting intent. Once
+          // invocation can begin, persist uncertainty first: a crash/timeout after the
+          // remote side effect but before the response must never cause a blind retry.
+          await assertCapabilityRole(tools, spec.deploy, "deploy");
+          const receipt = { ...baseReceipt(taskId, spec, merged), deployUncertain: true };
+          saveReceipt(deps, receipt);
+          try {
+            await invokeCapabilityAction(tools, task, spec.deploy, "deploy");
+          } catch (error) {
+            audit.failed(error instanceof Error ? error.message : String(error));
+            return uncertainDeployEnvelope(taskId, false, receipt.deployRef);
+          }
+          receipt.deployUncertain = false;
+          receipt.deployComplete = true;
+          receipt.deployedAt = Date.now();
+          saveReceipt(deps, receipt);
+          audit.succeeded([task.worktreePath]);
+          return {
+            structuredContent: ok({
+              taskId,
+              data: { state: "deployed", deployRef: receipt.deployRef },
+              hint: "部署调用已完成；下一步 grande_deploy_verify。",
+            }),
+          };
+        }
+
         const result = await executeAction(deps, tools, task, spec.deploy, "deploy");
         const receipt: DeploymentReceipt = {
-          taskId,
-          specDigest: digestSpec(spec),
-          ...(merged.mergeSha ? { mergeSha: merged.mergeSha } : {}),
-          deployRef: actionRef(spec.deploy)!,
-          verifyRef: actionRef(spec.verify)!,
-          ...(spec.rollback ? { rollbackRef: actionRef(spec.rollback) } : {}),
+          ...baseReceipt(taskId, spec, merged),
           deployComplete: result.complete,
           ...(result.jobId ? { deployJobId: result.jobId } : {}),
           ...(result.complete ? { deployedAt: Date.now() } : {}),
-          verifyComplete: false,
         };
         saveReceipt(deps, receipt);
         audit.succeeded([task.worktreePath]);
@@ -378,7 +442,7 @@ export function createDeploymentTools(
               deployRef: receipt.deployRef,
             },
             hint: result.complete
-              ? `部署调用已完成；下一步 grande_deploy_verify。`
+              ? "部署调用已完成；下一步 grande_deploy_verify。"
               : `部署 profile 已启动（job ${result.jobId}）；稍后再次调用 grande_deploy_verify，它会检查 job 并继续验证。`,
           }),
         };
@@ -406,6 +470,9 @@ export function createDeploymentTools(
           throw new StateError("INVALID_INPUT", `任务 ${taskId} 没有 deployment receipt；必须先 grande_deploy。`);
         }
         ensureReceiptMatches(receipt, spec);
+        if (receipt.deployUncertain) {
+          return uncertainDeployEnvelope(taskId, true, receipt.deployRef);
+        }
 
         if (!receipt.deployComplete) {
           if (spec.deploy.kind !== "profile" || !receipt.deployJobId) {
@@ -490,6 +557,12 @@ export function createDeploymentTools(
         const receipt = loadReceipt(deps, taskId);
         if (!receipt) throw new StateError("INVALID_INPUT", "没有 deployment receipt，拒绝脱离真实部署记录单独 rollback。 ");
         ensureReceiptMatches(receipt, spec);
+        if (receipt.deployUncertain) {
+          throw new StateError(
+            "POLICY_DENIED",
+            "deployment 外部状态尚未确认；不会自动 rollback 一个可能成功、也可能未执行的 deployment。Human Owner 必须先确认平台真实状态。",
+          );
+        }
 
         audit = beginToolAudit(deps, taskId, "grande_deploy_rollback", { taskId, rollbackRef: actionRef(spec.rollback) });
         const result = await executeAction(deps, tools, task, spec.rollback, "rollback");

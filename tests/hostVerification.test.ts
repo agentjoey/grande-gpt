@@ -34,6 +34,8 @@ describe("host verification classifier", () => {
       "src/hostVerifierSandbox.ts",
       "src/outerTestReceipt.ts",
       "src/prLifecycle.ts",
+      "src/prMergeD2.ts",
+      "src/mergeReconcile.ts",
       "src/profiles.ts",
       "tests/host/verifier-sandbox.host.test.ts",
       "tests/host/verifier-runtime.host.test.ts",

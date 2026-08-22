@@ -111,6 +111,8 @@ const FULL_SOURCE_BASENAMES = new Set([
   "outerTest.ts",
   "outerTestReceipt.ts",
   "prLifecycle.ts",
+  "prMergeD2.ts",
+  "mergeReconcile.ts",
   "profiles.ts",
   "deployment.ts",
   "tools.ts",

@@ -187,27 +187,47 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
           .find((candidate) => candidate.commit === remote.commit)?.attestationId ?? "none";
         const trustedBody = buildPullRequestBody(body, taskId, attestationId, remote.commit);
 
-        const created = await api.createPullRequest({
-          owner,
-          repo,
-          head: task.branch,
-          base: remote.defaultBranch,
-          title,
-          body: trustedBody,
-          draft: false,
-        });
+        let created: { number: number; url: string };
+        let observedAfterWriteFailure = false;
+        try {
+          created = await api.createPullRequest({
+            owner,
+            repo,
+            head: task.branch,
+            base: remote.defaultBranch,
+            title,
+            body: trustedBody,
+            draft: false,
+          });
+        } catch (writeError) {
+          // The create may have succeeded remotely even if its response was lost.
+          // Observe by the exact task head once; never call create a second time here.
+          let observed: { number: number; url: string } | null = null;
+          try {
+            observed = await api.findPullRequest(owner, repo, task.branch, "all");
+          } catch {
+            // Preserve the original write failure when remote state cannot be confirmed.
+          }
+          if (!observed) throw writeError;
+          created = observed;
+          observedAfterWriteFailure = true;
+        }
+
         audit.succeeded([task.worktreePath]);
         return {
           structuredContent: ok({
             taskId,
             data: {
               ...created,
-              existing: false,
+              existing: observedAfterWriteFailure,
+              observedAfterWriteFailure,
               draft: false,
               head: task.branch,
               base: remote.defaultBranch,
             },
-            hint: `任务 ${taskId} 已创建 ready PR #${created.number}；下一步读取 CI 状态。`,
+            hint: observedAfterWriteFailure
+              ? `PR create 响应丢失后已按任务 head 重新读取并确认 PR #${created.number}；未重复创建。`
+              : `任务 ${taskId} 已创建 ready PR #${created.number}；下一步读取 CI 状态。`,
             taskContext: { branch: task.branch, filesChanged: 0, lastJob: null },
           }),
         };

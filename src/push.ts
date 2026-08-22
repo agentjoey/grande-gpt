@@ -11,6 +11,8 @@ export interface PushResult {
   branch: string;
   commit: string;
   remoteDefaultBranch: string;
+  observedAfterWriteFailure?: boolean;
+  existingRemote?: boolean;
 }
 
 type GithubGit = (cwd: string, args: string[], token: string) => string;
@@ -53,6 +55,15 @@ function defaultBranchFromLsRemote(output: string): string {
     "INVALID_INPUT",
     "无法从 `git ls-remote --symref origin HEAD` 解析 remote 默认分支；请确认 origin 可达且已设置 HEAD。",
   );
+}
+
+function remoteBranchHead(output: string, branch: string): string | null {
+  const expectedRef = `refs/heads/${branch}`;
+  for (const line of output.split(/\r?\n/)) {
+    const [sha, ref] = line.trim().split(/\s+/u);
+    if (ref === expectedRef && typeof sha === "string" && /^[0-9a-f]{40}$/u.test(sha)) return sha;
+  }
+  return null;
 }
 
 function rethrowRedacted(error: unknown, token: string): never {
@@ -118,12 +129,40 @@ export function pushTask(deps: ToolDeps, taskId: string, git: GithubGit = runGit
       );
     }
 
-    git(
-      task.worktreePath,
-      ["push", "origin", `${head}:refs/heads/${target}`],
-      token,
+    // Observe exact remote state before every write attempt. This makes a later
+    // invocation safe even if an earlier push succeeded remotely but both its
+    // response and the immediate post-write observation were lost.
+    const existingRemoteHead = remoteBranchHead(
+      git(task.worktreePath, ["ls-remote", "--heads", "origin", `refs/heads/${target}`], token),
+      target,
     );
-    return { branch: target, commit: head, remoteDefaultBranch };
+    if (existingRemoteHead === head) {
+      return { branch: target, commit: head, remoteDefaultBranch, existingRemote: true };
+    }
+
+    try {
+      git(
+        task.worktreePath,
+        ["push", "origin", `${head}:refs/heads/${target}`],
+        token,
+      );
+      return { branch: target, commit: head, remoteDefaultBranch };
+    } catch (writeError) {
+      // A transport failure may happen after the remote ref was already updated.
+      // Observe the exact task ref once; never issue a second push from this path.
+      try {
+        const observed = remoteBranchHead(
+          git(task.worktreePath, ["ls-remote", "--heads", "origin", `refs/heads/${target}`], token),
+          target,
+        );
+        if (observed === head) {
+          return { branch: target, commit: head, remoteDefaultBranch, observedAfterWriteFailure: true };
+        }
+      } catch {
+        // External state could not be confirmed; preserve the original write failure.
+      }
+      throw writeError;
+    }
   } catch (error) {
     rethrowRedacted(error, token);
   }
@@ -162,7 +201,11 @@ export function createPushTool(deps: ToolDeps): ToolDef {
           structuredContent: ok({
             taskId,
             data: result,
-            hint: `任务 ${taskId} 的 ${result.branch} 已推送到 origin（${result.commit}）。`,
+            hint: result.observedAfterWriteFailure
+              ? `push 响应丢失后已重新读取 origin/${result.branch}，确认其等于 ${result.commit}；未重复 push。`
+              : result.existingRemote
+                ? `origin/${result.branch} 已经等于 ${result.commit}；本次只观察，没有重复 push。`
+                : `任务 ${taskId} 的 ${result.branch} 已推送到 origin（${result.commit}）。`,
             taskContext: {
               branch: task.branch,
               filesChanged: 0,

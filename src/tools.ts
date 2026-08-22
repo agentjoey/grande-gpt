@@ -9,6 +9,7 @@ import { loadGuidance } from "./guidance.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
 import { addOnboardingTools } from "./onboardingTools.ts";
 import { addPrLifecycleTools } from "./prLifecycle.ts";
+import { addPrMergeD2Reconciliation } from "./prMergeD2.ts";
 import { registeredIds } from "./registry.ts";
 import { withRepoWriteLock } from "./repoWriteLock.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
@@ -64,7 +65,7 @@ function withTaskRepoWriteLocks(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
 
 /**
  * 生产工具列表的唯一组装点。Task 始终是中心：
- * core → local loop → S6 GitHub lifecycle → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
+ * core → local loop → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
  *
  * S7 的 handler 运行时需要复用 S5 capability tools，而 S5 的 native discovery 又应该
  * 看见 S7 deployment tools。这里用一个共享的 `deploymentDeps` 数组解决这个接线顺序：
@@ -89,18 +90,11 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
         return coreHandler(args);
       }
       if (!registered) return coreHandler(args);
-      // The core handler owns the structured duplicate-id error. Delegate to
-      // it before canonical refresh so a rejected open has zero Git/audit/branch/worktree
-      // side effects. The same check is repeated after waiting for the repo lock because
-      // another concurrent task_open may have created this task while we waited.
       if (typeof taskId === "string" && getTask(deps.db, taskId)) return coreHandler(args);
 
       return withRepoWriteLock(repoId, async () => {
         if (typeof taskId === "string" && getTask(deps.db, taskId)) return coreHandler(args);
 
-        // S16：对有 origin 的 repo，在创建 worktree 之前把 canonical 安全 refresh 到 origin
-        // 同名 branch。refresh 自己只有 fetch/compare/ff-only；dirty、local-ahead、diverged
-        // 一律 fail closed。作为 task_open 的前置写操作单独记 audit，避免 canonical 变化无账。
         let canonicalRefresh: ReturnType<typeof refreshCanonical>;
         const refreshAudit = beginAudit(deps.db, {
           taskId,
@@ -153,23 +147,19 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
   }
 
   const local = addLocalLoopTools(deps, tools);
-  const github = addPrLifecycleTools(deps, local);
+  const githubBase = addPrLifecycleTools(deps, local);
+  const github = addPrMergeD2Reconciliation(deps, githubBase);
   const withBrief = addTaskBriefSupport(deps, github);
   const withOnboarding = addOnboardingTools(deps, withBrief);
 
-  // 共享引用：createDeploymentTools 内部会闭包捕获这个数组。
   const deploymentDeps = [...withOnboarding];
   const withDeployment = addDeploymentTools(deps, deploymentDeps);
 
-  // native provider 的快照发生在 deploy tools 已经存在之后，所以 discover/list 完整。
   const withCapabilities = addCapabilityTools(deps, withDeployment);
   const capabilityTools = withCapabilities.slice(withDeployment.length);
   deploymentDeps.push(...capabilityTools);
 
-  // repo write lock 只包既有写 handler；arg check 仍然是最外层输入门禁，因此非法参数
-  // 不会占锁。handler wrapping 不进入 toolset digest，不改变公开 schema/annotations。
   const serialized = withTaskRepoWriteLocks(deps, withCapabilities);
-  // 最后一层只规范化 tools/list 可见的顺序/对象键，不改变 handler wiring 或契约含义。
   return stableToolDefinitions(withToolsetIdentity(withArgCheck(deps, serialized)));
 }
 
