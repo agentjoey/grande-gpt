@@ -53,6 +53,17 @@ export type TaskProgressPhase =
   | "cleanup"
   | "completed";
 
+export type TaskLivenessState = "active" | "stalled";
+
+export interface TaskLiveness {
+  state: TaskLivenessState;
+  progressAt: number;
+  inactiveForMs: number;
+  stallAfterMs: number;
+  phase: TaskProgressPhase;
+  nextAction: string;
+}
+
 export interface TaskProgress {
   stages: {
     code: ProgressStage;
@@ -71,6 +82,7 @@ export interface TaskProgress {
   cleanupRequired: boolean;
   blocker: string | null;
   nextAction: string;
+  liveness: TaskLiveness;
 }
 
 export interface TaskProgressOptions {
@@ -81,6 +93,8 @@ export interface TaskProgressOptions {
   worktreeExists?: (worktreePath: string) => boolean;
   hostVerificationMode?: HostVerificationMode;
   inspectHostVerification?: (db: DatabaseSync, task: TaskRow, head: string) => CurrentHostVerification;
+  now?: () => number;
+  stallAfterMs?: number;
 }
 
 interface ReceiptProjection {
@@ -102,6 +116,7 @@ const HOST_RUNTIME_PHASE = new Set<HostVerificationProgressState>([
   "integrity-failure",
 ]);
 const HOST_PENDING_PHASE = new Set<HostVerificationProgressState>(["required", "manual-required"]);
+export const DEFAULT_TASK_STALL_AFTER_MS = 15 * 60 * 1000;
 
 function git(worktreePath: string, args: string[]): string {
   return safeGit.local(worktreePath, args).trim();
@@ -303,6 +318,21 @@ function hostBlocker(host: HostVerificationProgress, taskId: string): { blocker:
   return null;
 }
 
+function latestMeaningfulProgressAt(
+  task: TaskRow,
+  jobs: ReturnType<typeof listJobs>,
+  audits: ReturnType<typeof listAudit>,
+): number {
+  let latest = task.updatedAt;
+  for (const job of jobs) {
+    latest = Math.max(latest, job.startedAt, job.endedAt ?? job.startedAt);
+  }
+  for (const audit of audits) {
+    if (audit.state === "SUCCEEDED") latest = Math.max(latest, audit.updatedAt);
+  }
+  return latest;
+}
+
 /**
  * S10/D3: project daily lifecycle + host-verification status only from existing trusted
  * Task/job/audit/attestation/receipt state. No database writes or new lifecycle table.
@@ -472,6 +502,26 @@ export function projectTaskProgress(
   else if (DEPLOY_UNSETTLED.has(verify.state)) phase = "verify";
   else phase = "completed";
 
+  const progressAt = latestMeaningfulProgressAt(task, jobs, audits);
+  const now = options.now?.() ?? Date.now();
+  const stallAfterMs = options.stallAfterMs ?? DEFAULT_TASK_STALL_AFTER_MS;
+  const inactiveForMs = Math.max(0, now - progressAt);
+  const hasRunningJob = jobs.some((job) => !TERMINAL.has(job.state));
+  const stalled = task.state === "READY"
+    && blocker === null
+    && !hasRunningJob
+    && !completed
+    && !cleanupRequired
+    && inactiveForMs >= stallAfterMs;
+  const liveness: TaskLiveness = {
+    state: stalled ? "stalled" : "active",
+    progressAt,
+    inactiveForMs,
+    stallAfterMs,
+    phase,
+    nextAction,
+  };
+
   return {
     stages,
     phase,
@@ -482,6 +532,7 @@ export function projectTaskProgress(
     cleanupRequired,
     blocker,
     nextAction,
+    liveness,
   };
 }
 

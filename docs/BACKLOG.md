@@ -56,16 +56,6 @@
 
 ## Active backlog
 
-### GG-BL-005 — GC 看不到 `CLOSED` 但 worktree 残留
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: local operations / cleanup
-- **Problem**: GC 方向 A 只认“完全没有 task 行”，方向 B 只看 active task；若 task 已 `CLOSED` 但 `removeWorktree`/branch cleanup 中途失败，DB 有 CLOSED 行且目录仍在，两边都可能漏掉。
-- **Evidence / Detail**: `CLAUDE.md` 历史 S0.5 已知遗留 #2；`src/worktreeGc.ts` 为当前实现入口。
-- **Next**: 在现有 GC 增加第三种 reconciliation 形态，不新增生命周期系统。
-- **Done when**: fixture/行为测试证明 CLOSED+residual worktree 能被 `gc` 发现，`--apply` 可安全清理且幂等，不误伤 active task。
-
 ### GG-BL-006 — `selfcheck` 对交互 shell 的 `GRANDE_ISSUER` 依赖易误判
 
 - **Priority**: P2
@@ -119,17 +109,6 @@
 - **Mitigation**: 保留 server-side toolset identity、32 KiB result budget、单次终态 result、有界轮询/分页、connector compatibility runbook 与长会话真实工具调用回归；不降低 annotations、不绕过 Gateway、不增加第二执行通道。
 - **Remaining**: ChatGPT Web/iOS/fresh-Web 的完整两任务 release gate 与七天观察期仍属于根因关闭前的后续验证；平台侧 binding 故障并未宣称彻底消除。Automated Host Verifier 的 execution-plane hardening 不作为本项关闭条件的替代品。
 - **Done when**: 完成跨客户端两任务 release gate 和稳定观察，或获得可控根因并证明长期稳定后再转 DONE；当前按 Human Owner closeout 决策保持 MITIGATED。
-
-### GG-BL-014 — 长任务可能在只读分析后静默停滞
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: agent execution / continuity
-- **Problem**: 长时间开发任务在 task 仍为 `READY`、`blocker=null`、没有运行中 job、也没有需要 Human Gate 的情况下，agent 可能在完成一次只读 search/inspection 后不再发出下一笔 edit/run/tool call；UI 停留在最后一条“searched/inspected”进度，看起来像仍在执行，实际没有任何后台工作。
-- **Evidence / Detail**: 2026-08-21 `task-reliability-hostverifier-20260821-001` 的 Slice A/A1：`job_a7b944e8-c162-455a-a251-56b5346a0fe3` 已以 73 files / 703 tests PASS 结束，随后完成 production `execFileSync("git", ...)` 枚举；之后 task 长时间保持 3 changed files、无新增 job/commit/edit，直到 Human Owner指出停滞。恢复后立即迁移 `src/commit.ts`、`src/push.ts`、`src/prOpen.ts`，changed files 3→6，并得到新 job `job_cf470d0b-02bc-425c-88a6-ef89a4e2f86d` 73 files / 703 tests PASS，证明当时不是代码、Git base 或测试 blocker。当前只有这一份明确样本，不能据此断言根因在模型、ChatGPT harness 或 GrandeGPT Gateway。
-- **Related**: GG-BL-010 会中断工具调用通道，但本次没有 tool-disabled/error，且恢复后同一会话继续成功调用 GrandeGPT，因此目前不合并为同一根因。
-- **Next**: 先建立可观测性而不是猜根因：为长任务记录最近一次“有副作用或 job 状态推进”的 progress timestamp/phase/next action，并在 `READY + blocker=null + no running job` 且超过合理 inactivity window 时给出显式 stalled/needs-resume 状态或提示；同时收集下一次复现时的 ChatGPT-dispatched call、Gateway `/mcp/[rpc]/[tool]`、task audit/job timeline，区分“模型未发调用”“平台未派发”“Gateway 未执行”。不要新增 daemon、通用自动执行器或绕过 Human Gate。
-- **Done when**: 至少一个真实长任务复现/回归证明静默停滞能被明确检测并报告唯一 next action，不再把无后台活动显示成持续执行；恢复路径不需要重建 task、不丢 worktree 改动、不降低工具安全边界，并有测试钉住 task liveness/status 语义。
 
 ## Observations
 
@@ -192,12 +171,26 @@
 - **Fix**: S17 将 release activation evidence 显式化：restart/readiness 后通过 `gatewayBuild/toolsetEpoch/toolsCount/toolsDigest` 识别实际 runtime；selfcheck/doctor/status 可读取 toolset identity，不再把 merged 等同于 activated。
 - **Verification evidence**: S17 10/10 production restart acceptance 与真实 ChatGPT read probes；2026-08-22 closeout session 可见 `toolsetEpoch=2 / toolsCount=25`。
 
+### GG-BL-005 — GC 看不到 `CLOSED` 但 worktree 残留
+
+- **DONE date**: 2026-08-22
+- **Task**: `task-p1-20260822-001` / `grande/p1-continuity-gc-2001`
+- **Fix**: 在既有 GC 增加第三类 `closedResidualWorktrees` reconciliation：只接受仍为 `CLOSED`、worktree 存在且 stored path 精确等于受管 expected task path 的记录；`grande gc` dry-run/`--apply` 明确展示与处理该类，apply-time 再校验 current state/path 并复用现有 `removeWorktree`。Gateway 启动时仅报告残留，绝不自动删除。
+- **Verification evidence**: 真实 Git worktree fixtures 覆盖 discovery、CLI dry-run/apply、目录与 Git worktree registration 一并清理、CLOSED row 保持、二次运行幂等、READY active task 不误伤、stale-plan apply-time recheck、非受管 path fail-closed；candidate fresh `unit-selfhost` 98 files / 827 tests PASS，`typecheck` PASS。canonical 仅在本变更通过 merge gate 后获得 DONE 状态。
+
 ### GG-BL-013 — Host outer-test 自动形成 exact-SHA merge gate
 
 - **DONE date**: 2026-08-22
 - **Phase / task**: Phase 5.5 S18，后续由 Reliability & Automated Host Verifier supersede
 - **Fix**: S18 先建立 `OuterTestReceipt` exact-SHA/current-plan merge gate；随后 Reliability & Automated Host Verifier 将原 Human 手工 outer-test 路径升级为 `eligible exact SHA → controlled automatic Host Verifier → trusted V2 result/receipt → merge gate`。自动路径仍保持固定 manifest、受限 host verifier、无通用 `host_exec`/unsandboxed escape hatch；manual CLI 只作为受信 fallback / manual-only Human Gate。
 - **Verification evidence**: Phase 5.5 已证明 receipt persistence/expiry 与 merge fail-closed；Reliability 实现随后加入 restricted async verifier、Receipt V2、startup reconciliation 与 bounded infra retry。2026-08-22 Human Owner 已确认 production controlled auto mode 正式 activation；Phase 6 以 post-activation hardening 为起点，不重新打开“如何自动执行 host verification”。
+
+### GG-BL-014 — 长任务可能在只读分析后静默停滞
+
+- **DONE date**: 2026-08-22
+- **Task**: `task-p1-20260822-001` / `grande/p1-continuity-gc-2001`
+- **Fix**: 在既有 `TaskProgress` 只读 projection 增加 liveness：从 `TaskRow.updatedAt`、job start/end、成功 write audit 的 `updatedAt` 派生 `progressAt`；`READY + blocker=null + no running job + not completed/cleanup + 15 min inactivity` 投影为 `stalled`。不写 heartbeat、不新增生命周期状态、不把 stalled 伪装成 blocker，并保留同一唯一 `nextAction`；CLI `status` 显式显示 `STALLED`。
+- **Verification evidence**: 2026-08-21 的真实长任务停滞事件作为原始复现样本；新增 deterministic regression 覆盖 stale READY 检测、长期 running job 不误报、成功 write audit 推进 progress timestamp，且恢复无需重建 task/丢弃 worktree；candidate fresh `unit-selfhost` 98 files / 827 tests PASS，`typecheck` PASS。canonical 仅在本变更通过 merge gate 后获得 DONE 状态。
 
 ### GG-BL-015 — Auto Verifier 缺少最小可信运行可观察性
 

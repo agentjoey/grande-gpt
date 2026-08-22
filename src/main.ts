@@ -59,6 +59,7 @@ async function main(): Promise<void> {
     const { closed } = await applyGcWithRepoWriteLocks(db, layout, {
       orphanWorktrees: [],
       ghostTasks: gcPlan.ghostTasks,
+      closedResidualWorktrees: [],
     });
     console.log(`[gateway] 启动对账：关闭了 ${closed} 个幽灵 task（worktree 已不存在的 task 记录）`);
   }
@@ -67,6 +68,10 @@ async function main(): Promise<void> {
   // 人显式 `grande gc --apply` 的动作。只提示有 N 个孤儿、建议跑 grande gc。
   if (gcPlan.orphanWorktrees.length > 0) {
     console.log(`[gateway] 发现 ${gcPlan.orphanWorktrees.length} 个孤儿 worktree（磁盘上有但没有对应 task 记录），建议运行 \`grande gc\` 查看详情`);
+  }
+  // 第三类同样涉及删除真实 worktree：启动时只提示，绝不自动清理。
+  if (gcPlan.closedResidualWorktrees.length > 0) {
+    console.log(`[gateway] 发现 ${gcPlan.closedResidualWorktrees.length} 个 CLOSED task 残留 worktree，建议运行 \`grande gc\` 查看详情`);
   }
 
   // 优雅关停：先停止接受新连接，**再等在途的后台 job 收尾写完 artifact**，最后才
