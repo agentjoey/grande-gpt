@@ -14,7 +14,9 @@ let lines: string[];
 const saved = { ws: process.env.GRANDE_WORKSPACE, ctrl: process.env.GRANDE_CONTROL };
 
 function gatewayCli(argv: string[]): number {
-  return runGatewayCli(argv, (line) => lines.push(line));
+  const result = runGatewayCli(argv, (line) => lines.push(line));
+  if (typeof result !== "number") throw new Error("restore-state 必须同步返回退出码");
+  return result;
 }
 
 beforeEach(() => {

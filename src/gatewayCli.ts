@@ -2,24 +2,40 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { inspectStateDbBackup, restoreStateDbBackup } from "./controlBackup.ts";
+import { openDb } from "./db.ts";
+import { runProductionGatewayActivation } from "./gatewayActivation.ts";
 import { ensureLayout, loadLayout } from "./layout.ts";
 import {
   installGatewayLaunchAgent,
   manageGatewayLaunchAgent,
   type GatewayLaunchdManageAction,
 } from "./launchd.ts";
+import { selfCheck } from "./selfcheck.ts";
+import { buildTools } from "./tools.ts";
+import { gatewayBuildIdentity, toolsetIdentity, type ToolsetIdentity } from "./toolsetIdentity.ts";
 
 const ACTIONS = ["install", "start", "stop", "restart", "status", "uninstall"] as const;
 type GatewayAction = typeof ACTIONS[number];
 
 const ACTION_SET = new Set<string>(ACTIONS);
 
+export interface GatewayCliOptions {
+  /** Test seam; production resolves the current macOS user identity. */
+  resolveIdentity?: (out: (line: string) => void) => { uid: number; homeDir: string } | null;
+  /** Test seam; production always uses the launchd implementation. */
+  manageLaunchAgent?: typeof manageGatewayLaunchAgent;
+  /** Test seam; production always performs the real trusted HTTP selfCheck. */
+  readProbe?: typeof selfCheck;
+  /** Test seam only. Production derives this from canonical HEAD + local public tool contract. */
+  targetIdentity?: ToolsetIdentity;
+}
+
 function printUsage(out: (line: string) => void): void {
   out("用法：");
   out("  grande gateway install    安装/更新 LaunchAgent 并启动");
   out("  grande gateway start      启动已安装的 LaunchAgent");
   out("  grande gateway stop       停止 LaunchAgent（不会被 KeepAlive 拉起）");
-  out("  grande gateway restart    重启 LaunchAgent");
+  out("  grande gateway restart    重启 LaunchAgent，验证 runtime identity 并记录 production activation receipt");
   out("  grande gateway status     查看 LaunchAgent 是否已加载/运行");
   out("  grande gateway uninstall  停止并删除 LaunchAgent plist");
   out("  grande gateway restore-state <backup> [--yes]  验证/恢复受管 state DB backup（默认 dry-run）");
@@ -74,7 +90,62 @@ function runRestoreState(args: string[], out: (line: string) => void): number {
   }
 }
 
-export function runGatewayCli(args: string[], out: (line: string) => void): number {
+async function runRestartActivation(
+  id: { uid: number; homeDir: string },
+  out: (line: string) => void,
+  options: GatewayCliOptions,
+): Promise<number> {
+  const issuer = process.env.GRANDE_ISSUER;
+  if (!issuer) {
+    out("GRANDE_ISSUER 未设置。restart activation 需要用 production issuer 执行 trusted read probe。");
+    return 1;
+  }
+
+  let layout;
+  try {
+    layout = loadLayout();
+    ensureLayout(layout);
+  } catch (error) {
+    out(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+
+  const db = openDb(layout);
+  try {
+    let target = options.targetIdentity;
+    if (!target) {
+      const repoPath = realpathSync(join(layout.workspaceRoot, "grande-gpt"));
+      const targetBuild = gatewayBuildIdentity(process.env, repoPath);
+      target = toolsetIdentity(buildTools({ db, layout }), targetBuild);
+    }
+
+    const manage = options.manageLaunchAgent ?? manageGatewayLaunchAgent;
+    const probe = options.readProbe ?? selfCheck;
+    const result = await runProductionGatewayActivation(db, target, {
+      restart: () => manage("restart", id),
+      status: () => manage("status", id),
+      readProbe: () => probe({
+        issuer,
+        db,
+        keyPath: join(layout.controlRoot, "secrets", "oauth-key"),
+        baseUrl: "http://127.0.0.1:8787",
+      }),
+    });
+    for (const line of result.lines) out(line);
+    return result.code;
+  } catch (error) {
+    out(`Production activation 未完成：${error instanceof Error ? error.message : String(error)}`);
+    return 1;
+  } finally {
+    db.close();
+  }
+}
+
+export function runGatewayCli(
+  args: string[],
+  out: (line: string) => void,
+  options: GatewayCliOptions = {},
+): number | Promise<number> {
   if (args[0] === "restore-state") {
     return runRestoreState(args.slice(1), out);
   }
@@ -86,11 +157,17 @@ export function runGatewayCli(args: string[], out: (line: string) => void): numb
   }
 
   const action = args[0];
-  const id = identity(out);
+  const resolveIdentity = options.resolveIdentity ?? identity;
+  const id = resolveIdentity(out);
   if (!id) return 1;
 
+  if (action === "restart") {
+    return runRestartActivation(id, out, options);
+  }
+
   if (action !== "install") {
-    const result = manageGatewayLaunchAgent(action as GatewayLaunchdManageAction, id);
+    const manage = options.manageLaunchAgent ?? manageGatewayLaunchAgent;
+    const result = manage(action as GatewayLaunchdManageAction, id);
     for (const line of result.lines) out(line);
     return result.code;
   }

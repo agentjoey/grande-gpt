@@ -1,3 +1,4 @@
+import { getLatestActivationReceipt } from "./activationReceipt.ts";
 import { checkArgs } from "./argCheck.ts";
 import { beginAudit } from "./audit.ts";
 import { addCapabilityTools } from "./capabilities.ts";
@@ -173,9 +174,9 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
 }
 
 /**
- * 通过现有 grande_task_status 暴露 server-side toolset identity 与最小 Host Verifier
- * operational snapshot；不新增额外 MCP tool。两者都只包装 response，handler 包装
- * 不进入 tool contract digest。
+ * 通过现有 grande_task_status 暴露 server-side toolset identity、最小 Host Verifier
+ * operational snapshot 与最近 production activation receipt；不新增额外 MCP tool。
+ * 这些都只包装 response，handler 包装不进入 tool contract digest。
  */
 function withToolsetIdentity(
   deps: ToolDeps,
@@ -192,6 +193,7 @@ function withToolsetIdentity(
     const envelope = response.structuredContent as { ok?: unknown; data?: Record<string, unknown> };
     if (envelope.ok === true && envelope.data) {
       Object.assign(envelope.data, identity);
+      envelope.data.activationReceipt = getLatestActivationReceipt(deps.db);
       const progress = envelope.data.progress;
       const taskHead = progress && typeof progress === "object" && typeof (progress as { taskHead?: unknown }).taskHead === "string"
         ? (progress as { taskHead: string }).taskHead

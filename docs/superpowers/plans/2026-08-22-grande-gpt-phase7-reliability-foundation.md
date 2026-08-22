@@ -128,12 +128,15 @@
 
 **Files:**
 - Create: `src/activationReceipt.ts`
+- Create: `src/gatewayActivation.ts`
 - Modify: `src/gatewayCli.ts`
 - Modify: `src/launchd.ts` only if needed to expose existing restart/readiness evidence cleanly.
 - Modify: `src/selfcheck.ts` only if needed to reuse the trusted read probe result rather than duplicate it.
 - Modify: `src/taskProgress.ts` / status projection only to expose the latest activation evidence; do not conflate it with merge/deploy receipts.
 - Test: new `tests/activationReceipt.test.ts`
-- Modify: gateway/launchd/status tests as required.
+- Create: `tests/activationStatus.test.ts`
+- Create: `tests/gatewayActivation.test.ts`
+- Create: `tests/gatewayCliActivation.test.ts`
 
 **Interfaces:**
 - One durable activation receipt records `targetBuild`, `runtimeBuild`, `toolsetEpoch`, `toolsCount`, `toolsDigest`, `activatedAt`, restart/readiness evidence, and one successful trusted read probe.
@@ -141,12 +144,15 @@
 - A restart is not activation success until LaunchAgent is running, endpoint readiness has recovered, and the trusted read probe succeeds.
 - Merge receipt, deploy receipt, and activation receipt remain separate evidence objects.
 
-- [ ] **Step 1: Add failing receipt eligibility tests** for exact build/tool identity, readiness, and read probe requirements.
-- [ ] **Step 2: Verify RED.**
-- [ ] **Step 3: Implement atomic durable receipt persistence under the trusted control root or an existing backward-compatible auxiliary table; do not introduce another status store.**
-- [ ] **Step 4: Reuse existing restart/readiness/selfcheck primitives to record the receipt only after successful activation.**
-- [ ] **Step 5: Expose latest activation evidence in status without changing public tool count/schema beyond additive result fields.**
+- [x] **Step 1: Add failing receipt eligibility tests** for exact build/tool identity, readiness, and read probe requirements.
+- [x] **Step 2: Verify RED.**
+- [x] **Step 3: Implement atomic durable receipt persistence under the trusted control root or an existing backward-compatible auxiliary table; do not introduce another status store.**
+- [x] **Step 4: Reuse existing restart/readiness/selfcheck primitives to record the receipt only after successful activation.**
+- [x] **Step 5: Expose latest activation evidence in status without changing public tool count/schema beyond additive result fields.**
 - [ ] **Step 6: Verify GREEN** with targeted tests, full `unit-selfhost`, `typecheck`, then trusted production activation and later-session readback evidence.
+  - Local implementation evidence: fresh registered `unit-selfhost` on the current worktree: 109 files / 857 tests PASS; `typecheck`: PASS.
+  - Diff review confirms the receipt remains separate from merge/deploy evidence, fails closed on build/tool identity mismatch, and is only persisted after restart readiness, running status, and trusted read probe succeed.
+  - Remaining for Step 6: trusted production activation on the exact merged candidate SHA plus a later-session `grande_task_status` readback of the durable receipt.
 
 ## Phase 7 Closeout
 
