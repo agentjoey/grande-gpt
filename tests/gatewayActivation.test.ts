@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getLatestActivationReceipt } from "../src/activationReceipt.ts";
 import {
   runProductionGatewayActivation,
@@ -58,6 +58,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   db.close();
 });
 
@@ -71,6 +72,25 @@ describe("GG-BL-019 production activation orchestration", () => {
     expect(result.receipt).toEqual(getLatestActivationReceipt(db));
     expect(result.receipt?.targetBuild).toBe(TARGET.gatewayBuild);
     expect(result.receipt?.runtimeBuild).toBe(TARGET.gatewayBuild);
+  });
+
+  it("timestamps activatedAt only after restart/status/read probe have completed", async () => {
+    const now = vi.spyOn(Date, "now")
+      .mockReturnValueOnce(1_787_409_600_000)
+      .mockReturnValueOnce(1_787_409_600_999);
+    const fixture = runtime({
+      restart: () => {
+        fixture.calls.push("restart");
+        Date.now();
+        return { code: 0, lines: ["Gateway LaunchAgent 已重启并就绪"] };
+      },
+    });
+
+    const result = await runProductionGatewayActivation(db, TARGET, fixture.runtime);
+
+    expect(result.code).toBe(0);
+    expect(now).toHaveBeenCalledTimes(2);
+    expect(result.receipt?.activatedAt).toBe(1_787_409_600_999);
   });
 
   it("stops before status/probe and writes no receipt when restart/readiness fails", async () => {

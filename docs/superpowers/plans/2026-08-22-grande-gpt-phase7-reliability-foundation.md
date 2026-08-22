@@ -95,6 +95,7 @@
 - [ ] **Step 3: Verify GREEN** on a clean task worktree.
 - [x] **Step 4: Stop at the real Human Gate for `.github/workflows/ci.yml`**. Do not use GitHub or filesystem bypasses to defeat the existing read-only-path policy.
 - [ ] **Step 5: After the Human-applied workflow commit is present on this task branch, run the same commands locally, open PR, and require a real exact-head CI status before merge.**
+  - Human-applied `.github/workflows/ci.yml` is now present on the task worktree and matches the reviewed Node 24 / pnpm 10.33.0 / `pnpm ci:verify` design. It still needs to be committed on the exact candidate SHA and proven by GitHub CI.
 
 ### Task 3: GG-BL-017 — fail-closed per-repo cross-process write lock
 
@@ -150,8 +151,9 @@
 - [x] **Step 4: Reuse existing restart/readiness/selfcheck primitives to record the receipt only after successful activation.**
 - [x] **Step 5: Expose latest activation evidence in status without changing public tool count/schema beyond additive result fields.**
 - [ ] **Step 6: Verify GREEN** with targeted tests, full `unit-selfhost`, `typecheck`, then trusted production activation and later-session readback evidence.
-  - Local implementation evidence: fresh registered `unit-selfhost` on the current worktree: 109 files / 857 tests PASS; `typecheck`: PASS.
+  - Local implementation evidence after final diff review: fresh registered `unit-selfhost` on the current worktree: 109 files / 858 tests PASS; `typecheck`: PASS.
   - Diff review confirms the receipt remains separate from merge/deploy evidence, fails closed on build/tool identity mismatch, and is only persisted after restart readiness, running status, and trusted read probe succeed.
+  - Review found and corrected one evidence-timing bug: `activatedAt` was originally sampled before restart. A new regression test failed RED on the old behavior, then GREEN after changing the default timestamp to be sampled only when the fully eligible receipt is persisted.
   - Remaining for Step 6: trusted production activation on the exact merged candidate SHA plus a later-session `grande_task_status` readback of the durable receipt.
 
 ## Phase 7 Closeout

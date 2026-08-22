@@ -33,7 +33,7 @@ export async function runProductionGatewayActivation(
   db: DatabaseSync,
   target: ToolsetIdentity,
   runtime: GatewayActivationRuntime,
-  activatedAt = Date.now(),
+  activatedAt?: number,
 ): Promise<GatewayActivationResult> {
   const lines: string[] = [];
 
@@ -93,7 +93,7 @@ export async function runProductionGatewayActivation(
         ok: true,
         httpStatus: probe.httpStatus,
       },
-    }, activatedAt);
+    }, activatedAt ?? Date.now());
     lines.push(
       `Production activation receipt 已记录：build=${receipt.runtimeBuild} `
       + `epoch=${receipt.toolsetEpoch} tools=${receipt.toolsCount} digest=${receipt.toolsDigest}`,
