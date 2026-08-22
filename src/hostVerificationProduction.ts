@@ -26,6 +26,8 @@ export interface ProductionHostVerificationOptions extends TrustedPrHeadReaderOp
   coordinatorFactory?: (
     launcher: ConstructorParameters<typeof HostVerifierCoordinator>[0],
   ) => HostVerifierCoordinator;
+  /** Host-only test/soak injection. Production startup never supplies this. */
+  readPrHead?: (request: HostVerifierRequest) => Promise<string | null>;
 }
 
 /**
@@ -74,7 +76,7 @@ export function createProductionHostVerification(
     return { hostVerificationMode: "manual", hostVerifierCoordinator: undefined };
   }
 
-  const readPrHead = createTrustedPrHeadReader(deps, options);
+  const readPrHead = options.readPrHead ?? createTrustedPrHeadReader(deps, options);
   const adapter = createDefaultHostVerifierRuntimeAdapter(deps, { readPrHead });
   const launcher = createHostVerifierLauncher(
     deps,
