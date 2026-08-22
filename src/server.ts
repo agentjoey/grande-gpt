@@ -10,10 +10,17 @@ import type { Layout } from "./layout.ts";
 import { createOAuth, OAuthError, type OAuthConfig } from "./oauth.ts";
 import { registeredIds } from "./registry.ts";
 import { reconcileRunningJobs } from "./jobs.ts";
+import { reconcileHostVerifierJobsAtStartup } from "./hostVerifierRecovery.ts";
 import { buildTools, type ToolDef } from "./tools.ts";
 import { createAccessGate, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
 import { assertDistinctAudience } from "./consoleAuth.ts";
 import { mountConsoleRoutes } from "./consoleRoutes.ts";
+import {
+  jsonByteLength,
+  requestCorrelation,
+  type McpCallMetrics,
+} from "./mcpTelemetry.ts";
+import { mcpToolResultByteLength, toMcpTextResult } from "./mcpToolResult.ts";
 
 export interface AppConfig {
   issuer: string;
@@ -395,6 +402,10 @@ export function createApp(cfg: AppConfig): Hono {
     const modernFallback = await modernDiscoverFallback(c);
     if (modernFallback) return modernFallback;
 
+    // Keep this per-request value outside the SDK callback. The helper reads
+    // only Mcp-Session-Id; Authorization and the raw request body never enter
+    // telemetry or its digest.
+    const correlation = requestCorrelation(c.req.raw.headers);
     const transport = new WebStandardStreamableHTTPServerTransport();
     const mcpServer = new McpServer(
       { name: "grande-gpt", version: "0.0.0" },
@@ -413,23 +424,32 @@ export function createApp(cfg: AppConfig): Hono {
         // 工具的次数」。用户在 ChatGPT 界面里也看不到，所以这是唯一的观察点。
         // 只读工具不走审计账本，日志是它们唯一的痕迹。
         const t0 = Date.now();
-        const result = await tool.handler(args as Record<string, unknown>);
-        const sc = result.structuredContent as Record<string, unknown>;
-        const ok = sc.ok === true;
-        const detail = ok
-          ? (sc.truncated === true ? " truncated" : "")
-          : ` ${(sc.error as { code?: string } | undefined)?.code ?? "?"}`;
         // Arguments may contain complete file bodies, PR text, deployment data,
         // or credentials accidentally supplied to a wrong field. Keep enough
         // metadata to diagnose tool selection without persisting caller values.
-        const argSummary = JSON.stringify({ keys: Object.keys(args).sort() });
-        console.log(
-          `[tool] ${ts()} ${tool.name} ${argSummary} → ${ok ? "ok" : "ERR"}${detail} (${Date.now() - t0}ms)`,
-        );
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(sc) }],
-          structuredContent: sc,
+        const inputBytes = jsonByteLength(args);
+        const argKeys = Object.keys(args).sort().join(",");
+        const logTool = (outputBytes: number | "unknown", result: "ok" | "error") => {
+          const metrics: McpCallMetrics = { correlation, inputBytes, outputBytes };
+          console.log(
+            `[tool] ${ts()} ${tool.name} correlation=${metrics.correlation} inputBytes=${metrics.inputBytes} ` +
+            `outputBytes=${metrics.outputBytes} argKeys=[${argKeys}] result=${result} ` +
+            `durationMs=${Date.now() - t0}`,
+          );
         };
+        try {
+          const result = await tool.handler(args as Record<string, unknown>);
+          const sc = result.structuredContent as Record<string, unknown>;
+          const mcpResult = toMcpTextResult(sc);
+          const deliveredEnvelope = JSON.parse(mcpResult.content[0].text) as { ok?: unknown };
+          logTool(mcpToolResultByteLength(mcpResult), deliveredEnvelope.ok === true ? "ok" : "error");
+          return mcpResult;
+        } catch (error) {
+          // Preserve the SDK's existing tool-error response by rethrowing. The
+          // callback nevertheless executed, so leave exactly one safe line.
+          logTool("unknown", "error");
+          throw error;
+        }
       });
     }
 
@@ -457,6 +477,7 @@ export function createApp(cfg: AppConfig): Hono {
 }
 
 export async function startGateway(cfg: AppConfig): Promise<{ app: Hono; close: () => Promise<void> }> {
+  await reconcileHostVerifierJobsAtStartup({ db: cfg.db, layout: cfg.layout });
   reconcileRunningJobs(cfg.db, (pgid) => {
     try { process.kill(-pgid, 0); return true; } catch { return false; }
   });

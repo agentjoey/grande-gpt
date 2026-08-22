@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
@@ -11,6 +10,7 @@ import { inspectCanonicalGitState, type CanonicalGitState } from "./canonicalGit
 import { loadDeploymentSpec, type DeploymentAction } from "./deployment.ts";
 import { createGithubApi } from "./githubApi.ts";
 import { loadGithubToken } from "./githubAuth.ts";
+import { safeGit } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { parseGithubRemote } from "./prOpen.ts";
@@ -52,11 +52,7 @@ function group(checks: ReadinessCheck[]): ReadinessGroup {
 }
 
 function localGit(repoPath: string, args: string[]): string {
-  return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-    cwd: repoPath,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
+  return safeGit.local(repoPath, args).trim();
 }
 
 function defaultReadRemote(repoPath: string): string | null {

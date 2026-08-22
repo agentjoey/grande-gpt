@@ -6,8 +6,9 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SignJWT, exportJWK, generateKeyPair } from "jose";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Hono } from "hono";
+import * as toolsModule from "../src/tools.ts";
 import { openDb } from "../src/db.ts";
 import { bumpEpoch, currentEpoch } from "../src/tokenEpoch.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
@@ -16,6 +17,11 @@ import { createTask } from "../src/tasks.ts";
 import { loadRegistry, saveRegistry } from "../src/registry.ts";
 import type { AppConfig } from "../src/server.ts";
 import { createApp, startGateway } from "../src/server.ts";
+import {
+  MAX_MCP_TOOL_RESULT_BYTES,
+  mcpToolResultByteLength,
+  type McpTextResult,
+} from "../src/mcpToolResult.ts";
 
 let ws: string, ctrl: string, layout: Layout, app: Hono;
 let savedWs: string | undefined, savedCtrl: string | undefined;
@@ -840,24 +846,261 @@ describe("遗留 #4：JSON-RPC 方法级日志", () => {
     } finally { restore(); }
   });
 
-  it("工具日志只记安全元数据，不回显文件路径、内容或其他任意参数值", async () => {
+  it("tools/call records exact UTF-8 input and complete delivered MCP-result output byte counts", async () => {
     const token = await mintToken(app);
     const [text, restore] = captureLog();
-    const secret = "SECRET_TOOL_ARGUMENT_MUST_NOT_REACH_LOGS";
+    const rawSessionMarker = "RAW_SESSION_MARKER_MUST_NOT_REACH_LOGS";
     try {
       const response = await app.request("/mcp", {
         method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "mcp-session-id": rawSessionMarker,
+        },
         body: JSON.stringify({
           jsonrpc: "2.0", id: 81, method: "tools/call",
-          params: { name: "grande_repo_read", arguments: { path: secret } },
+          params: {
+            name: "grande_repo_read",
+            arguments: { repoId: REPO, path: "a.ts" },
+          },
+        }),
+      });
+      const body = await response.text();
+      const data = body.trim().startsWith("{")
+        ? body.trim()
+        : body.split("\n").filter((item) => item.startsWith("data:"))
+          .map((item) => item.slice(5).trim()).join("");
+      const rpc = JSON.parse(data) as { result?: unknown };
+      const deliveredBytes = Buffer.byteLength(JSON.stringify(rpc.result), "utf8");
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines).toHaveLength(1);
+      const line = toolLines[0];
+      expect(line).toMatch(/\[tool\].*grande_repo_read/);
+      expect(line).toMatch(/correlation=mcp:[0-9a-f]{12}/);
+      expect(line).toContain("inputBytes=31");
+      expect(line).toContain(`outputBytes=${deliveredBytes}`);
+      expect(line).toMatch(/argKeys=\[path,repoId\]/);
+      expect(line).toMatch(/result=ok/);
+      expect(line).toMatch(/durationMs=\d+/);
+      expect(line).not.toContain(token);
+      expect(line).not.toContain(rawSessionMarker);
+    } finally { restore(); }
+  });
+
+  it("an escape-heavy real repo_read fails closed before the complete delivered MCP result exceeds 32 KiB", async () => {
+    const sourceMarker = "ESCAPE_HEAVY_SOURCE_MUST_NOT_SURVIVE_FAIL_CLOSED";
+    const escapePair = String.fromCharCode(92, 34);
+    const source = [
+      `export const marker = ${JSON.stringify(sourceMarker)};`,
+      ...Array.from({ length: 180 }, (_, index) =>
+        `export const escaped${index} = ${JSON.stringify(escapePair.repeat(80))};`),
+    ].join("\n");
+    writeFileSync(join(layout.worktreesRoot, REPO, TASK, "escape-heavy.ts"), source, "utf8");
+
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 86, method: "tools/call",
+          params: {
+            name: "grande_repo_read",
+            arguments: { taskId: TASK, path: "escape-heavy.ts" },
+          },
+        }),
+      });
+      const body = await response.text();
+      const data = body.trim().startsWith("{")
+        ? body.trim()
+        : body.split("\n").filter((item) => item.startsWith("data:"))
+          .map((item) => item.slice(5).trim()).join("");
+      const rpc = JSON.parse(data) as {
+        result?: { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
+      };
+      const result = rpc.result!;
+      const deliveredBytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+      const envelope = JSON.parse(result.content?.[0]?.text ?? "null") as {
+        ok?: boolean;
+        taskId?: string | null;
+        error?: { code?: string; message?: string };
+      };
+
+      expect(mcpToolResultByteLength(result as McpTextResult)).toBe(deliveredBytes);
+      expect(deliveredBytes).toBeLessThanOrEqual(MAX_MCP_TOOL_RESULT_BYTES);
+      expect(result).not.toHaveProperty("structuredContent");
+      expect(envelope).toMatchObject({
+        ok: false,
+        taskId: TASK,
+        error: { code: "RESOURCE_EXHAUSTED" },
+      });
+      expect(envelope.error?.message).toMatch(/smaller (?:page|line range)/i);
+      expect(JSON.stringify(envelope)).not.toContain(sourceMarker);
+
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain(`outputBytes=${deliveredBytes}`);
+      expect(toolLines[0]).toContain("result=error");
+    } finally { restore(); }
+  });
+
+  it("authenticated tools/call exposes one canonical envelope copy in decoded JSON-RPC", async () => {
+    const marker = "AUTHENTICATED_MCP_SINGLE_ENVELOPE_MARKER";
+    const envelope = {
+      ok: true,
+      data: { nested: { marker, source: "real tools/call" } },
+      hint: "",
+    };
+    const buildToolsSpy = vi.spyOn(toolsModule, "buildTools").mockReturnValue([{
+      name: "grande_single_envelope",
+      description: "test-only canonical result tool",
+      inputSchema: { type: "object", properties: {} },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      handler: async () => ({ structuredContent: envelope }),
+    }]);
+    const token = await mintToken(app);
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 85, method: "tools/call",
+          params: { name: "grande_single_envelope", arguments: {} },
+        }),
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      const data = body.trim().startsWith("{")
+        ? body.trim()
+        : body.split("\n").filter((line) => line.startsWith("data:"))
+          .map((line) => line.slice(5).trim()).join("");
+      const rpc = JSON.parse(data) as {
+        result?: { content?: Array<{ type?: string; text?: string }>; structuredContent?: unknown };
+      };
+
+      expect(JSON.stringify(rpc.result).split(marker)).toHaveLength(2);
+      expect(rpc.result).not.toHaveProperty("structuredContent");
+      expect(JSON.parse(rpc.result?.content?.[0]?.text ?? "null")).toEqual(envelope);
+    } finally {
+      buildToolsSpy.mockRestore();
+    }
+  });
+
+  it("tools/call does not log a real repo-edit body", async () => {
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    const editBodyMarker = "EDIT_BODY_MARKER_MUST_NOT_REACH_LOGS";
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 83, method: "tools/call",
+          params: {
+            name: "grande_repo_edit",
+            arguments: {
+              taskId: TASK,
+              ops: [{ op: "create", path: "telemetry-marker.ts", content: editBodyMarker }],
+            },
+          },
+        }),
+      });
+      expect(response.status).toBe(200);
+      await response.text();
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain("grande_repo_edit");
+      expect(toolLines[0]).toContain("argKeys=[ops,taskId]");
+      expect(toolLines[0]).toContain("result=ok");
+      expect(toolLines[0]).not.toContain(editBodyMarker);
+      expect(toolLines[0]).not.toContain(token);
+    } finally { restore(); }
+  });
+
+  it("a rejected tool handler still emits one safe error line and preserves the MCP tool error", async () => {
+    const rejectionMarker = "REJECTED_HANDLER_MARKER_MUST_NOT_REACH_LOGS";
+    const buildToolsSpy = vi.spyOn(toolsModule, "buildTools").mockReturnValue([{
+      name: "grande_rejected",
+      description: "test-only rejected tool",
+      inputSchema: { type: "object", properties: {} },
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      handler: async () => { throw new Error(rejectionMarker); },
+    }]);
+    const rejectedDb = openDb(layout);
+    const rejectedApp = createApp({
+      issuer: ISSUER,
+      layout,
+      db: rejectedDb,
+      accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },
+    });
+    const token = await mintToken(rejectedApp);
+    const [text, restore] = captureLog();
+    try {
+      const response = await rejectedApp.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 84, method: "tools/call",
+          params: { name: "grande_rejected", arguments: {} },
+        }),
+      });
+      const body = await response.text();
+      expect(response.status).toBe(200);
+      expect(body).toContain(rejectionMarker);
+      const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain("grande_rejected");
+      expect(toolLines[0]).toContain("inputBytes=2");
+      expect(toolLines[0]).toContain("outputBytes=unknown");
+      expect(toolLines[0]).toContain("result=error");
+      expect(toolLines[0]).not.toContain(rejectionMarker);
+    } finally {
+      restore();
+      buildToolsSpy.mockRestore();
+      rejectedDb.close();
+    }
+  });
+
+  it("tools/call without an MCP session logs correlation=none", async () => {
+    const token = await mintToken(app);
+    const [text, restore] = captureLog();
+    try {
+      const response = await app.request("/mcp", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0", id: 82, method: "tools/call",
+          params: { name: "grande_repo_read", arguments: { repoId: REPO, path: "a.ts" } },
         }),
       });
       await response.text();
       const toolLines = text().split("\n").filter((line) => line.includes("[tool]"));
-      expect(toolLines.join("\n")).toContain("grande_repo_read");
-      expect(toolLines.join("\n")).toContain("path");
-      expect(toolLines.join("\n")).not.toContain(secret);
+      expect(toolLines).toHaveLength(1);
+      expect(toolLines[0]).toContain("correlation=none");
+      expect(toolLines[0]).not.toMatch(/correlation=(?!none)/);
     } finally { restore(); }
   });
 

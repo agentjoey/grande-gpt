@@ -105,6 +105,16 @@ describe("S7 deployment spec", () => {
     expect(() => loadDeploymentSpec(worktree)).toThrow(/verify/i);
   });
 
+  it("超过 24 KiB 的 deploy.yaml 即使有效前缀可独立解析也 fail closed，不执行截断配置", () => {
+    writeSpec(
+      "deploy:\n  profile: deploy\nverify:\n  profile: smoke\n# " + "x".repeat(24 * 1024),
+    );
+
+    expect(() => loadDeploymentSpec(worktree)).toThrow(
+      expect.objectContaining({ code: "INVALID_INPUT" }),
+    );
+  });
+
   it("生产工具只接受 taskId；deploy/rollback 如实标为 destructive+openWorld", () => {
     const tools = buildTools(deps);
     const deploy = tools.find((tool) => tool.name === "grande_deploy")!;

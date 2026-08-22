@@ -6,7 +6,7 @@ import { startGateway } from "./server.ts";
 import { loadAccessConfig, AccessConfigError, type AccessConfig } from "./accessGate.ts";
 import { loadConsoleAccessConfig } from "./consoleAuth.ts";
 import { awaitAllJobsSettled } from "./runner.ts";
-import { planGc, applyGc } from "./worktreeGc.ts";
+import { planGc, applyGcWithRepoWriteLocks } from "./worktreeGc.ts";
 
 /**
  * Gateway 的进程入口。
@@ -46,16 +46,20 @@ async function main(): Promise<void> {
   const gw = await startGateway({ issuer, layout, db, accessConfig, consoleAccessConfig });
   const port = Number(process.env.PORT || "8787");
   // 打印【实际】绑定地址而不是硬编码的 127.0.0.1——上一版那行字是假的，
-    // 而它恰恰是「以为只绑了 loopback」这个错误认知的来源之一。
-    console.log(`[gateway] listening on ${process.env.GRANDE_HOST ?? "127.0.0.1"}:${port}  issuer=${issuer}`);
+  // 而它恰恰是「以为只绑了 loopback」这个错误认知的来源之一。
+  console.log(`[gateway] listening on ${process.env.GRANDE_HOST ?? "127.0.0.1"}:${port}  issuer=${issuer}`);
   console.log(`[gateway] workspace=${layout.workspaceRoot}`);
   console.log(`[gateway] control=${layout.controlRoot}`);
 
   // 方向 B：幽灵 task → CLOSED（纯数据修复，零风险——worktree 目录已经不存在，
-  // 没有东西可删）。不修的话 `grande_task_status` 会一直列出根本不存在的任务。
+  // 没有东西可删）。Gateway 已经开始监听，因此即使这是启动对账，也必须和正常写工具
+  // 共用 repo write lock，不能与同 repo 的 task_open/close 等写操作重叠。
   const gcPlan = planGc(db, layout);
   if (gcPlan.ghostTasks.length > 0) {
-    const { closed } = applyGc(db, layout, { orphanWorktrees: [], ghostTasks: gcPlan.ghostTasks });
+    const { closed } = await applyGcWithRepoWriteLocks(db, layout, {
+      orphanWorktrees: [],
+      ghostTasks: gcPlan.ghostTasks,
+    });
     console.log(`[gateway] 启动对账：关闭了 ${closed} 个幽灵 task（worktree 已不存在的 task 记录）`);
   }
 

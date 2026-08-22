@@ -138,3 +138,48 @@ features:
         spec: .pact/tasks/s05-3-worktree-gc.md
         evidence: ## verify gate - `pnpm test`: 25 files, 508 tests, all passed - `pnpm typecheck`: tsc --noEmit, clean - Real dry-run: correctly identifies `grande-gpt/task-fix-greet-20260729-001`  ## 逐条解决评审返工  ### 必改1: applyGc 计数诚实化 (src/worktreeGc.ts:125-162) - **branch === null 时不再谎报**：现在 branch 为 null 时直接调用 `git worktree remove --force`（不走 removeWorktree 的全路径，因 removeWorktree 需要 branch 做 branch -D）。用 execFileSync argv 数组调 git。成功才 removed++，失败且目录仍存在时不计数。 - **removeWorktree 抛错时不再盲目跳过**：catch 块检查 `!existsSync(o.path)`——若 removeWorktree 已成功移除目录、只是 branch -D 失败，仍计入 removed（目录已不存在，不能假装还在）。 - 两条缺陷（direction 1: branch null + 假计数，direction 2: removeWorktree 成功但抛错 → 漏计数）已同时修复。  ### 必改2: 测试重写 (tests/worktreeGc.test.ts:249-279) - 原测试"没有 branch 信息的孤儿 worktree，applyGc 时跳过"被重写为"branch 为 null 的孤儿 worktree 仍然通过 git worktree remove --force 回收，且 git worktree 注册项也被清掉" - 现在断言：① result.removed === 1（计数诚实）② 目录确实消失（existsSync false）③ git worktree list 里也不再有（注册项清掉，非 rm -rf 假清除）  ### 必改3: USAGE 不再说谎 (src/cli.ts:13-21) - 标题从"只读查看器"改为"运维工具" - `grande gc` 行增加 `[--apply]` - 尾行为"除 gc --apply 外均为只读。"替代原来的"本工具只读，不提供任何变更能力（规格 §8.2）" - tests/cli.test.ts:301 测试名同步更新  ### CLI skip reporting (src/cli.ts:269-278) - apply 后计数器若少于 plan 数，额外打印 ⚠️ skip 行说明原因
         deps: [s05-1-taskclose]
+  - id: binding-a
+    branch: codex/chatgpt-binding-budget-reliability
+    status: in_progress
+    tasks:
+      - id: binding-a-1-docs
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
+        evidence: TDD RED observed; GREEN: tests/guidance.test.ts 4/4 passed; commit 2217bc7; independent review found no issues.
+      - id: binding-a-2-telemetry
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
+        evidence: TDD RED observed; GREEN after fix round 1: mcpTelemetry+server 47/47 and typecheck passed; commits 94fce35,5b61314; all three review findings addressed.
+        deps: [binding-a-1-docs]
+      - id: binding-a-3-encoding
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
+        evidence: TDD RED observed; GREEN: targeted 57/57, full suite 813/813, typecheck/diff-check passed; commit e75c5bc; review clean.
+        deps: [binding-a-2-telemetry]
+      - id: binding-a-4-jobwait
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
+        evidence: TDD RED observed; GREEN after fix round 1: targeted 63/63, full suite 822/822, typecheck passed; commits c552e80,75feaa4; both review findings addressed.
+        deps: [binding-a-3-encoding]
+      - id: binding-a-5-budgets
+        owner: w1
+        status: accepted
+        reviewer: rev
+        spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
+        evidence: TDD RED observed; GREEN after 3 review rounds: targeted 132/132 plus cursor regression 25/25, full suite 849/849, typecheck passed; commits af01e3a,4d06e41,2477c3c,b0d331e; all findings addressed.
+        deps: [binding-a-4-jobwait]
+      - id: binding-a-6-gates
+        owner: w1
+        status: awaiting_review
+        reviewer: rev
+        spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
+        evidence: Local/code review approved; exact candidate host boundary 5 files/160 tests passed at 7b98f7d; targeted 205/205, full 850/850, typecheck passed. External deployment/selfcheck/Web+iOS gates pending and GG-BL-010 remains OPEN.
+        deps: [binding-a-5-budgets]

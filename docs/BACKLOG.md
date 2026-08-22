@@ -4,7 +4,7 @@
 >
 > 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md` 中的历史“已知遗留”、`docs/research/**` 的事故记录、PR/TaskBrief 和聊天结论都只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
 
-最后整理：2026-08-20
+最后整理：2026-08-21
 
 ## 维护规范
 
@@ -152,13 +152,14 @@
 ### GG-BL-010 — 当前会话的 GrandeGPT direct tool execution channel 会被禁用
 
 - **Priority**: P0
-- **Status**: MITIGATED
+- **Status**: OPEN
 - **Category**: reliability / ChatGPT App session binding
 - **Problem**: GrandeGPT App/插件仍显示 installed/enabled、server schema/tool discovery 仍正常时，某个已经运行中的 ChatGPT 会话可能在首次或后续真实 `grande_*` 调用时直接返回 `The GrandeGPT tool has been disabled. Do not send any more messages to GrandeGPT.`；随后该会话无法继续使用 GrandeGPT，只能新建会话或重新绑定。该故障会直接中断长任务，因此已不再是低优先级 platform observation。
-- **Evidence / Detail**: 早期样本见 [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md) 与 [`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)。S17 再次重复出现：受影响会话中 GrandeGPT `installed=true / status=ENABLED`，schema discovery 可发现 25 tools，但第一次真实执行 `grande_task_status(task-p55-20260819-001)` 即收到 tool disabled；本轮在故障前**没有执行任何 Gateway restart/bootout**，因此不能归因于 GG-BL-002/S17-3-2 的 launchd restart race。当前另一会话还观察到 ChatGPT 暴露的 App tool snapshot 为 23 tools，而同一个 production Gateway 通过 `grande_task_status` 报告 `toolsCount=25 / toolsetEpoch=2`，说明 session/app binding 与 server toolset identity 可以发生分叉；这条分叉是否是 disable 的直接触发条件仍需验证，不能先当根因。2026-08-20 Human Owner 报告该 binding 问题已在另一 Work 会话修复；本会话随后做独立复验：production identity 持续为 `gatewayBuild=git:5fc26be272e3ece97b4d2e97690c82b454f615a2 / toolsetEpoch=2 / toolsCount=25 / toolsDigest=sha256:ec07c95e5e537958e49e99e3aaae708348c2f610b6c3c21e0ec5d1f8dcdea804`，并在同一会话连续完成 status、repo read/search/diff、edit、run、run_result、capability discovery 等多轮真实工具调用，未再发生 disabled。
+- **Evidence / Detail**: 早期样本见 [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md) 与 [`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)。现有证据是两个不同样本，不是已确认配额：一个失败会话在 89 次 Gateway tool calls 后中断（任务 A 76 次、任务 B 13 次）；另一个会话到达 256 次后，下一次调用被禁用。两个样本中，最后一次被禁用的调用都没有到达 Gateway 的 `/mcp`、`[rpc]` 或 `[tool]` 边界；两者均没有 Gateway restart、OAuth 401、token expiry、handler exception 或 server-side rate limiter 证据。S17 还曾在 `installed=true / status=ENABLED`、schema discovery 可发现 25 tools 时，于第一次真实 `grande_task_status(task-p55-20260819-001)` 直接收到 tool disabled；同一消息也可表示首次 discovery/binding 失败，不能仅凭错误文本混同根因。当前另一会话曾观察到 ChatGPT App tool snapshot 为 23 tools，而同一个 production Gateway 报告 `toolsCount=25 / toolsetEpoch=2`，说明 session/app binding 与 server toolset identity 可以分叉，但这条分叉是否为直接触发条件仍待验证。工作假设是累积 conversation pressure 加上用户任务边界/client-binding transition；Release A 降低可控的重复结果、轮询和大 payload，并通过真实两任务门禁区分缓解与根治。
 - **Related**: GG-BL-004（runtime/toolset identity 可观测）与 GG-BL-002（restart reliability）都能提供诊断上下文，但此前证据明确表明本项可以在**没有 restart**时独立发生。
-- **Next**: 当前长任务 binding 回归已通过；只剩和 GG-BL-002 共用的 host acceptance：连续 10 次受控 Gateway restart/activation，并在每次恢复后由同一 ChatGPT 会话继续真实 GrandeGPT probe。不要为了恢复调用降低 `readOnlyHint/destructiveHint/openWorldHint`、绕过 Gateway 或增加第二套执行通道。
-- **Done when**: 修复/规避后用长任务连续验证证明同一会话在多轮 `run → result → edit → verify` 以及至少 10 次受控 Gateway restart/activation 场景中不会被无故 disable。若最终确认完全属于 ChatGPT 平台且 server-side 无可控修复，则必须有经过重复验证的 release/session operational mitigation，并把状态从 OPEN 改为 BLOCKED，而不是静默关闭。
+- **Release A local state (2026-08-21)**: 本地 candidate 已加入真实 `buildTools` handler/fixture 的行为回归，覆盖 `repo_read`、`repo_search`、`run_result` 与 error envelopes，经 canonical `toMcpTextResult` 完整编码后逐个执行 32 KiB 上限，并要求同一序列比 legacy duplicated wire encoding 至少小 30%；该回归不依赖累计调用次数或假定的 magic cutoff。baseline/candidate 证据账本已加入 [`docs/chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)。本地门禁记录为 targeted 10 files / 205 tests PASS、`pnpm typecheck` PASS、完整 77 files / 850 tests PASS（涉及 loopback 与 `sandbox-exec` 的测试按要求在 nested sandbox 外运行）。exact candidate host boundary tests 也已绑定 code commit `7b98f7dce2f0b10723b29be64ca28e1438f1a779` 通过：5 files / 160 tests。这些证据只证明 Release A candidate 的本地与 host-boundary 编码/预算行为；受保护部署与 Gateway restart、部署后 `selfcheck` identity 均待完成，Web 与 iOS 真实两任务矩阵也均待完成，不能据此更改本项状态。
+- **Next**: 先交付不改 tool schema/annotations、`TOOLSET_EPOCH=2` 的 Release A：每个逻辑结果只编码一次、`grande_run_result` 提示后的单次结果请求及有界等待、分页 source/search/diff、有限状态轮询和 Gateway 边界遥测。随后执行同一 ChatGPT 会话的两用户任务 release gate；不得为了恢复调用降低 `readOnlyHint/destructiveHint/openWorldHint`、绕过 Gateway、增加第二执行通道、重连/刷新工具/重建 App，或把 256 描述成已确认配额。
+- **Done when**: Release A 的自动验证完成后，必须在同一 ChatGPT 会话中完成两个独立用户任务，任务 B 在任务 A 结束后五分钟内开始；两个任务间不重连、刷新工具、重建 App、重启 Gateway 或人为 idle。每次 ChatGPT-dispatched call 都有 `/mcp → [rpc] tools/call → [tool]` 对应证据，零 tool-disabled、意外 401、Gateway restart 或 toolset identity 变化；每个任务最多 50 次外部 GrandeGPT 调用，合计 serialized tool-result bytes 不超过 1 MiB，单个结果不超过 32 KiB，且至少一个真实 job 以一次外部 `grande_run_result` 到达终态，第二任务边界后的最终 status/read 均成功。该门禁须在 ChatGPT Web、当前 iOS App 和第二个 fresh Web conversation 各完整通过一次；三次均通过才可改为 MITIGATED 并继续监控七天。任何 pre-Gateway 失败保持 OPEN；若请求到达 Gateway 后失败，先按 auth/protocol/handler 边界诊断，不把它归为本项。
 
 ### GG-BL-013 — Host outer-test 自动形成 exact-SHA merge gate
 
@@ -171,6 +172,17 @@
 - **Next (Phase 1)**: 保留 Human 对宿主执行的显式触发，但让成功结果自动写入可信 `OuterTestReceipt`（至少绑定 `taskId / repoId / commitSha / startedAt / endedAt / exitCode / files or planDigest / host toolchain`）；HEAD 变化后旧 receipt 自动失效。`grande_pr_merge` 对需要 selfhost outer verification 的 task 必须要求当前 PR head SHA 存在有效 receipt，并在缺失时 fail closed、返回唯一明确的 host command。这样 Human 只负责触发一次，不再负责记忆、复制结果或判断 receipt 是否仍匹配当前 SHA。
 - **Future automation boundary**: 如果以后要做到完全无人值守，只能通过独立隔离 host verifier：不能读取 `~/.grande-control/secrets` / `~/.ssh`，不能写 canonical/control plane，执行目标固定到 exact task/commit，无任意 argv/shell；结果再以受控 receipt 回传。没有该隔离边界前，不做全自动 unsandboxed candidate-code execution。
 - **Done when**: (1) Human 运行一次 host outer-test 后自动产生 exact-SHA receipt；(2) 修改/重新 commit 导致旧 receipt 失效；(3) 缺失/过期 receipt 时 `grande_pr_merge` 对适用 task 明确拒绝，当前 SHA receipt + 既有 CI/attestation 门禁都满足后才允许 merge；(4) load-bearing test/probe 证明移除 receipt gate 会使验收变红；(5) 未新增通用宿主任意执行能力。
+
+### GG-BL-014 — 长任务可能在只读分析后静默停滞
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: agent execution / continuity
+- **Problem**: 长时间开发任务在 task 仍为 `READY`、`blocker=null`、没有运行中 job、也没有需要 Human Gate 的情况下，agent 可能在完成一次只读 search/inspection 后不再发出下一笔 edit/run/tool call；UI 停留在最后一条“searched/inspected”进度，看起来像仍在执行，实际没有任何后台工作。
+- **Evidence / Detail**: 2026-08-21 `task-reliability-hostverifier-20260821-001` 的 Slice A/A1：`job_a7b944e8-c162-455a-a251-56b5346a0fe3` 已以 73 files / 703 tests PASS 结束，随后完成 production `execFileSync("git", ...)` 枚举；之后 task 长时间保持 3 changed files、无新增 job/commit/edit，直到 Human Owner 指出停滞。恢复后立即迁移 `src/commit.ts`、`src/push.ts`、`src/prOpen.ts`，changed files 3→6，并得到新 job `job_cf470d0b-02bc-425c-88a6-ef89a4e2f86d` 73 files / 703 tests PASS，证明当时不是代码、Git base 或测试 blocker。当前只有这一份明确样本，不能据此断言根因在模型、ChatGPT harness 或 GrandeGPT Gateway。
+- **Related**: GG-BL-010 会中断工具调用通道，但本次没有 tool-disabled/error，且恢复后同一会话继续成功调用 GrandeGPT，因此目前不合并为同一根因。
+- **Next**: 先建立可观测性而不是猜根因：为长任务记录最近一次“有副作用或 job 状态推进”的 progress timestamp/phase/next action，并在 `READY + blocker=null + no running job` 且超过合理 inactivity window 时给出显式 stalled/needs-resume 状态或提示；同时收集下一次复现时的 ChatGPT-dispatched call、Gateway `/mcp/[rpc]/[tool]`、task audit/job timeline，区分“模型未发调用”“平台未派发”“Gateway 未执行”。不要新增 daemon、通用自动执行器或绕过 Human Gate。
+- **Done when**: 至少一个真实长任务复现/回归证明静默停滞能被明确检测并报告唯一 next action，不再把无后台活动显示成持续执行；恢复路径不需要重建 task、不丢 worktree 改动、不降低工具安全边界，并有测试钉住 task liveness/status 语义。
 
 ## Observations
 

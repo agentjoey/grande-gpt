@@ -2,7 +2,11 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { repoSearch } from "../src/repoSearch.ts";
+import {
+  boundSearchMatchForResult,
+  MAX_SEARCH_RESULT_BYTES,
+  repoSearch,
+} from "../src/repoSearch.ts";
 
 let root: string;
 function file(rel: string, content: string) {
@@ -92,10 +96,118 @@ describe("repoSearch()", () => {
     const first = repoSearch(root, "NEEDLE", { maxMatches: 4 });
     expect(first.truncated).toBe(true);
     expect(first.matches).toHaveLength(4);
-    const second = repoSearch(root, "NEEDLE", { maxMatches: 100, cursor: first.nextCursor });
+    const second = repoSearch(root, "NEEDLE", { maxMatches: 25, cursor: first.nextCursor });
     expect(second.truncated).toBe(false);
     const allPaths = [...first.matches, ...second.matches].map((m) => m.path);
     expect(new Set(allPaths).size).toBe(10);
+  });
+
+  it("默认返回 20 条，显式硬上限 25 条可用，游标按实际返回数稳定推进", () => {
+    for (let i = 0; i < 30; i++) file(`src/f${String(i).padStart(2, "0")}.ts`, "NEEDLE\n");
+
+    const defaultPage = repoSearch(root, "NEEDLE");
+    expect(defaultPage.matches).toHaveLength(20);
+    expect(defaultPage.truncated).toBe(true);
+    expect(defaultPage.nextCursor).toBe("20");
+
+    const maxPage = repoSearch(root, "NEEDLE", { maxMatches: 25 });
+    expect(maxPage.matches).toHaveLength(25);
+    expect(maxPage.truncated).toBe(true);
+    expect(maxPage.nextCursor).toBe("25");
+  });
+
+  it.each([0, -1, 1.5, 26, Number.NaN])(
+    "maxMatches=%s 不是 1..25 内的正整数时返回 INVALID_INPUT，而不是钳制",
+    (maxMatches) => {
+      file("src/a.ts", "NEEDLE\n");
+      expect(() => repoSearch(root, "NEEDLE", { maxMatches }))
+        .toThrow(expect.objectContaining({ code: "INVALID_INPUT" }));
+    },
+  );
+
+  it("按实际序列化后的 SearchResult 强制 16 KiB 上限，移除尾部匹配后游标只推进已返回数", () => {
+    for (let i = 0; i < 8; i++) {
+      file(
+        `src/large-${i}.ts`,
+        `before-${i}\nNEEDLE-${i}-${"界".repeat(1_600)}\nafter-${i}\n`,
+      );
+    }
+
+    const first = repoSearch(root, "NEEDLE", { maxMatches: 25 });
+    const firstBytes = Buffer.byteLength(JSON.stringify(first), "utf8");
+
+    expect(firstBytes).toBeLessThanOrEqual(16 * 1024);
+    expect(first.matches.length).toBeGreaterThan(0);
+    expect(first.matches.length).toBeLessThan(8);
+    expect(first.truncated).toBe(true);
+    expect(first.nextCursor).toBe(`v2:${first.matches.length}:1`);
+
+    const second = repoSearch(root, "NEEDLE", {
+      maxMatches: 25,
+      cursor: first.nextCursor,
+    });
+    expect(Buffer.byteLength(JSON.stringify(second), "utf8")).toBeLessThanOrEqual(16 * 1024);
+    expect(second.matches[0]!.path).toBe(`src/large-${first.matches.length}.ts`);
+  });
+
+  it("字节裁剪同一文件的尾部匹配时，opaque 游标精确指向第一个未返回命中的行", () => {
+    const lines = Array.from(
+      { length: 8 },
+      (_, i) => `NEEDLE-${i}-${"界".repeat(1_600)}`,
+    );
+    file("src/many-large.ts", lines.join("\n"));
+
+    const first = repoSearch(root, "NEEDLE", { maxMatches: 25 });
+
+    expect(first.matches.length).toBeGreaterThan(0);
+    expect(first.matches.length).toBeLessThan(lines.length);
+    expect(first.nextCursor).toBe(`v2:0:${first.matches.length}`);
+
+    const second = repoSearch(root, "NEEDLE", { maxMatches: 25, cursor: first.nextCursor });
+    expect(second.matches[0]!.line).toBe(first.matches.length + 1);
+    expect(second.matches[0]!.text).toContain(`NEEDLE-${first.matches.length}-`);
+  });
+
+  it("单个匹配本身超过 16 KiB 时返回有损标记的有界表示，游标不会停在空页原地循环", () => {
+    const sourceLine = `NEEDLE-${"界".repeat(20_000)}`;
+    file("src/one-huge-match.ts", `${sourceLine}\n`);
+
+    const result = repoSearch(root, "NEEDLE");
+
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(16 * 1024);
+    expect(result.matches).toHaveLength(1);
+    expect(result.matches[0]!.path).toBe("src/one-huge-match.ts");
+    expect(result.matches[0]!.text).toContain("NEEDLE");
+    expect(result.matches[0]!.text).not.toBe(sourceLine);
+    expect(result.matches[0]!.contentTruncated).toBe(true);
+    expect(result.matches[0]!.pathTruncated).toBe(false);
+    expect(result.truncated).toBe(false);
+    expect(result.nextCursor).toBeNull();
+  });
+
+  it("候选匹配会约束所有序列化文本字段，包括高转义开销的超长路径", () => {
+    const match = boundSearchMatchForResult({
+      path: '\\\"'.repeat(20_000),
+      line: 1,
+      text: "NEEDLE",
+      before: [],
+      after: [],
+    });
+    const result = {
+      truncated: false,
+      nextCursor: null,
+      timedOut: false,
+      skippedOversized: 0,
+      matches: [match],
+    };
+
+    expect(match.pathTruncated).toBe(true);
+    expect(match.contentTruncated).toBe(false);
+    expect(match.path.length).toBeGreaterThan(0);
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(
+      MAX_SEARCH_RESULT_BYTES,
+    );
+    expect(result.matches).toHaveLength(1);
   });
 
   it("顺序确定且是全局字典序（跨目录也成立）", () => {
@@ -108,19 +220,71 @@ describe("repoSearch()", () => {
     expect(a).toEqual([...a].sort());
   });
 
-  it("时间预算到点即返回，标记 timedOut，且【已找到的结果不丢】、仍可续取", () => {
+  it("时间预算在单个多命中文件内到点时从精确行继续，连续页面前进且不重不漏", () => {
     // budgetMs=0 保证第一次检查就超预算。关键断言是 timedOut 为 true 而不是抛错——
     // 撞上 ChatGPT 那个不可配置的 ~60s 超时的后果，比返回部分结果糟糕得多。
-    for (let i = 0; i < 50; i++) file(`src/f${String(i).padStart(2, "0")}.ts`, "NEEDLE\n");
-    const r = repoSearch(root, "NEEDLE", { budgetMs: 0 });
-    expect(r.timedOut).toBe(true);
-    expect(r.truncated).toBe(true);
-    expect(r.matches).toHaveLength(1); // 已找到的不丢
-    expect(r.matches[0]!.path).toBe("src/f00.ts");
-    expect(r.nextCursor).toBe("1"); // 可续取
+    file(
+      "src/many.ts",
+      Array.from({ length: 50 }, (_, i) => `NEEDLE-${String(i).padStart(2, "0")}`).join("\n"),
+    );
+    const first = repoSearch(root, "NEEDLE", { budgetMs: 0 });
+    const second = repoSearch(root, "NEEDLE", { budgetMs: 0, cursor: first.nextCursor });
+    const third = repoSearch(root, "NEEDLE", { budgetMs: 0, cursor: second.nextCursor });
 
-    const rest = repoSearch(root, "NEEDLE", { cursor: r.nextCursor, maxMatches: 100 });
-    expect(rest.matches.map((m) => m.path)).not.toContain("src/f00.ts");
+    for (const page of [first, second, third]) {
+      expect(page.timedOut).toBe(true);
+      expect(page.truncated).toBe(true);
+      expect(page.matches).toHaveLength(1);
+    }
+    expect([first, second, third].flatMap((page) => page.matches.map((m) => m.line)))
+      .toEqual([1, 2, 3]);
+    expect(first.nextCursor).toBe("v2:0:1");
+    expect(new Set([first.nextCursor, second.nextCursor, third.nextCursor]).size).toBe(3);
+  });
+
+  it("numeric legacy offset 在耗尽前超时时保留剩余量，续页从第二条基线命中开始且游标继续前进", () => {
+    file("src/legacy.ts", "header\nNEEDLE-first\nNEEDLE-second\nNEEDLE-third");
+    const baseline = repoSearch(root, "NEEDLE").matches.map((match) => match.text);
+    expect(baseline).toEqual(["NEEDLE-first", "NEEDLE-second", "NEEDLE-third"]);
+
+    const timedOut = repoSearch(root, "NEEDLE", { cursor: "1", budgetMs: 0 });
+    expect(timedOut.matches).toEqual([]);
+    expect(timedOut.nextCursor).toBe("v3:0:1:1");
+
+    const resumed = repoSearch(root, "NEEDLE", { cursor: timedOut.nextCursor });
+    expect(resumed.matches.map((match) => match.text)).toEqual(baseline.slice(1));
+    expect(resumed.matches.map((match) => match.text)).not.toContain(baseline[0]);
+
+    const oneMoreTimedStep = repoSearch(root, "NEEDLE", {
+      cursor: timedOut.nextCursor,
+      budgetMs: 0,
+    });
+    expect(oneMoreTimedStep.matches).toEqual([]);
+    expect(oneMoreTimedStep.nextCursor).not.toBe(timedOut.nextCursor);
+    const afterTimedStep = repoSearch(root, "NEEDLE", { cursor: oneMoreTimedStep.nextCursor });
+    expect(afterTimedStep.matches[0]!.text).toBe(baseline[1]);
+  });
+
+  it("拒绝语义上超出当前文件集合或行数的 opaque 游标", () => {
+    file("src/a.ts", "one\nNEEDLE\nthree");
+
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v2:2:0" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/fileIndex|文件索引|范围/) }));
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v2:0:99" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/lineIndex|行索引|范围/) }));
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v2:1:1" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/lineIndex|行索引|范围/) }));
+  });
+
+  it("拒绝没有待跳过命中、位于 EOF、或超出安全整数范围的 v3 legacyOffset", () => {
+    file("src/a.ts", "header\nNEEDLE-first\nNEEDLE-second");
+
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v3:0:0:0" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/legacyOffset|剩余|正整数/) }));
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v3:1:0:1" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/legacyOffset|剩余|EOF/) }));
+    expect(() => repoSearch(root, "NEEDLE", { cursor: "v3:0:0:9007199254740992" }))
+      .toThrow(expect.objectContaining({ code: "INVALID_INPUT", message: expect.stringMatching(/安全整数|范围/) }));
   });
 
   it("超过大小上限的文件被跳过，但计数体现在 skippedOversized 里而不是静默消失", () => {

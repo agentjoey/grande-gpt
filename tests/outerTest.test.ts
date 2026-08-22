@@ -5,15 +5,32 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import type { Layout } from "../src/layout.ts";
+import { TRUSTED_HOST_MANIFEST } from "../src/hostVerification.ts";
 import { planOuterTest, resolveOuterTestCwd } from "../src/outerTest.ts";
 import { createTask } from "../src/tasks.ts";
 
 let ws: string, ctrl: string, layout: Layout;
 let savedWs: string | undefined, savedCtrl: string | undefined;
 
-/** 只写 profiles.yaml —— planOuterTest 不碰数据库，也不碰仓库。 */
 function writeProfiles(body: string): void {
   writeFileSync(join(layout.configDir, "profiles.yaml"), body, "utf8");
+}
+
+const legacyExcluded = [
+  "tests/sandbox.test.ts",
+  "tests/runner.test.ts",
+  "tests/server.test.ts",
+  "tests/tools.test.ts",
+  "tests/e2e.test.ts",
+];
+
+function writeLegacySelfhost(excluded = legacyExcluded): void {
+  const argv = ["npx", "vitest", "run"];
+  for (const file of excluded) argv.push("--exclude", file);
+  writeProfiles(
+    "repos:\n  demo:\n" +
+    `    unit-selfhost: { argv: ${JSON.stringify(argv)}, timeoutSeconds: 600 }\n`,
+  );
 }
 
 beforeEach(() => {
@@ -37,78 +54,54 @@ afterEach(() => {
 });
 
 describe("planOuterTest()", () => {
-  it("清单从 profile 的 --exclude 反推——改 profile 就自动跟上，这是本命令的全部价值", () => {
-    writeProfiles(
-      "repos:\n  demo:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts","--exclude","tests/runner.test.ts"], timeoutSeconds: 600 }\n',
-    );
-    expect(planOuterTest(layout, "demo").files).toEqual(["tests/sandbox.test.ts", "tests/runner.test.ts"]);
-
-    // 往 profile 里再加一个已登记理由的排除项 —— 无需改任何反推逻辑，本命令必须自动覆盖它。
-    writeProfiles(
-      "repos:\n  demo:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts","--exclude","tests/runner.test.ts","--exclude","tests/server.test.ts"], timeoutSeconds: 600 }\n',
-    );
-    expect(planOuterTest(layout, "demo").files).toEqual([
-      "tests/sandbox.test.ts", "tests/runner.test.ts", "tests/server.test.ts",
-    ]);
-  });
-
-  it("只取 tests/ 下的排除项——vitest 的默认排除（node_modules/dist）不是「沙箱跑不了」", () => {
-    writeProfiles(
-      "repos:\n  demo:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","**/node_modules/**","--exclude","**/dist/**","--exclude","tests/sandbox.test.ts"], timeoutSeconds: 600 }\n',
-    );
+  it("uses the trusted host manifest while the current control-plane profile remains the drift anchor", () => {
+    writeLegacySelfhost();
     const plan = planOuterTest(layout, "demo");
-    expect(plan.files).toEqual(["tests/sandbox.test.ts"]);
-    // 混进来会让命令去跑不存在的东西
-    expect(plan.files.some((f) => f.includes("node_modules"))).toBe(false);
-    expect(plan.files.some((f) => f.includes("dist"))).toBe(false);
+    expect(plan.files).toEqual(TRUSTED_HOST_MANIFEST.map((entry) => entry.file));
+    expect(plan.unitSelfhostExcluded).toEqual(legacyExcluded);
+    expect(plan.fromProfile).toBe("unit-selfhost");
   });
 
-  it("profile 不再排除任何测试文件时【响亮拒绝】，不是静默返回空清单", () => {
-    // 静默返回空清单 = 命令报告「0 个文件，全部通过」= 一个看起来成功的谎。
+  it("returns each trusted manifest capability reason", () => {
+    writeLegacySelfhost();
+    const plan = planOuterTest(layout, "demo");
+    for (const entry of TRUSTED_HOST_MANIFEST) {
+      expect(plan.reasons.get(entry.file)).toBe(entry.reason);
+    }
+  });
+
+  it("fails closed if a legacy exclusion is silently removed before trusted profile migration", () => {
+    writeLegacySelfhost(legacyExcluded.slice(0, -1));
+    expect(() => planOuterTest(layout, "demo")).toThrow(/profile|exclude|coverage|drift/i);
+  });
+
+  it("fails closed if an unknown test is added to the trusted profile exclusion set", () => {
+    writeLegacySelfhost([...legacyExcluded, "tests/unknown.test.ts"]);
+    expect(() => planOuterTest(layout, "demo")).toThrow(/unknown|exclude|coverage/i);
+  });
+
+  it("profile without test exclusions fails closed instead of reporting an empty host suite", () => {
     writeProfiles(
       "repos:\n  demo:\n" +
       '    unit-selfhost: { argv: ["npx","vitest","run"], timeoutSeconds: 600 }\n',
     );
-    expect(() => planOuterTest(layout, "demo")).toThrow(/没有任何/);
+    expect(() => planOuterTest(layout, "demo")).toThrow(/exclude|profile|coverage/i);
   });
 
-  it("profile 不存在时抛错，不猜一个默认清单", () => {
+  it("profile absence fails closed rather than guessing trusted configuration", () => {
     writeProfiles("repos:\n  demo:\n    unit: { argv: [\"pnpm\",\"test\"], timeoutSeconds: 600 }\n");
     expect(() => planOuterTest(layout, "demo")).toThrow();
-  });
-
-  it("新增未登记 WHY 的 tests/ 排除项时响亮拒绝——生产 profile 漂移不能静默通过", () => {
-    writeProfiles(
-      "repos:\n  demo:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts","--exclude","tests/unknown.test.ts"], timeoutSeconds: 600 }\n',
-    );
-    expect(() => planOuterTest(layout, "demo")).toThrow(/unknown\.test\.ts.*WHY|WHY.*unknown\.test\.ts/);
-  });
-
-  it("每个已登记的排除文件都返回人类可读理由", () => {
-    writeProfiles(
-      "repos:\n  demo:\n" +
-      '    unit-selfhost: { argv: ["npx","vitest","run","--exclude","tests/sandbox.test.ts","--exclude","tests/runner.test.ts","--exclude","tests/server.test.ts","--exclude","tests/tools.test.ts","--exclude","tests/e2e.test.ts"], timeoutSeconds: 600 }\n',
-    );
-    const plan = planOuterTest(layout, "demo");
-    expect(plan.files.length).toBe(5);
-    for (const f of plan.files) {
-      expect(plan.reasons.get(f), `${f} 缺排除理由`).toBeDefined();
-    }
   });
 });
 
 describe("resolveOuterTestCwd()", () => {
-  it("不传 taskId 时保持旧行为：验收 canonical repo", () => {
+  it("without taskId keeps canonical compatibility", () => {
     const db = openDb(layout);
     expect(resolveOuterTestCwd(db, layout, "grande-gpt")).toBe(join(layout.workspaceRoot, "grande-gpt"));
     db.close();
   });
 
-  it("传 taskId 时验收该 task 的 worktree，而不是 canonical repo", () => {
+  it("with taskId targets the task worktree rather than canonical", () => {
     const db = openDb(layout);
     const worktreePath = join(ws, ".grande-work", "worktrees", "grande-gpt", "task_phase4");
     createTask(db, {
@@ -119,7 +112,7 @@ describe("resolveOuterTestCwd()", () => {
     db.close();
   });
 
-  it("task 不存在或属于别的 repo 时 fail closed", () => {
+  it("fails closed for missing task or wrong repository", () => {
     const db = openDb(layout);
     expect(() => resolveOuterTestCwd(db, layout, "grande-gpt", "task_missing")).toThrow(/TASK_NOT_FOUND|不存在/);
     createTask(db, {

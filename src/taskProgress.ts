@@ -1,10 +1,12 @@
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { getAttestations } from "./attestation.ts";
 import { listAudit } from "./audit.ts";
+import { safeGit } from "./gitExec.ts";
+import type { HostVerificationLevel } from "./hostVerification.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
+import { inspectCurrentHostVerification, type CurrentHostVerification } from "./prHostVerification.ts";
 import type { TaskRow } from "./tasks.ts";
 
 export type ProgressState = "done" | "pending" | "running" | "blocked" | "unknown" | "not-applicable";
@@ -13,6 +15,39 @@ export interface ProgressStage {
   state: ProgressState;
   detail: string;
 }
+
+export type HostVerificationMode = "manual" | "auto";
+export type HostVerificationProgressState =
+  | "not-required"
+  | "required"
+  | "manual-required"
+  | "running"
+  | "failed"
+  | "retryable-failure"
+  | "retry-exhausted"
+  | "passed"
+  | "unknown";
+
+export interface HostVerificationProgress {
+  requiredLevel: HostVerificationLevel | null;
+  manualOnlyRequired: boolean;
+  receiptEligible: boolean;
+  state: HostVerificationProgressState;
+  retryCount: number;
+  jobId: string | null;
+}
+
+export type TaskProgressPhase =
+  | "code"
+  | "tests"
+  | "pr"
+  | "ci"
+  | "host-verification"
+  | "merge"
+  | "deploy"
+  | "verify"
+  | "cleanup"
+  | "completed";
 
 export interface TaskProgress {
   stages: {
@@ -24,6 +59,10 @@ export interface TaskProgress {
     deploy: ProgressStage;
     verify: ProgressStage;
   };
+  phase: TaskProgressPhase;
+  taskHead: string | null;
+  hostVerification: HostVerificationProgress;
+  localState: "active" | "merged-local-stale" | "completed";
   completed: boolean;
   cleanupRequired: boolean;
   blocker: string | null;
@@ -36,6 +75,8 @@ export interface TaskProgressOptions {
   workingTreeDirty?: (worktreePath: string) => boolean;
   deployConfigured?: (worktreePath: string) => boolean;
   worktreeExists?: (worktreePath: string) => boolean;
+  hostVerificationMode?: HostVerificationMode;
+  inspectHostVerification?: (db: DatabaseSync, task: TaskRow, head: string) => CurrentHostVerification;
 }
 
 interface ReceiptProjection {
@@ -47,13 +88,18 @@ interface ReceiptProjection {
 }
 
 const ACTIVE_PROGRESS = new Set<ProgressState>(["running"]);
+const DEPLOY_UNSETTLED = new Set<ProgressState>(["pending", "running", "blocked"]);
+const HOST_ACTIVE = new Set<HostVerificationProgressState>(["running"]);
+const HOST_RUNTIME_PHASE = new Set<HostVerificationProgressState>([
+  "running",
+  "failed",
+  "retryable-failure",
+  "retry-exhausted",
+]);
+const HOST_PENDING_PHASE = new Set<HostVerificationProgressState>(["required", "manual-required"]);
 
 function git(worktreePath: string, args: string[]): string {
-  return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-    cwd: worktreePath,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
+  return safeGit.local(worktreePath, args).trim();
 }
 
 function defaultReadHead(worktreePath: string): string {
@@ -61,7 +107,7 @@ function defaultReadHead(worktreePath: string): string {
 }
 
 function defaultFilesChanged(task: TaskRow): number {
-  const output = git(task.worktreePath, ["diff", "--name-only", task.baseCommit, "--"]);
+  const output = safeGit.diff(task.worktreePath, ["diff", "--name-only", task.baseCommit, "--"]).trim();
   const committedOrTracked = output ? output.split("\n").filter(Boolean) : [];
   const untracked = git(task.worktreePath, ["ls-files", "--others", "--exclude-standard"]);
   const untrackedPaths = untracked ? untracked.split("\n").filter(Boolean) : [];
@@ -87,10 +133,6 @@ function loadReceipt(db: DatabaseSync, taskId: string): ReceiptProjection | null
   }
 }
 
-function succeededTool(db: DatabaseSync, taskId: string, tool: string): boolean {
-  return listAudit(db, taskId, 500).some((row) => row.tool === tool && row.state === "SUCCEEDED");
-}
-
 function stageFromJob(
   db: DatabaseSync,
   taskId: string,
@@ -114,9 +156,107 @@ function firstBlocked(stages: TaskProgress["stages"]): string | null {
   return null;
 }
 
+export function projectHostVerificationProgress(
+  current: CurrentHostVerification,
+  mode: HostVerificationMode = "manual",
+): HostVerificationProgress {
+  const { plan, receiptEligible, latestAttempt } = current;
+  if (plan.level === "none") {
+    return {
+      requiredLevel: "none",
+      manualOnlyRequired: false,
+      receiptEligible: true,
+      state: "not-required",
+      retryCount: 0,
+      jobId: null,
+    };
+  }
+  if (receiptEligible) {
+    return {
+      requiredLevel: plan.level,
+      manualOnlyRequired: plan.manualOnlyRequired,
+      receiptEligible: true,
+      state: "passed",
+      retryCount: 0,
+      jobId: latestAttempt?.jobId ?? null,
+    };
+  }
+  if (latestAttempt?.kind === "running") {
+    return {
+      requiredLevel: plan.level,
+      manualOnlyRequired: plan.manualOnlyRequired,
+      receiptEligible: false,
+      state: "running",
+      retryCount: 0,
+      jobId: latestAttempt.jobId,
+    };
+  }
+  if (latestAttempt?.kind === "test") {
+    return {
+      requiredLevel: plan.level,
+      manualOnlyRequired: plan.manualOnlyRequired,
+      receiptEligible: false,
+      state: "failed",
+      retryCount: 0,
+      jobId: latestAttempt.jobId,
+    };
+  }
+  if (latestAttempt?.kind === "infrastructure") {
+    return {
+      requiredLevel: plan.level,
+      manualOnlyRequired: plan.manualOnlyRequired,
+      receiptEligible: false,
+      state: latestAttempt.infrastructureFailures >= 2 ? "retry-exhausted" : "retryable-failure",
+      retryCount: latestAttempt.infrastructureFailures,
+      jobId: latestAttempt.jobId,
+    };
+  }
+  return {
+    requiredLevel: plan.level,
+    manualOnlyRequired: plan.manualOnlyRequired,
+    receiptEligible: false,
+    state: plan.manualOnlyRequired || mode === "manual" ? "manual-required" : "required",
+    retryCount: 0,
+    jobId: null,
+  };
+}
+
+function unknownHostVerification(): HostVerificationProgress {
+  return {
+    requiredLevel: null,
+    manualOnlyRequired: false,
+    receiptEligible: false,
+    state: "unknown",
+    retryCount: 0,
+    jobId: null,
+  };
+}
+
+function hostBlocker(host: HostVerificationProgress, taskId: string): { blocker: string; nextAction: string } | null {
+  if (host.state === "retry-exhausted") {
+    return {
+      blocker: `hostVerification: verifier infrastructure retry exhausted (${host.retryCount}/2)`,
+      nextAction: `运行 grande outer-test --task ${taskId} --run；不要自动重试 verifier`,
+    };
+  }
+  if (host.state === "failed") {
+    return {
+      blocker: "hostVerification: verifier tests failed",
+      nextAction: "读取当前 verifier job 的 bounded artifact；修复红测并提交新 SHA",
+    };
+  }
+  if (host.state === "manual-required") {
+    return {
+      blocker: "hostVerification: manual host verification required",
+      nextAction: `运行 grande outer-test --task ${taskId} --run`,
+    };
+  }
+  return null;
+}
+
 /**
- * S10：只从既有 Task/job/audit/attestation/deployment receipt 投影日常状态。
- * 不写数据库、不引入新 lifecycle state，也不替 grande_pr_status 猜 live CI。
+ * S10/D3: project daily lifecycle + host-verification status only from existing trusted
+ * Task/job/audit/attestation/receipt state. No database writes or new lifecycle table.
  */
 export function projectTaskProgress(
   db: DatabaseSync,
@@ -144,8 +284,26 @@ export function projectTaskProgress(
   const headAttested = head.length > 0 && attestations.some((candidate) => candidate.commit === head);
   const jobs = listJobs(db, task.taskId);
   const latestJob = jobs[0];
-  const prOpened = succeededTool(db, task.taskId, "grande_pr_open");
-  const merged = succeededTool(db, task.taskId, "grande_pr_merge");
+  const audits = listAudit(db, task.taskId, 500);
+  const prOpened = audits.some((row) => row.tool === "grande_pr_open" && row.state === "SUCCEEDED");
+  const merged = audits.some((row) => row.tool === "grande_pr_merge" && row.state === "SUCCEEDED");
+  const latestMergeAudit = audits.find((row) => row.tool === "grande_pr_merge");
+  const mergedLocalStale = merged
+    && latestMergeAudit?.state === "FAILED"
+    && /^merged-but-local-stale:/u.test(latestMergeAudit.reason ?? "");
+
+  let hostVerification = unknownHostVerification();
+  if (head.length > 0) {
+    try {
+      const inspect = options.inspectHostVerification ?? inspectCurrentHostVerification;
+      hostVerification = projectHostVerificationProgress(
+        inspect(db, task, head),
+        options.hostVerificationMode ?? "manual",
+      );
+    } catch {
+      // Keep status bounded/fail-closed: do not leak Git/control paths through projection errors.
+    }
+  }
 
   const code: ProgressStage = head.length === 0
     ? { state: "blocked", detail: "无法读取 task worktree HEAD" }
@@ -206,22 +364,76 @@ export function projectTaskProgress(
 
   const stages = { code, tests, pr, ci, merged: mergedStage, deploy, verify };
   const completed = merged && (deploy.state === "not-applicable" || verify.state === "done");
-  const cleanupRequired = completed && task.state !== "CLOSED" && worktreeExists(task.worktreePath);
-  const blocker = firstBlocked(stages);
+  const cleanupRequired = mergedLocalStale || (completed && task.state !== "CLOSED" && worktreeExists(task.worktreePath));
+  const localState: TaskProgress["localState"] = mergedLocalStale
+    ? "merged-local-stale"
+    : completed && !cleanupRequired
+      ? "completed"
+      : "active";
 
-  let nextAction: string;
-  if (blocker) nextAction = `先处理阻塞：${blocker}`;
-  else if (cleanupRequired) nextAction = `闭环证据已完成，但 worktree/task 仍保留；Human 确认后显式 grande_task_close`;
-  else if (tests.state !== "done") nextAction = "运行合适的验证 profile；通过后 grande_commit 生成当前 SHA attestation";
-  else if (pr.state !== "done") nextAction = "grande_push 后 grande_pr_open";
-  else if (ci.state === "unknown") nextAction = "调用 grande_pr_status 查看当前 exact-head CI；失败则按 bounded diagnostics 修复";
-  else if (mergedStage.state !== "done") nextAction = "CI/attestation 门禁满足后 grande_pr_merge";
-  else if (deploy.state === "pending") nextAction = "调用 grande_deploy";
-  else if (ACTIVE_PROGRESS.has(deploy.state) || ACTIVE_PROGRESS.has(verify.state)) nextAction = "等待当前 deployment job 结束后重入 grande_deploy_verify";
-  else if (verify.state === "pending") nextAction = "调用 grande_deploy_verify";
-  else nextAction = "无待处理动作";
+  let blocker = firstBlocked(stages);
+  let nextAction = "无待处理动作";
+  const hostGateActive = prOpened || HOST_ACTIVE.has(hostVerification.state) || hostVerification.jobId !== null;
+  const hostFailure = hostGateActive ? hostBlocker(hostVerification, task.taskId) : null;
 
-  return { stages, completed, cleanupRequired, blocker, nextAction };
+  if (mergedLocalStale) {
+    blocker = "cleanup: remote merged but local reconciliation is stale";
+    nextAction = "再次调用 grande_pr_merge；只重试本地 reconciliation，不会重复 remote merge";
+  } else if (hostFailure) {
+    blocker = hostFailure.blocker;
+    nextAction = hostFailure.nextAction;
+  } else if (blocker) {
+    nextAction = `先处理阻塞：${blocker}`;
+  } else if (cleanupRequired) {
+    nextAction = "闭环证据已完成，但 worktree/task 仍保留；Human 确认后显式 grande_task_close";
+  } else if (tests.state !== "done") {
+    nextAction = "运行合适的验证 profile；通过后 grande_commit 生成当前 SHA attestation";
+  } else if (pr.state !== "done") {
+    nextAction = "grande_push 后 grande_pr_open";
+  } else if (HOST_ACTIVE.has(hostVerification.state)) {
+    nextAction = `观察 verifier job ${hostVerification.jobId}`;
+  } else if (hostVerification.state === "retryable-failure") {
+    nextAction = "再次调用 grande_pr_merge；只允许一次受限 verifier infrastructure retry";
+  } else if (ci.state === "unknown") {
+    nextAction = "调用 grande_pr_status 查看当前 exact-head CI；失败则按 bounded diagnostics 修复";
+  } else if (hostVerification.state === "required") {
+    nextAction = "调用 grande_pr_merge 创建或观察当前 exact-SHA host verifier";
+  } else if (hostVerification.state === "manual-required") {
+    nextAction = `运行 grande outer-test --task ${task.taskId} --run`;
+  } else if (mergedStage.state !== "done") {
+    nextAction = "CI/attestation/host-verification 门禁满足后 grande_pr_merge";
+  } else if (deploy.state === "pending") {
+    nextAction = "调用 grande_deploy";
+  } else if (ACTIVE_PROGRESS.has(deploy.state) || ACTIVE_PROGRESS.has(verify.state)) {
+    nextAction = "等待当前 deployment job 结束后重入 grande_deploy_verify";
+  } else if (verify.state === "pending") {
+    nextAction = "调用 grande_deploy_verify";
+  }
+
+  let phase: TaskProgressPhase;
+  if (mergedLocalStale || cleanupRequired) phase = "cleanup";
+  else if (code.state !== "done") phase = "code";
+  else if (tests.state !== "done") phase = "tests";
+  else if (pr.state !== "done") phase = "pr";
+  else if (HOST_RUNTIME_PHASE.has(hostVerification.state)) phase = "host-verification";
+  else if (ci.state === "unknown") phase = "ci";
+  else if (HOST_PENDING_PHASE.has(hostVerification.state)) phase = "host-verification";
+  else if (mergedStage.state !== "done") phase = "merge";
+  else if (DEPLOY_UNSETTLED.has(deploy.state)) phase = "deploy";
+  else if (DEPLOY_UNSETTLED.has(verify.state)) phase = "verify";
+  else phase = "completed";
+
+  return {
+    stages,
+    phase,
+    taskHead: head || null,
+    hostVerification,
+    localState,
+    completed,
+    cleanupRequired,
+    blocker,
+    nextAction,
+  };
 }
 
 export function compactTaskProgress(progress: TaskProgress): string {
@@ -234,11 +446,15 @@ export function compactTaskProgress(progress: TaskProgress): string {
     return "·";
   };
   const s = progress.stages;
+  const host = progress.hostVerification.requiredLevel === null
+    ? "Host ?"
+    : `Host ${progress.hostVerification.requiredLevel}/${progress.hostVerification.state}`;
   return [
     `Code ${glyph(s.code.state)}`,
     `Tests ${glyph(s.tests.state)}`,
     `PR ${glyph(s.pr.state)}`,
     `CI ${glyph(s.ci.state)}`,
+    host,
     `Merged ${glyph(s.merged.state)}`,
     `Deploy ${glyph(s.deploy.state)}`,
     `Verify ${glyph(s.verify.state)}`,

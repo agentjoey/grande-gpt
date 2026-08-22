@@ -1,64 +1,44 @@
 import type { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { StateError } from "./errors.ts";
+import { GitExecError, safeGit } from "./gitExec.ts";
+import {
+  hostFilesForLevel,
+  LEGACY_HOST_ADAPTERS,
+  planHostVerification,
+  TRUSTED_HOST_MANIFEST,
+  validateHostCoverage,
+  type HostVerificationPlan,
+} from "./hostVerification.ts";
 import type { Layout } from "./layout.ts";
 import { getProfile, ProfileError } from "./profiles.ts";
-import { getTask } from "./tasks.ts";
+import { getTask, type TaskRow } from "./tasks.ts";
 
 /**
- * 「外层测试」—— 自举时跑不了的那些测试文件。
+ * Transitional manual host-test planner.
  *
- * ## 为什么需要这个命令
- *
- * `unit-selfhost` profile 排除了几个测试文件，因为它们自己要 spawn `sandbox-exec`
- * 或绑真实端口；在沙箱里跑等于嵌套沙箱，内层只能比外层更严，**结构上不可能通过**。
- *
- * 代价是：**被排除的文件所保护的不变量，在自举期间完全失效**。这不是理论风险，
- * 已经连续三次造成实际后果：
- *
- * - S2：`tools.test.ts` 的工具计数 11→13 变红，实现者看不见
- * - S3：同一处 13→15，**外加**「所有工具 openWorldHint: false（全禁网）」这条
- *   不变量被 S3 有意打破，而断言就在那个看不见的文件里
- * - S3：实现者还把它**跑得到**的另一处计数断言主动改松了——从局部看合理
- *   （那条断言确实缺上下文），但它看不到别处有更强的同类断言
- *
- * 三次都靠 reviewer「恰好记得」手动补跑才发现。**「恰好记得」不是机制。**
- *
- * ## 排除清单为什么从 profile 反推，而不是写在这里
- *
- * 写死在本文件里就会与 `~/.grande-control/config/profiles.yaml` 漂移——
- * 有人往 profile 的排除清单里加一个文件，这个命令却不知道，于是那个文件
- * **既不在自举里跑，也不在外层里跑**，静默地谁都不管。
- *
- * 那正是本项目反复犯过的「同源漏改」。所以这里**只有一个真相源**：
- * 从 `unit-selfhost` 的 argv 里把 `--exclude tests/*.test.ts` 反解出来，
- * 跑的就是它们的补集。profile 改了，这个命令自动跟上。
+ * The trusted control-plane `unit-selfhost` profile still excludes five legacy files.
+ * Those exclusions remain a drift anchor until the Owner changes trusted configuration,
+ * but the executable host suite is now selected from the running Gateway manifest rather
+ * than directly from candidate/profile argv.
  */
-
-/** 每个被排除文件为什么跑不进沙箱。未登记意味着 profile 漂移，必须 fail closed。 */
-const WHY: Record<string, string> = {
-  "tests/sandbox.test.ts": "自己 spawn sandbox-exec（测的就是沙箱本身）",
-  "tests/runner.test.ts": "起真实 job，经沙箱",
-  "tests/server.test.ts": "startGateway 绑真实端口",
-  "tests/tools.test.ts": "工具层里跑真实 job",
-  "tests/e2e.test.ts": "完整闭环，含跑测试",
-};
 
 export interface OuterTestPlan {
-  /** 要跑的测试文件（= `unit-selfhost` 排除掉的那些）。 */
+  /** Trusted host-suite files selected by the running Gateway manifest. */
   files: string[];
-  /** 每个文件的排除理由。planOuterTest 保证这里不会出现 undefined。 */
+  /** Capability reason for every selected host file. */
   reasons: Map<string, string>;
-  /** 反推所依据的 profile 名。 */
+  /** Profile used only to verify the current transition boundary. */
   fromProfile: string;
+  /** Legacy exclusions observed in the trusted unit-selfhost profile. */
+  unitSelfhostExcluded: string[];
 }
 
-/**
- * 选择 outer-test 真正执行 vitest 的 cwd。
- *
- * 不传 taskId 保持旧的 canonical 行为；自举产出在合并前必须显式传 taskId，
- * 否则会出现「canonical 绿，但待合并 worktree 根本没被测」的假验收。
- */
+export interface TaskHostVerificationPlan extends HostVerificationPlan {
+  changedFiles: string[];
+  head: string;
+}
+
 export function resolveOuterTestCwd(
   db: DatabaseSync,
   layout: Layout,
@@ -77,41 +57,87 @@ export function resolveOuterTestCwd(
   return task.worktreePath;
 }
 
+function gitDetail(error: unknown): string {
+  if (error instanceof GitExecError) return error.message.replace(/^git failed:\s*/u, "");
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
- * 从 `unit-selfhost` 的 argv 反推出「外层要跑哪些文件」。
- *
- * 只取 `tests/` 下的排除项——`**\/node_modules\/**` 一类是 vitest 的默认排除，
- * 不是「沙箱跑不了」的意思，混进来会让这个命令去跑不存在的东西。
+ * Resolve the trusted changed-file verification plan for one committed task HEAD.
+ * The caller may bind an expected PR SHA; any HEAD/base drift fails closed before a
+ * verifier can be scheduled or a receipt can be reused.
  */
-export function planOuterTest(layout: Layout, repoId: string, profileName = "unit-selfhost"): OuterTestPlan {
+export function planTaskHostVerification(task: TaskRow, expectedHead?: string): TaskHostVerificationPlan {
+  let head: string;
+  let changedRaw: string;
+  try {
+    head = safeGit.local(task.worktreePath, ["rev-parse", "HEAD"]).trim();
+    if (expectedHead !== undefined && head !== expectedHead) {
+      throw new StateError(
+        "STALE_STATE",
+        `host verification task HEAD=${head} 与期望 PR head=${expectedHead} 不一致。`,
+      );
+    }
+    changedRaw = safeGit.local(task.worktreePath, [
+      "diff", "--name-only", "--diff-filter=ACDMRTUXB", `${task.baseCommit}..${head}`, "--",
+    ]);
+  } catch (error) {
+    if (error instanceof StateError) throw error;
+    throw new StateError(
+      "STALE_STATE",
+      `无法从 task base/head 计算 host verification plan：${gitDetail(error)}`,
+    );
+  }
+  const changedFiles = changedRaw.split("\n").map((line) => line.trim()).filter(Boolean);
+  return { ...planHostVerification(changedFiles), changedFiles, head };
+}
+
+function readTestExclusions(layout: Layout, repoId: string, profileName: string): string[] {
   const profile = getProfile(layout, repoId, profileName);
-  const argv = profile.argv;
   const files: string[] = [];
-  for (let i = 0; i < argv.length - 1; i++) {
-    if (argv[i] !== "--exclude") continue;
-    const pattern = argv[i + 1]!;
+  for (let i = 0; i < profile.argv.length - 1; i++) {
+    if (profile.argv[i] !== "--exclude") continue;
+    const pattern = profile.argv[i + 1]!;
     if (pattern.startsWith("tests/")) files.push(pattern);
   }
   if (files.length === 0) {
     throw new ProfileError(
       "PROFILE_NOT_FOUND",
-      `${profileName} 的 argv 里没有任何 \`--exclude tests/...\`——要么该 profile 不再排除` +
-        `任何测试文件（那 outer-test 就没有意义，直接跑 pnpm test），要么排除清单的写法变了` +
-        `而本命令的反推逻辑没跟上。请人工确认，不要猜。`,
+      `${profileName} profile exclude set 没有 tests/ 排除项；trusted host-suite 迁移状态无法证明，拒绝猜测。`,
+    );
+  }
+  return files;
+}
+
+/**
+ * Plan the current full manual host suite.
+ *
+ * Candidate content never chooses the host files. The profile exclusions are checked only
+ * to prove the still-deployed manual transition has not silently drifted. Once trusted
+ * control-plane configuration is explicitly migrated, this compatibility check can be
+ * removed in the activation slice together with its tests.
+ */
+export function planOuterTest(layout: Layout, repoId: string, profileName = "unit-selfhost"): OuterTestPlan {
+  const unitSelfhostExcluded = readTestExclusions(layout, repoId, profileName);
+  const expectedLegacy = Object.keys(LEGACY_HOST_ADAPTERS).sort();
+  const observed = [...new Set(unitSelfhostExcluded)].sort();
+  if (observed.length !== expectedLegacy.length || observed.some((file, index) => file !== expectedLegacy[index])) {
+    throw new ProfileError(
+      "PROFILE_NOT_FOUND",
+      `${profileName} profile exclude set 与已批准的 host-suite transition 不一致；检测到 profile drift，拒绝继续。`,
     );
   }
 
-  const reasons = new Map<string, string>();
-  for (const f of files) {
-    const reason = WHY[f];
-    if (reason === undefined) {
-      throw new ProfileError(
-        "PROFILE_NOT_FOUND",
-        `${profileName} 排除了 ${f}，但 outer-test 的 WHY 表没有登记理由。` +
-          `这通常表示生产 profile 已发生漂移；请先确认为什么该测试不能在 selfhost 沙箱中运行，再登记理由。`,
-      );
-    }
-    reasons.set(f, reason);
-  }
-  return { files, reasons, fromProfile: profileName };
+  validateHostCoverage({
+    allProjectTests: TRUSTED_HOST_MANIFEST.map((entry) => entry.file),
+    unitSelfhostExcluded,
+  });
+
+  const files = hostFilesForLevel("full");
+  const reasons = new Map(
+    TRUSTED_HOST_MANIFEST
+      .filter((entry) => files.includes(entry.file))
+      .map((entry) => [entry.file, entry.reason] as const),
+  );
+  return { files, reasons, fromProfile: profileName, unitSelfhostExcluded };
 }

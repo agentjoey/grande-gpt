@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { beginAudit, type AuditHandle } from "./audit.ts";
 import { err, ok } from "./envelope.ts";
 import { StateError, redact, toToolError } from "./errors.ts";
 import { basicCredential, GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
+import { safeGit } from "./gitExec.ts";
 import { assertTaskBranch } from "./commit.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
@@ -11,15 +11,16 @@ export interface PushResult {
   branch: string;
   commit: string;
   remoteDefaultBranch: string;
+  observedAfterWriteFailure?: boolean;
+  existingRemote?: boolean;
 }
 
 type GithubGit = (cwd: string, args: string[], token: string) => string;
 
 /**
- * S3 的每一条 git 调用都必须经过这一个前缀。
- *
- * `Basic` 而不是 `Bearer` —— 见 `githubAuth.ts` 的 `basicCredential()`，
- * 那里记着实测判决与「为什么测试全绿却从未推成功」。
+ * Compatibility helper retained for existing contract tests. Production GitHub
+ * execution goes through safeGit.github so credential, trace, timeout, and
+ * output policy live in one execution boundary.
  */
 export function githubGitArgv(args: string[], token: string): string[] {
   return [
@@ -32,15 +33,9 @@ export function githubGitArgv(args: string[], token: string): string[] {
 
 const runGithubGit: GithubGit = (cwd, args, token) => {
   try {
-    return execFileSync("git", githubGitArgv(args, token), {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    return safeGit.github(cwd, args, token);
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    const raw = e.stderr ? String(e.stderr).trim() : e.message;
-    const detail = redactToken(raw, token);
+    const detail = redactToken(error instanceof Error ? error.message : String(error), token);
     if (/\b(?:401|403)\b|bad credentials|authentication failed|expired/i.test(detail)) {
       throw new StateError(
         "INVALID_INPUT",
@@ -60,6 +55,15 @@ function defaultBranchFromLsRemote(output: string): string {
     "INVALID_INPUT",
     "无法从 `git ls-remote --symref origin HEAD` 解析 remote 默认分支；请确认 origin 可达且已设置 HEAD。",
   );
+}
+
+function remoteBranchHead(output: string, branch: string): string | null {
+  const expectedRef = `refs/heads/${branch}`;
+  for (const line of output.split(/\r?\n/)) {
+    const [sha, ref] = line.trim().split(/\s+/u);
+    if (ref === expectedRef && typeof sha === "string" && /^[0-9a-f]{40}$/u.test(sha)) return sha;
+  }
+  return null;
 }
 
 function rethrowRedacted(error: unknown, token: string): never {
@@ -91,11 +95,9 @@ export function pushTask(deps: ToolDeps, taskId: string, git: GithubGit = runGit
   try {
     const target = task.branch;
 
-    // 判据①：唯一允许的命名空间。未知分支一律 fail closed。
     if (!target.startsWith("grande/") || target.length <= "grande/".length) {
       throw new StateError("POLICY_DENIED", `拒绝 push 分支 ${target}：目标必须匹配 grande/* 白名单。`);
     }
-    // 判据②：目标只能来自 task.branch。这里保留显式检查，防止未来增加参数时漏掉边界。
     if (target !== task.branch) {
       throw new StateError("POLICY_DENIED", `拒绝 push：目标 ${target} 与任务分支 ${task.branch} 不一致。`);
     }
@@ -120,7 +122,6 @@ export function pushTask(deps: ToolDeps, taskId: string, git: GithubGit = runGit
     const remoteDefaultBranch = defaultBranchFromLsRemote(
       git(task.worktreePath, ["ls-remote", "--symref", "origin", "HEAD"], token),
     );
-    // 判据③：即使默认分支也恰好叫 grande/*，仍然绝不直推。
     if (target === remoteDefaultBranch) {
       throw new StateError(
         "POLICY_DENIED",
@@ -128,14 +129,40 @@ export function pushTask(deps: ToolDeps, taskId: string, git: GithubGit = runGit
       );
     }
 
-    // 不提供 --force；source 固定为刚验证过的 SHA，destination 固定为 task.branch。
-    // 这同时消除 branch guard 与 push 之间发生 HEAD 变化时的 TOCTOU 歧义。
-    git(
-      task.worktreePath,
-      ["push", "origin", `${head}:refs/heads/${target}`],
-      token,
+    // Observe exact remote state before every write attempt. This makes a later
+    // invocation safe even if an earlier push succeeded remotely but both its
+    // response and the immediate post-write observation were lost.
+    const existingRemoteHead = remoteBranchHead(
+      git(task.worktreePath, ["ls-remote", "--heads", "origin", `refs/heads/${target}`], token),
+      target,
     );
-    return { branch: target, commit: head, remoteDefaultBranch };
+    if (existingRemoteHead === head) {
+      return { branch: target, commit: head, remoteDefaultBranch, existingRemote: true };
+    }
+
+    try {
+      git(
+        task.worktreePath,
+        ["push", "origin", `${head}:refs/heads/${target}`],
+        token,
+      );
+      return { branch: target, commit: head, remoteDefaultBranch };
+    } catch (writeError) {
+      // A transport failure may happen after the remote ref was already updated.
+      // Observe the exact task ref once; never issue a second push from this path.
+      try {
+        const observed = remoteBranchHead(
+          git(task.worktreePath, ["ls-remote", "--heads", "origin", `refs/heads/${target}`], token),
+          target,
+        );
+        if (observed === head) {
+          return { branch: target, commit: head, remoteDefaultBranch, observedAfterWriteFailure: true };
+        }
+      } catch {
+        // External state could not be confirmed; preserve the original write failure.
+      }
+      throw writeError;
+    }
   } catch (error) {
     rethrowRedacted(error, token);
   }
@@ -174,7 +201,11 @@ export function createPushTool(deps: ToolDeps): ToolDef {
           structuredContent: ok({
             taskId,
             data: result,
-            hint: `任务 ${taskId} 的 ${result.branch} 已推送到 origin（${result.commit}）。`,
+            hint: result.observedAfterWriteFailure
+              ? `push 响应丢失后已重新读取 origin/${result.branch}，确认其等于 ${result.commit}；未重复 push。`
+              : result.existingRemote
+                ? `origin/${result.branch} 已经等于 ${result.commit}；本次只观察，没有重复 push。`
+                : `任务 ${taskId} 的 ${result.branch} 已推送到 origin（${result.commit}）。`,
             taskContext: {
               branch: task.branch,
               filesChanged: 0,

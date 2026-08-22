@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { dirname } from "node:path";
 import type { AuditHandle } from "./audit.ts";
 import { createCheckpoint, restoreCheckpoint } from "./checkpoint.ts";
-import { truncateText } from "./envelope.ts";
 import type { Layout } from "./layout.ts";
 import { resolveInRepo } from "./paths.ts";
 import { assertWritable, assertWritableResolved, type DenyRules } from "./policy.ts";
@@ -20,6 +19,8 @@ export class EditError extends Error {
 
 export interface ReadResult {
   truncated: boolean;
+  nextLine: number | null;
+  lastLineTruncated: boolean;
   path: string;
   sha256: string;
   bytes: number;
@@ -27,8 +28,9 @@ export interface ReadResult {
   content: string;
 }
 
-const DEFAULT_MAX_BYTES = 64 * 1024;
-const MAX_READ_BYTES = 8 * 1024 * 1024;
+export const DEFAULT_REPO_READ_BYTES = 16 * 1024;
+export const MAX_REPO_READ_BYTES = 24 * 1024;
+const MAX_FILE_BYTES = 8 * 1024 * 1024;
 
 function sha256Of(s: string): string {
   return createHash("sha256").update(s, "utf8").digest("hex");
@@ -76,6 +78,13 @@ export function repoRead(
   relativePath: string,
   opts?: { maxBytes?: number; lineRange?: [number, number] },
 ): ReadResult {
+  const maxBytes = opts?.maxBytes ?? DEFAULT_REPO_READ_BYTES;
+  if (!Number.isInteger(maxBytes) || maxBytes <= 0 || maxBytes > MAX_REPO_READ_BYTES) {
+    throw new EditError(
+      "INVALID_INPUT",
+      `maxBytes 必须是 1..${MAX_REPO_READ_BYTES} 的整数，收到：${String(maxBytes)}`,
+    );
+  }
   const abs = resolveInRepo(root, relativePath);
   if (!existsSync(abs) || !statSync(abs).isFile()) {
     throw new EditError("FILE_NOT_FOUND", `文件不存在：${relativePath}`);
@@ -85,8 +94,8 @@ export function repoRead(
   // 校验哈希的是同一个解码结果 —— sha256 会「对得上」，modify 于是放行，二进制文件
   // 被一堆 U+FFFD 覆盖。S0 没有 Checkpoint（§5.3），这一步不可逆。
   const raw = readFileSync(abs);
-  if (raw.byteLength > MAX_READ_BYTES) {
-    throw new EditError("INVALID_INPUT", `${relativePath} 超过 ${MAX_READ_BYTES} 字节，拒绝整文件读入`);
+  if (raw.byteLength > MAX_FILE_BYTES) {
+    throw new EditError("INVALID_INPUT", `${relativePath} 超过 ${MAX_FILE_BYTES} 字节，拒绝整文件读入`);
   }
   if (isBinary(raw)) {
     throw new EditError(
@@ -97,28 +106,71 @@ export function repoRead(
   const full = raw.toString("utf8");
   const digest = sha256OfBuffer(raw);
   const lines = full.split("\n");
+  const actualTotalLines = lines.length - (full.endsWith("\n") ? 1 : 0);
 
   let body = full;
   let truncated = false;
+  let startLine = 1;
+  let endLine = actualTotalLines;
   if (opts?.lineRange) {
     const [from, to] = opts.lineRange;
     if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to < from) {
       throw new EditError("INVALID_INPUT", `lineRange 非法：[${from}, ${to}]`);
     }
-    body = lines.slice(from - 1, to).join("\n");
+    startLine = from;
+    endLine = Math.min(to, actualTotalLines);
+    const hasSelectedLines = from <= endLine;
+    body = lines.slice(from - 1, endLine).join("\n");
+    // A continuation starts at the following line, so this page must keep the
+    // source delimiter after its final selected line when one exists.
+    if (hasSelectedLines && (endLine < actualTotalLines || full.endsWith("\n"))) body += "\n";
     // full.split("\n") 在文件以换行结尾时会多出一个幻影空行（"a\n".split("\n") ===
     // ["a", ""]）；不扣掉它，读到真正的文件末尾也会被误判成 truncated。
-    truncated = from > 1 || to < lines.length - (full.endsWith("\n") ? 1 : 0);
+    truncated = from > 1 || to < actualTotalLines;
   }
 
-  const capped = truncateText(body, opts?.maxBytes ?? DEFAULT_MAX_BYTES);
+  // Page only at source-line boundaries. Byte truncation inside a line loses data:
+  // a continuation can address only line numbers, so advancing nextLine after a
+  // partial line silently skips its suffix. Count each line together with its
+  // newline delimiter so concatenating all pages recreates the selected bytes.
+  let pageEnd = 0;
+  let returnedLines = 0;
+  let returnedBytes = 0;
+  while (pageEnd < body.length) {
+    const newline = body.indexOf("\n", pageEnd);
+    const lineEnd = newline === -1 ? body.length : newline + 1;
+    const lineBytes = Buffer.byteLength(body.slice(pageEnd, lineEnd), "utf8");
+    if (returnedBytes + lineBytes > maxBytes) {
+      if (returnedLines === 0) {
+        throw new EditError(
+          "INVALID_INPUT",
+          `${relativePath} 第 ${startLine} 行为 ${lineBytes} 个 UTF-8 字节（包括换行边界），` +
+            `超过 maxBytes=${maxBytes}；repo_read 只能返回完整行，且 maxBytes 硬上限为 ` +
+            `${MAX_REPO_READ_BYTES}。请缩小/调整 lineRange，无法用 nextLine 跳过该行后缀。`,
+        );
+      }
+      break;
+    }
+    returnedBytes += lineBytes;
+    pageEnd = lineEnd;
+    returnedLines++;
+  }
+
+  const content = body.slice(0, pageEnd);
+  const budgetTruncated = pageEnd < body.length;
+  const nextCandidate = budgetTruncated
+    ? startLine + returnedLines
+    : endLine + 1;
+  const nextLine = nextCandidate <= actualTotalLines ? nextCandidate : null;
   return {
-    truncated: truncated || capped.truncated,
+    truncated: truncated || budgetTruncated,
+    nextLine,
+    lastLineTruncated: false,
     path: relativePath,
     sha256: digest,
     bytes: raw.byteLength,
     totalLines: lines.length,
-    content: capped.text,
+    content,
   };
 }
 

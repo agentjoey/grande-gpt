@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -105,5 +105,25 @@ describe("grande_task_open guidance", () => {
 
     expect(result.ok).toBe(true);
     expect(result.data).not.toHaveProperty("guidance");
+  });
+});
+
+describe("reliability documentation contract", () => {
+  it("keeps GG-BL-010 open until the bounded two-task ChatGPT gate passes", () => {
+    const backlog = readFileSync("docs/BACKLOG.md", "utf8");
+    const design = readFileSync(
+      "docs/superpowers/specs/2026-08-21-grande-gpt-reliability-and-automated-host-verifier-design.md",
+      "utf8",
+    );
+    const incident = backlog.match(/### GG-BL-010[\s\S]*?(?=\n### |\s*$)/)?.[0] ?? "";
+    const currentDocs = `${backlog}\n${design}`;
+
+    expect.soft(incident).toMatch(/\*\*Priority\*\*: P0/);
+    expect.soft(incident).toMatch(/\*\*Status\*\*: OPEN/);
+    expect.soft(incident).toMatch(/\*\*Done when\*\*:[\s\S]*同一.*ChatGPT.*会话[\s\S]*两个.*用户任务/);
+    expect.soft(design).toMatch(/异步 job[\s\S]*保持异步[\s\S]*status.*轮询[\s\S]*(有界|合并|coalesc)/i);
+    expect.soft(currentDocs).not.toMatch(
+      /256(?:\s*(?:次|tool calls?))?[^。;\n]{0,120}(?:(?<!不)(?:是|为)|\b(?:is|are)\b)[^。;\n]{0,40}(?:已确认|confirmed)[^。;\n]{0,40}(?:配额|quota)/i,
+    );
   });
 });

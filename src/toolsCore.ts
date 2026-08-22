@@ -6,9 +6,9 @@ import { registeredIds } from "./registry.ts";
 import { getTask, listActiveTasks, createTask, updateTaskState } from "./tasks.ts";
 import { loadProfiles } from "./profiles.ts";
 import { getJob, listJobs, TERMINAL } from "./jobs.ts";
+import { JOB_RESULT_WAIT_MS, waitForTerminalJob } from "./jobWait.ts";
 import { jobReport, jobStateToError, startJob } from "./runner.ts";
-import { repoRead } from "./repoFile.ts";
-import { repoEdit, type EditOp } from "./repoFile.ts";
+import { DEFAULT_REPO_READ_BYTES, repoEdit, repoRead, type EditOp } from "./repoFile.ts";
 import { repoSearch } from "./repoSearch.ts";
 import { repoMap } from "./repoMap.ts";
 import { listChangedFiles, repoDiff, openWorktree, removeWorktree } from "./worktree.ts";
@@ -145,6 +145,19 @@ function wrap(deps: ToolDeps, taskId: string | null, fn: () => unknown): { struc
       te.details.activeTasks = listActiveTasks(deps.db).map(activeTaskSummary);
     }
     return { structuredContent: err({ ...te, taskId }) };
+  }
+}
+
+async function wrapAsync(
+  deps: ToolDeps,
+  taskId: string | null,
+  fn: () => Promise<unknown>,
+): Promise<{ structuredContent: unknown }> {
+  try {
+    const data = await fn();
+    return wrap(deps, taskId, () => data);
+  } catch (error) {
+    return wrap(deps, taskId, () => { throw error; });
   }
 }
 
@@ -289,7 +302,8 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
     {
       name: "grande_repo_search",
-      description: "在仓库中搜索字面量（非正则），返回匹配行与上下文，支持分页与时间预算。" +
+      description: "在仓库中搜索字面量（非正则），返回匹配行与上下文，支持分页与时间预算；" +
+        "默认 20 条、硬上限 25 条，序列化 SearchResult 硬上限 16 KiB。" +
         "带 taskId 时搜索该任务的 worktree（能搜到你自己刚写入的改动）；不带 taskId 时按" +
         "repoId（或端点默认仓库）搜索 canonical，两者都没有则报错并列出已注册仓库。",
       inputSchema: {
@@ -334,7 +348,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
     {
       name: "grande_repo_read",
-      description: "读取仓库内文件内容，支持行区间与字节上限。" +
+      description: "读取仓库内文件内容，支持行区间与字节上限；默认 16 KiB，硬上限 24 KiB。" +
         "带 taskId 时读取该任务的 worktree（能看到你自己刚写入的改动）；不带 taskId 时按" +
         "repoId（或端点默认仓库）读取 canonical，两者都没有则报错并列出已注册仓库。",
       inputSchema: {
@@ -372,11 +386,24 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             maxBytes: args.maxBytes as number | undefined,
             lineRange,
           });
+          const maxBytes = (args.maxBytes as number | undefined) ?? DEFAULT_REPO_READ_BYTES;
+          const returnedBytes = Buffer.byteLength(r.content, "utf8");
+          const continuationArgs: Record<string, unknown> = {
+            path: r.path,
+            lineRange: [r.nextLine, r.totalLines],
+            maxBytes,
+          };
+          if (args.taskId !== undefined) continuationArgs.taskId = args.taskId;
+          else if (args.repoId !== undefined) continuationArgs.repoId = args.repoId;
           return ok({
+            taskId: (args.taskId as string) ?? null,
             data: r,
-            hint: r.truncated
-              ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），内容已截断（返回了 ${Buffer.byteLength(r.content, "utf8")} 字节）`
-              : `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节）`,
+            hint: r.nextLine !== null
+              ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），内容未完整返回（本页 ${returnedBytes} 字节）` +
+                `；本页仅含完整 UTF-8 行；续取请调用 grande_repo_read(${JSON.stringify(continuationArgs)})`
+              : r.truncated
+                ? `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节），本次请求已到文件末尾，没有后续行`
+                : `文件 ${r.path}（${r.totalLines} 行，${r.bytes} 字节）`,
               truncated: r.truncated,
             });
           }),
@@ -684,9 +711,13 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
           required: ["jobId"],
         },
         annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
-        handler: async (args) =>
-          wrap(deps, null, () => {
+        handler: (args) =>
+          wrapAsync(deps, null, async () => {
             const jobId = args.jobId as string;
+            const initialJob = getJob(db, jobId);
+            if (initialJob && !TERMINAL.has(initialJob.state)) {
+              await waitForTerminalJob(db, jobId);
+            }
             const r = jobReport(db, jobId);
             const j = getJob(db, jobId);
             const taskId = j?.taskId ?? null;
@@ -701,11 +732,12 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
               // 的话，新增的非终态会掉进下面那条分支，模型读到「状态：<非终态>」
               // 会当作已结束——**而 P-1 的自主轮询正是靠这句 hint 决定要不要再取一次**。
               hint: !TERMINAL.has(r.state)
-                ? `Job ${jobId} 仍在运行中`
+                ? `本次调用已等待 ${JOB_RESULT_WAIT_MS / 1000} 秒，Job ${jobId} 仍在运行中；` +
+                  `请等待 grande_run 返回的 pollAfterSeconds 后再调用 grande_run_result`
                 : `Job ${jobId} 状态：${r.state}${r.exitCode !== null ? `，exitCode: ${r.exitCode}` : ""}${r.networkDenied ? "（疑似网络被拒——启发式判定，非沙箱权威信号）" : ""}`,
               truncated: r.truncated,
               taskContext: taskId ? makeTaskContext(db, layout, taskId) : null,
-            })
+            });
           }),
       },
       {

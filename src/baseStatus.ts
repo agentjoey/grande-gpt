@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { GitExecError, safeGit } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
 import { registeredIds } from "./registry.ts";
 import { resolveRepoPath } from "./paths.ts";
@@ -10,33 +10,26 @@ export interface BaseStatus {
   diverged: boolean | null;
 }
 
-/** 本模块每一条 git 调用都使用 argv，并无条件禁用仓库 hooks。 */
+function gitDetail(error: unknown): string {
+  if (error instanceof GitExecError) return error.message.replace(/^git failed:\s*/u, "");
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** 本模块每一条 git 调用都通过 Safe Git，并无条件禁用仓库 hooks。 */
 function git(cwd: string, args: string[]): string {
   try {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    return safeGit.local(cwd, args);
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    const detail = e.stderr ? String(e.stderr).trim() : e.message;
-    throw new GitError("GIT_FAILED", `git ${args[0] ?? "命令"} 失败：${detail}`);
+    throw new GitError("GIT_FAILED", `git ${args[0] ?? "命令"} 失败：${gitDetail(error)}`);
   }
 }
 
 function canonicalHead(canonicalPath: string): string | null {
   try {
-    execFileSync(
-      "git",
-      ["-c", "core.hooksPath=/dev/null", "symbolic-ref", "-q", "--short", "HEAD"],
-      { cwd: canonicalPath, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
+    safeGit.local(canonicalPath, ["symbolic-ref", "-q", "--short", "HEAD"]);
   } catch (error) {
-    const e = error as { status?: number; stderr?: Buffer | string; message: string };
-    if (e.status === 1) return null;
-    const detail = e.stderr ? String(e.stderr).trim() : e.message;
-    throw new GitError("GIT_FAILED", `git symbolic-ref 失败：${detail}`);
+    if (error instanceof GitExecError && error.status === 1) return null;
+    throw new GitError("GIT_FAILED", `git symbolic-ref 失败：${gitDetail(error)}`);
   }
   return git(canonicalPath, ["rev-parse", "HEAD"]).trim();
 }

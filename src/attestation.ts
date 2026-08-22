@@ -3,8 +3,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import type { Layout } from "./layout.ts";
 import { StateError } from "./errors.ts";
+import { GitExecError, safeGit } from "./gitExec.ts";
+import type { Layout } from "./layout.ts";
 import { GitError } from "./worktree.ts";
 
 export interface HostToolchain {
@@ -46,18 +47,25 @@ export type CandidateResult =
   | { issued: true; candidate: AttestationCandidate }
   | { issued: false; reason: string };
 
+function gitDetail(error: unknown): string {
+  if (error instanceof GitExecError) return error.message.replace(/^git failed:\s*/u, "");
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** 所有本模块 git 调用都无条件禁用 hooks，并且只用 argv 数组。 */
 function git(cwd: string, args: string[]): string {
   try {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    return safeGit.local(cwd, args);
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    const detail = e.stderr ? String(e.stderr).trim() : e.message;
-    throw new GitError("GIT_FAILED", `git ${args[0] ?? "命令"} 失败：${detail}`);
+    throw new GitError("GIT_FAILED", `git ${args[0] ?? "命令"} 失败：${gitDetail(error)}`);
+  }
+}
+
+function gitDiff(cwd: string, args: string[]): string {
+  try {
+    return safeGit.diff(cwd, args);
+  } catch (error) {
+    throw new GitError("GIT_FAILED", `git diff 失败：${gitDetail(error)}`);
   }
 }
 
@@ -75,7 +83,7 @@ export function workspaceDigest(worktreePath: string): string {
   hash.update(head, "utf8");
   hash.update("\0", "utf8");
 
-  const tracked = git(worktreePath, ["diff", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"]);
+  const tracked = gitDiff(worktreePath, ["diff", "--binary", "HEAD", "--"]);
   hash.update("tracked\0", "utf8");
   hash.update(tracked, "utf8");
 

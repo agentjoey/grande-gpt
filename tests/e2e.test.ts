@@ -78,6 +78,7 @@ fi`,
     "repos:\n  demo:\n" +
     `    fail: { argv: ["/bin/sh", "-c", "echo boom >&2; exit 1"], timeoutSeconds: 30 }\n` +
     `    ok: { argv: ["/bin/sh", "-c", "echo hello; exit 0"], timeoutSeconds: 30 }\n` +
+    `    short: { argv: ["/bin/sh", "-c", "sleep 0.2; echo ONE CALL TERMINAL; exit 0"], timeoutSeconds: 30 }\n` +
     // 用**相对**路径：cwd 就是任务 worktree，脚本随 git worktree add 一起检出到那里。
     // 此前写的是 canonical 的绝对路径，在「读无条件放行」的旧策略下侥幸能跑；读改成
     // 白名单之后 canonical 对沙箱不可见，`/bin/sh` 打不开脚本、退出码 126。
@@ -226,6 +227,19 @@ describe("E2E：完整工具闭环", () => {
     expect(r.data).toBeDefined();
   }, 20_000);
 
+  it("grande_run 后只调用一次 grande_run_result 就取得短任务的终态", async () => {
+    const run = await callTool("grande_run", { taskId: "task_e2e", profile: "short" });
+    const jobId = (run.data as Record<string, unknown>).jobId as string;
+    started.push(jobId);
+
+    const result = await callTool("grande_run_result", { jobId });
+
+    expect(result.ok).toBe(true);
+    expect((result.data as Record<string, unknown>).state).toBe("passed");
+    expect((result.data as Record<string, unknown>).exitCode).toBe(0);
+    expect((result.data as Record<string, unknown>).summary).toContain("ONE CALL TERMINAL");
+  }, 20_000);
+
   it("写工具信封正确且 taskId 在全链路中保持一致", async () => {
     // task_open
     const r1 = await callTool("grande_task_open", { taskId: "task_e2e_w1", slug: "write-chain", repoId: "demo" });
@@ -320,6 +334,46 @@ describe("E2E：完整工具闭环", () => {
     expect(r.ok).toBe(true);
     const matches = (r.data as Record<string, unknown>).matches as Array<unknown>;
     expect(matches.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("repo_search 在真实工具边界按 16 KiB 分页，逐页续取不会重复或跳过匹配", async () => {
+    const worktree = join(layout.worktreesRoot, "demo", "task_e2e");
+    const expectedPaths: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const path = `budget-${String(i).padStart(2, "0")}.ts`;
+      expectedPaths.push(path);
+      writeFileSync(
+        join(worktree, path),
+        `before-${i}\nBUDGET_NEEDLE-${i}-${"界".repeat(1_600)}\nafter-${i}\n`,
+        "utf8",
+      );
+    }
+
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < 30; page++) {
+      const r = await callTool("grande_repo_search", {
+        pattern: "BUDGET_NEEDLE",
+        maxMatches: 25,
+        taskId: "task_e2e",
+        ...(cursor === null ? {} : { cursor }),
+      });
+      expect(r.ok).toBe(true);
+      const data = r.data as {
+        matches: Array<{ path: string }>;
+        truncated: boolean;
+        nextCursor: string | null;
+      };
+      expect(Buffer.byteLength(JSON.stringify(data), "utf8")).toBeLessThanOrEqual(16 * 1024);
+      seen.push(...data.matches.map((match) => match.path));
+      if (!data.truncated) break;
+      expect(data.nextCursor).toMatch(/^v2:/);
+      expect(data.nextCursor).not.toBe(cursor);
+      cursor = data.nextCursor;
+    }
+
+    expect(seen).toEqual(expectedPaths);
+    expect(new Set(seen).size).toBe(seen.length);
   });
 });
 

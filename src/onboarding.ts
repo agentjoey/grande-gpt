@@ -1,8 +1,8 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse, stringify } from "yaml";
 import { inspectCanonicalGitState, type CanonicalGitState } from "./canonicalGit.ts";
+import { safeGit } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { parseGithubRemote } from "./prOpen.ts";
@@ -36,11 +36,7 @@ export interface OnboardingInspectOptions {
 
 function defaultReadRemote(repoPath: string): string | null {
   try {
-    return execFileSync("git", ["-c", "core.hooksPath=/dev/null", "remote", "get-url", "origin"], {
-      cwd: repoPath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim() || null;
+    return safeGit.local(repoPath, ["remote", "get-url", "origin"]).trim() || null;
   } catch {
     return null;
   }

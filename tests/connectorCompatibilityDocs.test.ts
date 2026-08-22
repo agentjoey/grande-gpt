@@ -37,4 +37,28 @@ describe("ChatGPT connector compatibility operational contract", () => {
     expect(text).toContain("ChatGPT session binding");
     expect(text).toContain("server-side");
   });
+
+  it("records exact candidate host evidence and a fail-closed epoch-2 pre-deploy identity gate", () => {
+    const backlog = read("docs/BACKLOG.md");
+    const runbook = read("docs/chatgpt-connector-compatibility-runbook.md");
+    const candidateCommit = "7b98f7dce2f0b10723b29be64ca28e1438f1a779";
+
+    for (const text of [backlog, runbook]) {
+      expect(text).toContain(candidateCommit);
+      expect(text).toMatch(/5 files\s*\/\s*160 tests/i);
+    }
+
+    expect(runbook).toMatch(/切换代码前[\s\S]{0,500}gatewayBuild[\s\S]{0,300}toolsetEpoch[\s\S]{0,300}toolsCount[\s\S]{0,300}toolsDigest/);
+    expect(runbook).toContain("candidate-on-production-state");
+    expect(runbook).toMatch(/candidate[\s\S]{0,240}production[\s\S]{0,240}(?:toolsetEpoch|toolsCount|toolsDigest)/i);
+    expect(runbook).not.toMatch(/只有 production `toolsDigest` 精确等于/);
+    expect(runbook).toMatch(/不一致[\s\S]{0,300}(?:停止|abort)[\s\S]{0,300}(?:reconcile|对账|授权)/i);
+    expect(runbook).toContain("JSON.stringify(toMcpTextResult(envelope))");
+    expect(runbook).toMatch(/SDK-generated[\s\S]{0,160}outputBytes=unknown/i);
+
+    const incident = backlog.match(/### GG-BL-010[\s\S]*?(?=\n### |\s*$)/)?.[0] ?? "";
+    expect(incident).toMatch(/\*\*Status\*\*: OPEN/);
+    expect(incident).toMatch(/部署[\s\S]{0,160}待完成/);
+    expect(incident).toMatch(/Web[\s\S]{0,160}iOS[\s\S]{0,160}待完成/);
+  });
 });

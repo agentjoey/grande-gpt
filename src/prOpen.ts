@@ -1,11 +1,10 @@
-import { execFileSync } from "node:child_process";
 import { getAttestations } from "./attestation.ts";
 import { beginAudit, type AuditHandle } from "./audit.ts";
 import { err, ok } from "./envelope.ts";
 import { StateError, redact, toToolError } from "./errors.ts";
 import { createGithubApi, GithubApiError, type GithubApi } from "./githubApi.ts";
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
-import { githubGitArgv } from "./push.ts";
+import { safeGit } from "./gitExec.ts";
 import { assertTaskBranch } from "./commit.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
@@ -23,14 +22,9 @@ export interface PrOpenToolOptions {
 
 function git(worktreePath: string, args: string[], token: string): string {
   try {
-    return execFileSync("git", githubGitArgv(args, token), {
-      cwd: worktreePath,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    return safeGit.github(worktreePath, args, token);
   } catch (error) {
-    const e = error as { stderr?: Buffer | string; message: string };
-    const detail = redactToken(e.stderr ? String(e.stderr).trim() : e.message, token);
+    const detail = redactToken(error instanceof Error ? error.message : String(error), token);
     throw new StateError("INVALID_INPUT", `git ${args[0] ?? "命令"} 失败：${detail}`);
   }
 }
@@ -193,28 +187,47 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
           .find((candidate) => candidate.commit === remote.commit)?.attestationId ?? "none";
         const trustedBody = buildPullRequestBody(body, taskId, attestationId, remote.commit);
 
-        // S6：非 Draft 是固定策略，不读取调用方 draft 参数；旧 S3 的人工 Ready 断点在此被移除。
-        const created = await api.createPullRequest({
-          owner,
-          repo,
-          head: task.branch,
-          base: remote.defaultBranch,
-          title,
-          body: trustedBody,
-          draft: false,
-        });
+        let created: { number: number; url: string };
+        let observedAfterWriteFailure = false;
+        try {
+          created = await api.createPullRequest({
+            owner,
+            repo,
+            head: task.branch,
+            base: remote.defaultBranch,
+            title,
+            body: trustedBody,
+            draft: false,
+          });
+        } catch (writeError) {
+          // The create may have succeeded remotely even if its response was lost.
+          // Observe by the exact task head once; never call create a second time here.
+          let observed: { number: number; url: string } | null = null;
+          try {
+            observed = await api.findPullRequest(owner, repo, task.branch, "all");
+          } catch {
+            // Preserve the original write failure when remote state cannot be confirmed.
+          }
+          if (!observed) throw writeError;
+          created = observed;
+          observedAfterWriteFailure = true;
+        }
+
         audit.succeeded([task.worktreePath]);
         return {
           structuredContent: ok({
             taskId,
             data: {
               ...created,
-              existing: false,
+              existing: observedAfterWriteFailure,
+              observedAfterWriteFailure,
               draft: false,
               head: task.branch,
               base: remote.defaultBranch,
             },
-            hint: `任务 ${taskId} 已创建 ready PR #${created.number}；下一步读取 CI 状态。`,
+            hint: observedAfterWriteFailure
+              ? `PR create 响应丢失后已按任务 head 重新读取并确认 PR #${created.number}；未重复创建。`
+              : `任务 ${taskId} 已创建 ready PR #${created.number}；下一步读取 CI 状态。`,
             taskContext: { branch: task.branch, filesChanged: 0, lastJob: null },
           }),
         };
