@@ -2,8 +2,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { beginAudit } from "../src/audit.ts";
+import { beginAudit, getAudit } from "../src/audit.ts";
 import { openDb } from "../src/db.ts";
+import { createJob } from "../src/jobs.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { projectTaskProgress } from "../src/taskProgress.ts";
 import { createTask } from "../src/tasks.ts";
@@ -66,7 +67,81 @@ const baseOptions = {
   worktreeExists: () => true,
 };
 
+const STALL_AFTER_MS = 15 * 60 * 1000;
+
 describe("task lifecycle projection", () => {
+  it("READY + 无 blocker + 无运行 job 超过 inactivity window 时显式投影 stalled，并保留唯一恢复动作", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = task(db);
+
+    const progress = projectTaskProgress(db, t, {
+      ...baseOptions,
+      deployConfigured: () => false,
+      now: () => t.updatedAt + STALL_AFTER_MS,
+      stallAfterMs: STALL_AFTER_MS,
+    });
+
+    expect(progress.blocker).toBeNull();
+    expect(progress.phase).toBe("tests");
+    expect(progress.liveness).toMatchObject({
+      state: "stalled",
+      progressAt: t.updatedAt,
+      inactiveForMs: STALL_AFTER_MS,
+      stallAfterMs: STALL_AFTER_MS,
+      phase: "tests",
+      nextAction: progress.nextAction,
+    });
+    db.close();
+  });
+
+  it("存在非终态 job 时无论 age 多久都不误报 stalled", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = task(db);
+    const job = createJob(db, {
+      jobId: "job-running",
+      taskId: t.taskId,
+      profile: "unit",
+      argv: [],
+      pgid: null,
+    });
+
+    const progress = projectTaskProgress(db, t, {
+      ...baseOptions,
+      deployConfigured: () => false,
+      now: () => job.startedAt + 10 * STALL_AFTER_MS,
+      stallAfterMs: STALL_AFTER_MS,
+    });
+
+    expect(progress.stages.tests.state).toBe("running");
+    expect(progress.liveness.state).toBe("active");
+    expect(progress.liveness.progressAt).toBe(job.startedAt);
+    db.close();
+  });
+
+  it("成功 write audit 会推进 progressAt；只读 status 本身不需要写 heartbeat", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = task(db);
+    const audit = beginAudit(db, { taskId: t.taskId, tool: "grande_repo_edit", input: { path: "a.ts" } });
+    expect(audit.allowed()).toBe(true);
+    expect(audit.executing()).toBe(true);
+    expect(audit.succeeded(["a.ts"])).toBe(true);
+    const auditRow = getAudit(db, audit.opId)!;
+
+    const progress = projectTaskProgress(db, t, {
+      ...baseOptions,
+      deployConfigured: () => false,
+      now: () => auditRow.updatedAt + STALL_AFTER_MS - 1,
+      stallAfterMs: STALL_AFTER_MS,
+    });
+
+    expect(progress.liveness.state).toBe("active");
+    expect(progress.liveness.progressAt).toBe(Math.max(t.updatedAt, auditRow.updatedAt));
+    db.close();
+  });
+
   it("无 deploy 配置时，merge gate + 当前 SHA attestation 足以投影 DONE，但 cleanup 仍必须显式 task_close", () => {
     const layout = loadLayout();
     const db = openDb(layout);

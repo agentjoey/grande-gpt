@@ -119,6 +119,9 @@ function cmdStatus(out: (l: string) => void): number {
       try {
         const progress = projectTaskProgress(db, t);
         out(`  progress  ${compactTaskProgress(progress)}`);
+        if (progress.liveness.state === "stalled") {
+          out(`  liveness  STALLED — ${Math.floor(progress.liveness.inactiveForMs / 60000)} 分钟无有效推进`);
+        }
         if (progress.cleanupRequired) {
           out("  cleanup   ⚠ 闭环证据已完成，但 task/worktree 尚未 close；仍需 Human 显式 grande_task_close");
         }
@@ -642,7 +645,19 @@ function cmdGc(out: (l: string) => void, apply: boolean): number {
       out(`    期望路径 ${g.worktreePath}`);
     }
 
-    if (plan.orphanWorktrees.length === 0 && plan.ghostTasks.length === 0) {
+    out("");
+    out(`CLOSED task 残留 worktree：${plan.closedResidualWorktrees.length} 条`);
+    for (const residual of plan.closedResidualWorktrees) {
+      out(`  ${residual.taskId}  repo=${residual.repoId}`);
+      out(`    路径    ${residual.worktreePath}`);
+      out(`    分支    ${residual.branch}`);
+    }
+
+    if (
+      plan.orphanWorktrees.length === 0
+      && plan.ghostTasks.length === 0
+      && plan.closedResidualWorktrees.length === 0
+    ) {
       out("");
       out("一切干净，没有需要清理的东西。");
       return 0;
@@ -659,14 +674,19 @@ function cmdGc(out: (l: string) => void, apply: boolean): number {
     const result = applyGc(db, layout, plan);
     out(`  回收孤儿 worktree：${result.removed} 条`);
     out(`  关闭幽灵 task：${result.closed} 条`);
+    out(`  清理 CLOSED residual worktree：${result.reconciledClosedResiduals} 条`);
 
     const orphanSkipped = plan.orphanWorktrees.length - result.removed;
     const ghostSkipped = plan.ghostTasks.length - result.closed;
+    const residualSkipped = plan.closedResidualWorktrees.length - result.reconciledClosedResiduals;
     if (orphanSkipped > 0) {
       out(`  ⚠️  ${orphanSkipped} 条孤儿 worktree 无法回收（目录仍存在，可能是权限不足或 repo 未注册）`);
     }
     if (ghostSkipped > 0) {
       out(`  ⚠️  ${ghostSkipped} 条幽灵 task 无法关闭`);
+    }
+    if (residualSkipped > 0) {
+      out(`  ⚠️  ${residualSkipped} 条 CLOSED residual worktree 未清理（状态/path 已变化或 Git cleanup 失败）`);
     }
 
     out("完成。");

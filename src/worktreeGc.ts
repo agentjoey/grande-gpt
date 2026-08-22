@@ -13,6 +13,13 @@ import { resolveRepoPath } from "./paths.ts";
 export interface GcPlan {
   orphanWorktrees: { repoId: string; taskId: string; path: string; branch: string | null }[];
   ghostTasks: { taskId: string; repoId: string; worktreePath: string }[];
+  closedResidualWorktrees: { taskId: string; repoId: string; worktreePath: string; branch: string }[];
+}
+
+export interface GcApplyResult {
+  removed: number;
+  closed: number;
+  reconciledClosedResiduals: number;
 }
 
 /**
@@ -54,6 +61,7 @@ function parseWorktreeBranches(repoRoot: string): Map<string, string | null> {
 export function planGc(db: DatabaseSync, layout: Layout): GcPlan {
   const orphanWorktrees: GcPlan["orphanWorktrees"] = [];
   const ghostTasks: GcPlan["ghostTasks"] = [];
+  const closedResidualWorktrees: GcPlan["closedResidualWorktrees"] = [];
   const worktreesRoot = layout.worktreesRoot;
 
   if (existsSync(worktreesRoot)) {
@@ -88,16 +96,34 @@ export function planGc(db: DatabaseSync, layout: Layout): GcPlan {
   for (const t of listActiveTasks(db)) {
     if (!existsSync(t.worktreePath)) ghostTasks.push({ taskId: t.taskId, repoId: t.repoId, worktreePath: t.worktreePath });
   }
-  return { orphanWorktrees, ghostTasks };
+
+  const closedRows = db
+    .prepare("SELECT taskId FROM task WHERE state='CLOSED' ORDER BY createdAt DESC, rowid DESC")
+    .all() as { taskId: string }[];
+  for (const row of closedRows) {
+    const t = getTask(db, row.taskId);
+    if (!t) continue;
+    const expectedManagedPath = join(worktreesRoot, t.repoId, t.taskId);
+    if (t.worktreePath !== expectedManagedPath || !existsSync(t.worktreePath)) continue;
+    closedResidualWorktrees.push({
+      taskId: t.taskId,
+      repoId: t.repoId,
+      worktreePath: t.worktreePath,
+      branch: t.branch,
+    });
+  }
+
+  return { orphanWorktrees, ghostTasks, closedResidualWorktrees };
 }
 
 /**
  * 应用 GC 计划。这个同步 primitive 保留给 standalone CLI 和既有测试；Gateway 内并发
  * 写路径必须使用下面的 applyGcWithRepoWriteLocks。
  */
-export function applyGc(db: DatabaseSync, layout: Layout, plan: GcPlan): { removed: number; closed: number } {
+export function applyGc(db: DatabaseSync, layout: Layout, plan: GcPlan): GcApplyResult {
   let removed = 0;
   let closed = 0;
+  let reconciledClosedResiduals = 0;
 
   for (const o of plan.orphanWorktrees) {
     if (!existsSync(o.path)) continue;
@@ -120,7 +146,36 @@ export function applyGc(db: DatabaseSync, layout: Layout, plan: GcPlan): { remov
       .run(Date.now(), g.taskId);
     if (res.changes > 0) closed++;
   }
-  return { removed, closed };
+
+  for (const residual of plan.closedResidualWorktrees) {
+    const current = getTask(db, residual.taskId);
+    const expectedManagedPath = join(layout.worktreesRoot, residual.repoId, residual.taskId);
+    // plan 可能已经 stale：apply 时再次证明仍然 CLOSED、仍指向同一受管 task path。
+    if (
+      !current
+      || current.state !== "CLOSED"
+      || current.repoId !== residual.repoId
+      || current.worktreePath !== residual.worktreePath
+      || current.worktreePath !== expectedManagedPath
+      || !existsSync(current.worktreePath)
+    ) {
+      continue;
+    }
+    try {
+      removeWorktree(layout, {
+        repoId: current.repoId,
+        worktreePath: current.worktreePath,
+        branch: current.branch,
+      });
+      reconciledClosedResiduals++;
+    } catch {
+      // 与 orphan 路径保持同一计数语义：worktree 已删、仅 branch cleanup 报错时，
+      // 仍算 residual worktree 已成功对账；目录仍在则 fail-closed，不谎报成功。
+      if (!existsSync(current.worktreePath)) reconciledClosedResiduals++;
+    }
+  }
+
+  return { removed, closed, reconciledClosedResiduals };
 }
 
 /**
@@ -132,19 +187,25 @@ export async function applyGcWithRepoWriteLocks(
   db: DatabaseSync,
   layout: Layout,
   plan: GcPlan,
-): Promise<{ removed: number; closed: number }> {
+): Promise<GcApplyResult> {
   const repoIds = [...new Set([
     ...plan.orphanWorktrees.map((item) => item.repoId),
     ...plan.ghostTasks.map((item) => item.repoId),
+    ...plan.closedResidualWorktrees.map((item) => item.repoId),
   ])].sort();
   const results = await Promise.all(repoIds.map((repoId) =>
     withRepoWriteLock(repoId, () => applyGc(db, layout, {
       orphanWorktrees: plan.orphanWorktrees.filter((item) => item.repoId === repoId),
       ghostTasks: plan.ghostTasks.filter((item) => item.repoId === repoId),
+      closedResidualWorktrees: plan.closedResidualWorktrees.filter((item) => item.repoId === repoId),
     })),
   ));
-  return results.reduce(
-    (total, result) => ({ removed: total.removed + result.removed, closed: total.closed + result.closed }),
-    { removed: 0, closed: 0 },
+  return results.reduce<GcApplyResult>(
+    (total, result) => ({
+      removed: total.removed + result.removed,
+      closed: total.closed + result.closed,
+      reconciledClosedResiduals: total.reconciledClosedResiduals + result.reconciledClosedResiduals,
+    }),
+    { removed: 0, closed: 0, reconciledClosedResiduals: 0 },
   );
 }
