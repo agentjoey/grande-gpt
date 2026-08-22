@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,9 +7,10 @@ import type { DatabaseSync } from "node:sqlite";
 import { openDb } from "./db.ts";
 import { safeGit } from "./gitExec.ts";
 import { getJob, listJobs, TERMINAL, type JobRow } from "./jobs.ts";
-import { ensureLayout, loadLayout } from "./layout.ts";
+import { ensureLayout, loadLayout, type Layout } from "./layout.ts";
 import { computeOuterTestPlanDigest, getOuterTestReceipt } from "./outerTestReceipt.ts";
 import { createProductionHostVerification } from "./hostVerificationProduction.ts";
+import { loadDepDirs } from "./profiles.ts";
 import { saveRegistry } from "./registry.ts";
 import { createTask } from "./tasks.ts";
 import type { HostVerifierCoordinator, HostVerifierRequest } from "./hostVerifier.ts";
@@ -59,6 +60,44 @@ function groupAlive(pgid: number): boolean {
   }
 }
 
+function boundedArtifactTail(job: JobRow, maxChars = 4000): string | null {
+  if (!job.artifactPath || !existsSync(job.artifactPath)) return null;
+  try {
+    const text = readFileSync(job.artifactPath, "utf8");
+    return text.length <= maxChars ? text : text.slice(-maxChars);
+  } catch {
+    return null;
+  }
+}
+
+export function describeSoakJobFailure(job: JobRow): string {
+  const detail = {
+    jobId: job.jobId,
+    state: job.state,
+    exitCode: job.exitCode,
+    pgid: job.pgid,
+    summary: job.summary,
+    artifactTail: boundedArtifactTail(job),
+  };
+  return JSON.stringify(detail);
+}
+
+/**
+ * Copy only the trusted dependency-directory allowlist required by the real
+ * verifier runtime into the isolated soak control plane. No run profiles,
+ * repository content, argv, cwd or environment are imported from the candidate.
+ */
+export function copyTrustedSoakDepDirs(sourceLayout: Layout, targetLayout: Layout, repoId: string): string[] {
+  const depDirs = [...loadDepDirs(sourceLayout, repoId)];
+  if (depDirs.length === 0) throw new Error(`activation soak has no trusted dependency roots for ${repoId}`);
+  writeFileSync(
+    join(targetLayout.configDir, "profiles.yaml"),
+    `${JSON.stringify({ depDirs: { [repoId]: depDirs } }, null, 2)}\n`,
+    "utf8",
+  );
+  return depDirs;
+}
+
 function assertNoSentinel(job: JobRow, sentinel: string): void {
   if (!sentinel) throw new Error("soak sentinel required");
   const summary = JSON.stringify(job.summary ?? {});
@@ -71,7 +110,7 @@ function assertNoSentinel(job: JobRow, sentinel: string): void {
 
 function assertPassedAutoReceipt(db: DatabaseSync, request: HostVerifierRequest, job: JobRow): void {
   if (job.profile !== "host-verifier" || job.state !== "passed" || job.exitCode !== 0 || job.endedAt === null) {
-    throw new Error(`soak verifier job ${job.jobId} did not pass cleanly`);
+    throw new Error(`soak verifier job did not pass cleanly: ${describeSoakJobFailure(job)}`);
   }
   const summary = job.summary as Record<string, unknown> | null;
   if (!summary || summary.kind !== "host-verifier-v2" || summary.mode !== "auto") {
@@ -248,6 +287,7 @@ export async function runActivationHostVerifierSoak(input: {
   const branch = safeGit.local(taskWorktree, ["branch", "--show-current"]).trim();
   if (!branch.startsWith("grande/")) throw new Error("activation soak must target a Grande task branch");
 
+  const trustedControlLayout = loadLayout();
   const controlRoot = mkdtempSync(join(tmpdir(), "grande-host-verifier-soak-control-"));
   const priorControl = process.env.GRANDE_CONTROL;
   const sentinelName = "GRANDE_SOAK_SECRET_SENTINEL";
@@ -259,6 +299,7 @@ export async function runActivationHostVerifierSoak(input: {
     const layout = loadLayout();
     ensureLayout(layout);
     saveRegistry(layout, [{ repoId: "grande-gpt", path: join(layout.workspaceRoot, "grande-gpt"), registered: true }]);
+    copyTrustedSoakDepDirs(trustedControlLayout, layout, "grande-gpt");
     db = openDb(layout);
     const taskId = `${SOAK_TASK_PREFIX}_${process.pid}`;
     createTask(db, {

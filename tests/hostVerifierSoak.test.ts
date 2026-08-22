@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { openDb } from "../src/db.ts";
 import { createJob, finishJob } from "../src/jobs.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { computeOuterTestPlanDigest } from "../src/outerTestReceipt.ts";
+import { loadDepDirs } from "../src/profiles.ts";
 import { createTask } from "../src/tasks.ts";
 
 let root: string;
@@ -116,6 +117,39 @@ function completeAutoRun(index: number, mode: "auto" | "manual" = "auto") {
 }
 
 describe("20-run Host Verifier soak orchestration", () => {
+  it("copies only trusted production depDirs into the isolated soak control plane", async () => {
+    const mod = await soakModule();
+    expect(typeof mod.copyTrustedSoakDepDirs).toBe("function");
+    if (typeof mod.copyTrustedSoakDepDirs !== "function") return;
+
+    const sourceControl = join(root, "trusted-control");
+    const targetControl = join(root, "soak-control");
+    mkdirSync(sourceControl, { recursive: true });
+    mkdirSync(targetControl, { recursive: true });
+
+    process.env.GRANDE_CONTROL = sourceControl;
+    const sourceLayout = loadLayout();
+    ensureLayout(sourceLayout);
+    writeFileSync(join(sourceLayout.configDir, "profiles.yaml"), [
+      "repos:",
+      "  grande-gpt:",
+      "    unit-selfhost:",
+      "      argv: [pnpm, vitest, run]",
+      "      timeoutSeconds: 60",
+      "depDirs:",
+      "  grande-gpt:",
+      "    - node_modules",
+      "",
+    ].join("\n"), "utf8");
+
+    process.env.GRANDE_CONTROL = targetControl;
+    const targetLayout = loadLayout();
+    ensureLayout(targetLayout);
+
+    expect(mod.copyTrustedSoakDepDirs(sourceLayout, targetLayout, "grande-gpt")).toEqual(["node_modules"]);
+    expect(loadDepDirs(targetLayout, "grande-gpt")).toEqual(["node_modules"]);
+  });
+
   it("requires unique sequential auto V2 runs and probes Gateway throughout", async () => {
     const mod = await soakModule();
     expect(typeof mod.runSequentialHostVerifierSoak).toBe("function");
