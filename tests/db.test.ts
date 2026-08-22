@@ -99,6 +99,57 @@ describe("openDb()", () => {
     db.close();
   });
 
+  it("把当前前一版本 5 顺序迁移到 6，并保留既有 task/audit/OAuth/attestation/receipt 数据", () => {
+    const l = loadLayout();
+    ensureLayout(l);
+
+    const seed = openDb(l);
+    const now = Date.now();
+    seed.prepare(
+      "INSERT INTO task (taskId,repoId,branch,baseCommit,worktreePath,state,createdAt,updatedAt,stateVersion) VALUES (?,?,?,?,?,?,?,?,?)",
+    ).run("task-migrate", "demo", "grande/demo", "abc", "/tmp/demo", "READY", now, now, 1);
+    seed.prepare(
+      "INSERT INTO audit (opId,taskId,tool,inputDigest,decision,state,pathsTouched,reason,at,updatedAt) VALUES (?,?,?,?,?,?,?,?,?,?)",
+    ).run("op-migrate", "task-migrate", "probe", "sha256:x", "ALLOWED", "SUCCEEDED", "[]", null, now, now);
+    seed.prepare("INSERT INTO oauth_client (clientId,redirectUris,createdAt) VALUES (?,?,?)").run(
+      "client-migrate",
+      "[]",
+      now,
+    );
+    seed.prepare("INSERT INTO oauth_refresh (handle,resource,parent,valid,createdAt) VALUES (?,?,?,?,?)").run(
+      "refresh-migrate",
+      "https://example.invalid",
+      null,
+      1,
+      now,
+    );
+    seed.prepare(
+      "INSERT INTO job (jobId,taskId,profile,argv,state,exitCode,startedAt,endedAt,hostToolchain) VALUES (?,?,?,?,?,?,?,?,?)",
+    ).run("job-migrate", "task-migrate", "unit", "[]", "passed", 0, now, now + 1, "node24");
+    seed.prepare(
+      'INSERT INTO attestation (attestationId,taskId,"commit",profile,jobId,exitCode,startedAt,endedAt,hostToolchain) VALUES (?,?,?,?,?,?,?,?,?)',
+    ).run("att-migrate", "task-migrate", "abc", "unit", "job-migrate", 0, now, now + 1, "node24");
+    seed.prepare("INSERT INTO outer_test_receipt (taskId,receiptJson,updatedAt) VALUES (?,?,?)").run(
+      "task-migrate",
+      '{"commit":"abc"}',
+      now,
+    );
+    seed.exec("DROP TABLE audit_ack");
+    seed.exec("PRAGMA user_version = 5");
+    seed.close();
+
+    const migrated = openDb(l);
+    expect((migrated.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(6);
+    expect(migrated.prepare("SELECT taskId FROM task WHERE taskId='task-migrate'").get()).toBeDefined();
+    expect(migrated.prepare("SELECT opId FROM audit WHERE opId='op-migrate'").get()).toBeDefined();
+    expect(migrated.prepare("SELECT clientId FROM oauth_client WHERE clientId='client-migrate'").get()).toBeDefined();
+    expect(migrated.prepare("SELECT handle FROM oauth_refresh WHERE handle='refresh-migrate'").get()).toBeDefined();
+    expect(migrated.prepare("SELECT attestationId FROM attestation WHERE attestationId='att-migrate'").get()).toBeDefined();
+    expect(migrated.prepare("SELECT taskId FROM outer_test_receipt WHERE taskId='task-migrate'").get()).toBeDefined();
+    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_ack'").get()).toBeDefined();
+    migrated.close();
+  });
+
   it("schema 版本不匹配时 openDb 响亮拒绝，错误信息同时点出期望版本与磁盘上的实际版本", () => {
     const l = loadLayout();
     ensureLayout(l);

@@ -3,12 +3,13 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Layout } from "./layout.ts";
 import { SCHEMA_VERSION as CONTRACT_VERSION } from "./contract.ts";
+import { canMigrate, migrateDb } from "./dbMigrations.ts";
 
 /**
  * 当前代码认识的 schema 版本，落在 SQLite 内置的 `PRAGMA user_version`（一个
  * 普通整数，SQLite 自己不使用它，专门留给应用层标记 schema 版本，新建的库默认
  * 是 0）。每次这里的 `CREATE TABLE` 语句发生不兼容变化（增删列、改类型……）就
- * 把这个数字加一。**不写迁移机制**——只需要「检测到不认识的版本就响亮拒绝」。
+ * 把这个数字加一。
  *
  * `1 → 2`：新增 `oauth_client` / `oauth_refresh` 两张表。
  * `2 → 3`：D18 单一端点，删除 `oauth_refresh.repoId`。
@@ -22,18 +23,21 @@ import { SCHEMA_VERSION as CONTRACT_VERSION } from "./contract.ts";
  * 绝不修改 audit 原行**（账本不可篡改）。没有它，判据明确的异常会永远挂在首屏，
  * 两天后人就开始无视整个告警区，而那正是设计要避免的。
  *
+ * Phase 7 起只支持显式、顺序的相邻版本 migration；当前首条受支持路径是 5 → 6。
+ * 更老或更新的未知版本继续 fail closed，不能“猜着升”。
+ *
  * S4 的 `task_brief`、S7 的 `deployment_receipt` 与 S18 的 `outer_test_receipt` 都是
  * 【向后兼容的附属表】：旧代码完全忽略它们，新代码可用 `CREATE TABLE IF NOT EXISTS`
  * 在已匹配版本的库上安全补齐，因此不增加 user_version。它们都不改变既有表/列，
  * 也不扩张 Task 状态机。
  *
  * 导出是为了让测试断言跟着它走。**不要在测试里写死版本号**——那只会让每次升版
- * 多一道手改杂活，而真正的门禁是运行时那道（版本不符直接拒绝打开，线上表现为 502）。
+ * 多一道手改杂活，而真正的门禁是运行时那道。
  */
 /** 单一真相源在 `contract.ts`——控制台也读那一份，改一处两边一起动。 */
 export const SCHEMA_VERSION = CONTRACT_VERSION;
 
-/** 打开状态库并保证 schema 就位；已有库版本必须与当前代码完全一致。 */
+/** 打开状态库并保证 schema 就位；仅迁移明确支持的相邻旧版本。 */
 export function openDb(layout: Layout): DatabaseSync {
   mkdirSync(dirname(layout.stateDb), { recursive: true });
   const db = new DatabaseSync(layout.stateDb);
@@ -52,13 +56,16 @@ export function openDb(layout: Layout): DatabaseSync {
   if (hasExistingSchema) {
     const { user_version: onDisk } = db.prepare("PRAGMA user_version").get() as { user_version: number };
     if (onDisk !== SCHEMA_VERSION) {
-      db.close();
-      throw new Error(
-        `状态库 schema 版本不匹配：代码期望 user_version=${SCHEMA_VERSION}，磁盘上的库是 ` +
-          `user_version=${onDisk}（${layout.stateDb}）。这个库可能建自加入版本号之前的旧代码，` +
-          `或者建自更新的代码。不做自动迁移——请人工确认后处理（例如备份后删除该文件，` +
-          `让程序重新初始化一个空库）。`,
-      );
+      if (canMigrate(onDisk, SCHEMA_VERSION)) {
+        migrateDb(db, onDisk, SCHEMA_VERSION);
+      } else {
+        db.close();
+        throw new Error(
+          `状态库 schema 版本不匹配：代码期望 user_version=${SCHEMA_VERSION}，磁盘上的库是 ` +
+            `user_version=${onDisk}（${layout.stateDb}）。没有受支持的顺序 migration；` +
+            `请先使用与该版本兼容的 GrandeGPT 或经过验证的 backup/restore 路径处理。`,
+        );
+      }
     }
   }
 
