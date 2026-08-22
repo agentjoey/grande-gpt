@@ -20,10 +20,19 @@ import { createPrOpenTool } from "./prOpen.ts";
 import { createPushTool } from "./push.ts";
 import { registeredIds } from "./registry.ts";
 import { syncBase } from "./syncBase.ts";
-import { compactTaskProgress, projectTaskProgress, type TaskProgress } from "./taskProgress.ts";
+import {
+  compactTaskProgress,
+  projectTaskProgress,
+  type HostVerificationMode,
+  type TaskProgress,
+} from "./taskProgress.ts";
 import { getTask, listActiveTasks, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 import { listChangedFiles } from "./worktree.ts";
+
+export interface LocalLoopOptions {
+  hostVerificationMode?: HostVerificationMode;
+}
 
 function taskContext(deps: ToolDeps, taskId: string): TaskContext | null {
   const task = getTask(deps.db, taskId);
@@ -211,9 +220,13 @@ function wrapRunWithVerificationContext(deps: ToolDeps, tools: ToolDef[]): void 
   };
 }
 
-function safeProgress(deps: ToolDeps, task: TaskRow): TaskProgress | { error: string } {
+function safeProgress(
+  deps: ToolDeps,
+  task: TaskRow,
+  options: LocalLoopOptions,
+): TaskProgress | { error: string } {
   try {
-    return projectTaskProgress(deps.db, task);
+    return projectTaskProgress(deps.db, task, { hostVerificationMode: options.hostVerificationMode });
   } catch (error) {
     return {
       error: redact(error instanceof Error ? error.message : String(error), [deps.layout.workspaceRoot, deps.layout.controlRoot]),
@@ -229,9 +242,9 @@ function safeFilesChanged(task: TaskRow): number | null {
   }
 }
 
-function ghostDetail(deps: ToolDeps, task: TaskRow): { structuredContent: unknown } {
+function ghostDetail(deps: ToolDeps, task: TaskRow, options: LocalLoopOptions): { structuredContent: unknown } {
   const jobs = listJobs(deps.db, task.taskId);
-  const progress = safeProgress(deps, task);
+  const progress = safeProgress(deps, task, options);
   return {
     structuredContent: ok({
       taskId: task.taskId,
@@ -258,7 +271,7 @@ function ghostDetail(deps: ToolDeps, task: TaskRow): { structuredContent: unknow
   };
 }
 
-function ghostOverview(deps: ToolDeps): { structuredContent: unknown } {
+function ghostOverview(deps: ToolDeps, options: LocalLoopOptions): { structuredContent: unknown } {
   const registered = [...registeredIds(deps.layout)].sort();
   const active = listActiveTasks(deps.db).map((task) => ({
     taskId: task.taskId,
@@ -267,7 +280,7 @@ function ghostOverview(deps: ToolDeps): { structuredContent: unknown } {
     state: task.state,
     filesChanged: safeFilesChanged(task),
     worktreeMissing: !existsSync(task.worktreePath),
-    progress: safeProgress(deps, task),
+    progress: safeProgress(deps, task, options),
   }));
   return {
     structuredContent: ok({
@@ -279,7 +292,7 @@ function ghostOverview(deps: ToolDeps): { structuredContent: unknown } {
   };
 }
 
-function wrapTaskStatusWithBase(deps: ToolDeps, tools: ToolDef[]): void {
+function wrapTaskStatusWithBase(deps: ToolDeps, tools: ToolDef[], options: LocalLoopOptions): void {
   const status = tools.find((tool) => tool.name === "grande_task_status");
   if (!status) return;
   const coreHandler = status.handler;
@@ -287,9 +300,9 @@ function wrapTaskStatusWithBase(deps: ToolDeps, tools: ToolDef[]): void {
     const taskId = args.taskId as string | undefined;
     if (taskId) {
       const task = getTask(deps.db, taskId);
-      if (task && !existsSync(task.worktreePath)) return ghostDetail(deps, task);
+      if (task && !existsSync(task.worktreePath)) return ghostDetail(deps, task, options);
     } else if (listActiveTasks(deps.db).some((task) => !existsSync(task.worktreePath))) {
-      return ghostOverview(deps);
+      return ghostOverview(deps, options);
     }
 
     const response = await coreHandler(args);
@@ -306,7 +319,7 @@ function wrapTaskStatusWithBase(deps: ToolDeps, tools: ToolDef[]): void {
         for (const item of active) {
           if (!item || typeof item !== "object" || typeof (item as { taskId?: unknown }).taskId !== "string") continue;
           const task = getTask(deps.db, (item as { taskId: string }).taskId);
-          if (task) (item as Record<string, unknown>).progress = safeProgress(deps, task);
+          if (task) (item as Record<string, unknown>).progress = safeProgress(deps, task, options);
         }
       }
       return response;
@@ -314,7 +327,7 @@ function wrapTaskStatusWithBase(deps: ToolDeps, tools: ToolDef[]): void {
 
     const task = getTask(deps.db, taskId);
     if (!task) return response;
-    const progress = safeProgress(deps, task);
+    const progress = safeProgress(deps, task, options);
     envelope.data.progress = progress;
     if (!("error" in progress)) {
       envelope.hint = `${envelope.hint ?? ""}；${compactTaskProgress(progress)}；下一步：${progress.nextAction}`;
@@ -338,9 +351,13 @@ function wrapTaskStatusWithBase(deps: ToolDeps, tools: ToolDef[]): void {
   };
 }
 
-export function addLocalLoopTools(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
+export function addLocalLoopTools(
+  deps: ToolDeps,
+  tools: ToolDef[],
+  options: LocalLoopOptions = {},
+): ToolDef[] {
   wrapRunWithVerificationContext(deps, tools);
-  wrapTaskStatusWithBase(deps, tools);
+  wrapTaskStatusWithBase(deps, tools, options);
   return [
     ...tools,
     commitTool(deps),

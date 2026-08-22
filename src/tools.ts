@@ -8,7 +8,7 @@ import { toToolError, redact, StateError } from "./errors.ts";
 import { loadGuidance } from "./guidance.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
 import { addOnboardingTools } from "./onboardingTools.ts";
-import { addPrLifecycleTools } from "./prLifecycle.ts";
+import { createPrMergeTool, createPrStatusTool, type PrLifecycleOptions } from "./prLifecycle.ts";
 import { addPrMergeD2Reconciliation } from "./prMergeD2.ts";
 import { registeredIds } from "./registry.ts";
 import { withRepoWriteLock } from "./repoWriteLock.ts";
@@ -29,6 +29,8 @@ export {
   toolsetIdentity,
   type ToolsetIdentity,
 } from "./toolsetIdentity.ts";
+
+export type BuildToolsOptions = Pick<PrLifecycleOptions, "hostVerificationMode" | "hostVerifierCoordinator">;
 
 const TASK_SCOPED_REPO_WRITES = new Set([
   "grande_commit",
@@ -75,7 +77,7 @@ function withTaskRepoWriteLocks(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
  *
  * 没有 workflow engine；每层只在已有 Task 上补一个垂直缺口。
  */
-export function buildTools(deps: ToolDeps): ToolDef[] {
+export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): ToolDef[] {
   const tools = buildCoreTools(deps);
   const taskOpen = tools.find((tool) => tool.name === "grande_task_open");
   if (taskOpen) {
@@ -146,8 +148,10 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     };
   }
 
-  const local = addLocalLoopTools(deps, tools);
-  const githubBase = addPrLifecycleTools(deps, local);
+  const local = addLocalLoopTools(deps, tools, {
+    hostVerificationMode: options.hostVerificationMode,
+  });
+  const githubBase = [...local, createPrStatusTool(deps), createPrMergeTool(deps, options)];
   const github = addPrMergeD2Reconciliation(deps, githubBase);
   const withBrief = addTaskBriefSupport(deps, github);
   const withOnboarding = addOnboardingTools(deps, withBrief);

@@ -11,7 +11,9 @@ import { createOAuth, OAuthError, type OAuthConfig } from "./oauth.ts";
 import { registeredIds } from "./registry.ts";
 import { reconcileRunningJobs } from "./jobs.ts";
 import { reconcileHostVerifierJobsAtStartup } from "./hostVerifierRecovery.ts";
-import { buildTools, type ToolDef } from "./tools.ts";
+import { loadHostVerificationConfig } from "./hostVerificationConfig.ts";
+import { createProductionHostVerification } from "./hostVerificationProduction.ts";
+import { buildTools, type BuildToolsOptions, type ToolDef } from "./tools.ts";
 import { createAccessGate, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
 import { assertDistinctAudience } from "./consoleAuth.ts";
 import { mountConsoleRoutes } from "./consoleRoutes.ts";
@@ -34,6 +36,11 @@ export interface AppConfig {
    * 而不是挂一组没有门禁的路由——缺配置的含义是「门禁没装」，不是「不需要门禁」。
    */
   consoleAccessConfig?: AccessConfig;
+  /**
+   * Gateway 启动时从可信 control plane 构造一次的 Host Verifier runtime。
+   * createApp() 的直接测试调用可以省略；省略时保持 manual，不会自动调度。
+   */
+  hostVerification?: BuildToolsOptions;
 }
 
 const VALID_REPO_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -54,6 +61,21 @@ function toZodSchema(schema: ToolDef["inputSchema"]): z.ZodObject<z.ZodRawShape>
     shape[key] = (schema.required ?? []).includes(key) ? zodType : zodType.optional();
   }
   return z.object(shape as z.ZodRawShape);
+}
+
+/**
+ * Build one request's tool definitions from the runtime options created once at
+ * Gateway startup. The same coordinator object is therefore reused across all
+ * MCP requests instead of being recreated inside handleMcp().
+ */
+export function buildGatewayTools(
+  cfg: Pick<AppConfig, "db" | "layout" | "hostVerification">,
+  defaultRepoId: string | undefined,
+): ToolDef[] {
+  return buildTools(
+    { db: cfg.db, layout: cfg.layout, defaultRepoId },
+    cfg.hostVerification ?? { hostVerificationMode: "manual" },
+  );
 }
 
 /**
@@ -412,7 +434,7 @@ export function createApp(cfg: AppConfig): Hono {
       { capabilities: { tools: {} } },
     );
 
-    const tools = buildTools({ db, layout, defaultRepoId });
+    const tools = buildGatewayTools(cfg, defaultRepoId);
     for (const tool of tools) {
       mcpServer.registerTool(tool.name, {
         description: tool.description,
@@ -477,12 +499,19 @@ export function createApp(cfg: AppConfig): Hono {
 }
 
 export async function startGateway(cfg: AppConfig): Promise<{ app: Hono; close: () => Promise<void> }> {
+  const hostVerificationConfig = loadHostVerificationConfig(cfg.layout);
+  const hostVerification = createProductionHostVerification(
+    { db: cfg.db, layout: cfg.layout },
+    hostVerificationConfig,
+  );
+
   await reconcileHostVerifierJobsAtStartup({ db: cfg.db, layout: cfg.layout });
   reconcileRunningJobs(cfg.db, (pgid) => {
     try { process.kill(-pgid, 0); return true; } catch { return false; }
   });
 
-  const app = createApp(cfg);
+  const runtimeConfig: AppConfig = { ...cfg, hostVerification };
+  const app = createApp(runtimeConfig);
   const port = Number(process.env.PORT || "8787");
 
   /**
