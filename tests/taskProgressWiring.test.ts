@@ -33,8 +33,8 @@ afterEach(() => {
   rmSync(ctrl, { recursive: true, force: true });
 });
 
-describe("grande_task_status S10 progress wiring", () => {
-  it("单 task 状态附带 7-stage projection + nextAction，不要求用户翻 SQLite", async () => {
+describe("grande_task_status S10/D3 progress wiring", () => {
+  it("单 task 状态附带 lifecycle + exact HEAD + verifier projection，不要求用户翻 SQLite", async () => {
     const layout = loadLayout();
     const db = openDb(layout);
     createTask(db, {
@@ -57,7 +57,23 @@ describe("grande_task_status S10 progress wiring", () => {
     expect(envelope.data?.progress?.stages).toHaveProperty("merged");
     expect(envelope.data?.progress?.stages).toHaveProperty("deploy");
     expect(envelope.data?.progress?.stages).toHaveProperty("verify");
+    expect(envelope.data?.progress).toMatchObject({
+      phase: "code",
+      taskHead: null,
+      hostVerification: {
+        requiredLevel: null,
+        state: "unknown",
+        retryCount: 0,
+        jobId: null,
+      },
+      localState: "active",
+    });
     expect(typeof envelope.data?.progress?.nextAction).toBe("string");
+    const serialized = JSON.stringify(envelope.data?.progress);
+    expect(serialized).not.toContain(ws);
+    expect(serialized).not.toContain(ctrl);
+    expect(serialized).not.toContain("process.env");
+    expect(serialized).not.toMatch(/token|authorization|credential/i);
     expect(envelope.hint).toContain("grande gc");
     db.close();
   });
@@ -79,7 +95,12 @@ describe("grande_task_status S10 progress wiring", () => {
 
     expect(envelope.ok).toBe(true);
     expect(envelope.data?.activeTasks?.[0]?.progress?.stages).toHaveProperty("deploy");
-    expect(envelope.data?.activeTasks?.[0]?.progress).toHaveProperty("cleanupRequired");
+    expect(envelope.data?.activeTasks?.[0]?.progress).toMatchObject({
+      phase: "code",
+      taskHead: null,
+      hostVerification: { state: "unknown", retryCount: 0 },
+      cleanupRequired: false,
+    });
     db.close();
   });
 
