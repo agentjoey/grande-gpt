@@ -90,10 +90,10 @@
 - CI runs on Node 24 with pnpm 10.33.0, `pnpm install --frozen-lockfile`, the same selfhost-safe Vitest selection as the registered `unit-selfhost` profile, `pnpm typecheck`, and focused tool-contract identity tests.
 - Ordinary CI never runs Seatbelt, LaunchAgent, loopback port ownership, or trusted Host Verifier suites.
 
-- [ ] **Step 1: Add a failing CI-contract test/documented command** proving the repository has one deterministic command for the selfhost-safe test selection plus tool-contract checks.
-- [ ] **Step 2: Verify RED**, then add the minimal package script/config needed to make that command stable outside local control-plane profiles.
+- [x] **Step 1: Add a failing CI-contract test/documented command** proving the repository has one deterministic command for the selfhost-safe test selection plus tool-contract checks.
+- [x] **Step 2: Verify RED**, then add the minimal package script/config needed to make that command stable outside local control-plane profiles.
 - [ ] **Step 3: Verify GREEN** on a clean task worktree.
-- [ ] **Step 4: Stop at the real Human Gate for `.github/workflows/ci.yml`**. Do not use GitHub or filesystem bypasses to defeat the existing read-only-path policy.
+- [x] **Step 4: Stop at the real Human Gate for `.github/workflows/ci.yml`**. Do not use GitHub or filesystem bypasses to defeat the existing read-only-path policy.
 - [ ] **Step 5: After the Human-applied workflow commit is present on this task branch, run the same commands locally, open PR, and require a real exact-head CI status before merge.**
 
 ### Task 3: GG-BL-017 — fail-closed per-repo cross-process write lock
@@ -114,13 +114,15 @@
 - Malformed/untrusted lock metadata is not auto-deleted; it fails closed for Human inspection.
 - `withRepoWriteLock()` retains its existing in-process queue and acquires/releases the process lock only for the active critical section.
 
-- [ ] **Step 1: Add two-process failing tests** showing same-repo overlap is impossible while different repo IDs can enter concurrently.
-- [ ] **Step 2: Verify RED** against the current process-local-only implementation.
-- [ ] **Step 3: Implement the minimal lock primitive** with atomic exclusive create, live-PID detection, stale-dead-PID recovery, ownership token check on release, and fixed-root path validation.
-- [ ] **Step 4: Wire Gateway write paths through the existing `withRepoWriteLock()` without changing public tool handlers.**
-- [ ] **Step 5: Wire `gc --apply` and any other Git/worktree-writing CLI path to the same per-repo process lock.**
-- [ ] **Step 6: Add zero-side-effect busy tests**: no partial branch/worktree/canonical mutation after lock acquisition fails.
-- [ ] **Step 7: Verify GREEN** with targeted tests, fresh `unit-selfhost`, and `typecheck`.
+- [x] **Step 1: Add two-process failing tests** showing same-repo overlap is impossible while different repo IDs can enter concurrently.
+- [x] **Step 2: Verify RED** against the current process-local-only implementation.
+- [x] **Step 3: Implement the minimal lock primitive** with atomic exclusive create, live-PID detection, stale-dead-PID recovery, ownership token check on release, and fixed-root path validation.
+- [x] **Step 4: Wire Gateway write paths through the existing `withRepoWriteLock()` without changing public tool handlers.**
+- [x] **Step 5: Wire `gc --apply` and any other Git/worktree-writing CLI path to the same per-repo process lock.**
+- [x] **Step 6: Add zero-side-effect busy tests**: no partial branch/worktree/canonical mutation after lock acquisition fails.
+- [x] **Step 7: Verify GREEN** with targeted tests, fresh `unit-selfhost`, and `typecheck`.
+  - Fresh registered `unit-selfhost`: 105 files / 845 tests PASS.
+  - `typecheck`: PASS.
 
 ### Task 4: GG-BL-019 — durable production activation evidence
 

@@ -671,7 +671,13 @@ function cmdGc(out: (l: string) => void, apply: boolean): number {
 
     out("");
     out("正在执行清理…");
-    const result = applyGc(db, layout, plan);
+    let result: ReturnType<typeof applyGc>;
+    try {
+      result = applyGc(db, layout, plan);
+    } catch (error) {
+      out(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
     out(`  回收孤儿 worktree：${result.removed} 条`);
     out(`  关闭幽灵 task：${result.closed} 条`);
     out(`  清理 CLOSED residual worktree：${result.reconciledClosedResiduals} 条`);

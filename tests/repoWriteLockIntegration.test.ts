@@ -3,6 +3,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Layout } from "../src/layout.ts";
 
 const lockProbe = vi.hoisted(() => ({
   entered: [] as string[],
@@ -13,17 +14,17 @@ vi.mock("../src/repoWriteLock.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/repoWriteLock.ts")>();
   return {
     ...actual,
-    withRepoWriteLock: <T>(repoId: string, operation: () => Promise<T> | T): Promise<T> =>
+    withRepoWriteLock: <T>(repoId: string, operation: () => Promise<T> | T, layout: Pick<Layout, "controlRoot">): Promise<T> =>
       actual.withRepoWriteLock(repoId, async () => {
         lockProbe.entered.push(repoId);
         await new Promise<void>((resolve) => lockProbe.waiters.push({ repoId, resolve }));
         return operation();
-      }),
+      }, layout),
   };
 });
 
 import { openDb } from "../src/db.ts";
-import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
+import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { createTask } from "../src/tasks.ts";
 import { buildTools, type ToolDeps } from "../src/tools.ts";
 

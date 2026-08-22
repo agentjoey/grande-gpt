@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { safeGit } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
 import { assertTaskId } from "./paths.ts";
+import { acquireRepoProcessLock } from "./repoProcessLock.ts";
 import { withRepoWriteLock } from "./repoWriteLock.ts";
 import { getTask, listActiveTasks } from "./tasks.ts";
 import { registeredIds } from "./registry.ts";
@@ -116,11 +117,23 @@ export function planGc(db: DatabaseSync, layout: Layout): GcPlan {
   return { orphanWorktrees, ghostTasks, closedResidualWorktrees };
 }
 
-/**
- * 应用 GC 计划。这个同步 primitive 保留给 standalone CLI 和既有测试；Gateway 内并发
- * 写路径必须使用下面的 applyGcWithRepoWriteLocks。
- */
-export function applyGc(db: DatabaseSync, layout: Layout, plan: GcPlan): GcApplyResult {
+function repoIdsForPlan(plan: GcPlan): string[] {
+  return [...new Set([
+    ...plan.orphanWorktrees.map((item) => item.repoId),
+    ...plan.ghostTasks.map((item) => item.repoId),
+    ...plan.closedResidualWorktrees.map((item) => item.repoId),
+  ])].sort();
+}
+
+function repoSlice(plan: GcPlan, repoId: string): GcPlan {
+  return {
+    orphanWorktrees: plan.orphanWorktrees.filter((item) => item.repoId === repoId),
+    ghostTasks: plan.ghostTasks.filter((item) => item.repoId === repoId),
+    closedResidualWorktrees: plan.closedResidualWorktrees.filter((item) => item.repoId === repoId),
+  };
+}
+
+function applyGcUnlocked(db: DatabaseSync, layout: Layout, plan: GcPlan): GcApplyResult {
   let removed = 0;
   let closed = 0;
   let reconciledClosedResiduals = 0;
@@ -179,26 +192,32 @@ export function applyGc(db: DatabaseSync, layout: Layout, plan: GcPlan): GcApply
 }
 
 /**
- * Gateway 进程内的 GC apply 入口：同一 repo 与 task/commit/sync/push/merge/close 共用
- * 一个 mutex，不持久化锁；不同 repo 仍可并行。独立 CLI 是另一个进程，不能也不应
- * 通过这个单机 Map 假装获得跨进程互斥。
+ * standalone CLI / 既有同步调用入口。先按确定顺序拿齐所有 repo process locks，任何一把
+ * 获取失败都发生在 mutation 之前；成功后才应用整个 plan，最后逆序释放。
+ */
+export function applyGc(db: DatabaseSync, layout: Layout, plan: GcPlan): GcApplyResult {
+  const locks = [] as ReturnType<typeof acquireRepoProcessLock>[];
+  try {
+    for (const repoId of repoIdsForPlan(plan)) {
+      locks.push(acquireRepoProcessLock(layout, repoId));
+    }
+    return applyGcUnlocked(db, layout, plan);
+  } finally {
+    for (const lock of locks.reverse()) lock.release();
+  }
+}
+
+/**
+ * Gateway GC apply 与 task/commit/sync/push/merge/close 共用同一 per-repo 锁边界：先走
+ * 进程内 FIFO，active critical section 再取得跨进程锁；不同 repo 仍可并行。
  */
 export async function applyGcWithRepoWriteLocks(
   db: DatabaseSync,
   layout: Layout,
   plan: GcPlan,
 ): Promise<GcApplyResult> {
-  const repoIds = [...new Set([
-    ...plan.orphanWorktrees.map((item) => item.repoId),
-    ...plan.ghostTasks.map((item) => item.repoId),
-    ...plan.closedResidualWorktrees.map((item) => item.repoId),
-  ])].sort();
-  const results = await Promise.all(repoIds.map((repoId) =>
-    withRepoWriteLock(repoId, () => applyGc(db, layout, {
-      orphanWorktrees: plan.orphanWorktrees.filter((item) => item.repoId === repoId),
-      ghostTasks: plan.ghostTasks.filter((item) => item.repoId === repoId),
-      closedResidualWorktrees: plan.closedResidualWorktrees.filter((item) => item.repoId === repoId),
-    })),
+  const results = await Promise.all(repoIdsForPlan(plan).map((repoId) =>
+    withRepoWriteLock(repoId, () => applyGcUnlocked(db, layout, repoSlice(plan, repoId)), layout),
   ));
   return results.reduce<GcApplyResult>(
     (total, result) => ({
