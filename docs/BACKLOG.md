@@ -4,7 +4,7 @@
 >
 > 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md` 中的历史“已知遗留”、`docs/research/**` 的事故记录、PR/TaskBrief 和聊天结论都只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
 
-最后整理：2026-08-22
+最后整理：2026-08-23
 
 ## 维护规范
 
@@ -60,6 +60,8 @@
 
 ### Phase 7 — Reliability Foundation
 
+**Status**：DONE（2026-08-23）
+
 **范围**：`GG-BL-007`、`GG-BL-017`、`GG-BL-018`、`GG-BL-019`。
 
 目标是在继续压缩流程或改变公开 tool contract 前，先补齐控制状态恢复、跨进程写互斥、独立 CI 与 durable production activation evidence。
@@ -73,13 +75,15 @@
 - GrandeGPT 自身 PR 有最小独立 CI，`unit-selfhost`、`typecheck` 与 tool-contract checks 不再长期依赖 `CI=none`；
 - production activation 有 durable evidence，能绑定 target/runtime build、toolset identity、restart 与 read probe，不靠聊天人工推断。
 
+**Closeout evidence**：Phase 7 implementation PR #22 已 merge；exact PR head `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa` 的 local `unit-selfhost` 为 109 files / 859 tests PASS、`typecheck` PASS、GitHub Actions CI PASS、manual-only Host outer-test 10 files / 171 tests PASS。canonical merge SHA 为 `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`。production activation receipt 已持久化并由后续 `grande_task_status` 读回：`targetBuild = runtimeBuild = git:aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`、`toolsetEpoch=2`、`toolsCount=25`、`toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`、LaunchAgent running、endpoint ready、trusted read probe HTTP 200。Phase 7 未改变公开 25-tool contract。
+
 ### Phase 8 — Flow Simplification
 
 **范围**：`GG-BL-020`、`GG-BL-021`、`GG-BL-022`、`GG-BL-023`。
 
 目标是在 **不改变当前公开 `tools/list`** 的前提下减少正常开发轮次和无意义 Human Gate：按真实交付目标投影流程，短 job bounded wait，PR/verifier 自动续跑，并按 L1/L2/L3 风险分级开发与 review。
 
-**进入条件**：Phase 7 的可靠性基础已具备，不需要靠流程简化掩盖底层恢复、锁、CI 或 activation 缺口。
+**进入条件**：Phase 7 的可靠性基础已具备，不需要靠流程简化掩盖底层恢复、锁、CI 或 activation 缺口。**该进入条件已于 2026-08-23 满足。**
 
 **退出条件**：
 
@@ -139,16 +143,6 @@
 - **Next**: 不降低 issuer/audience 校验；优先改善诊断文本和 `gateway status` 的可信 issuer 展示；只有能证明可信来源时才考虑显式复用 LaunchAgent/config issuer。
 - **Done when**: shell 缺 issuer 时输出能清楚区分“CLI 环境缺失”和“Gateway 不健康”，并保持 fail-closed。
 
-### GG-BL-007 — Control-plane backup、SQLite migration 与 restore 路径不完整
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: resilience / state migration / operations
-- **Problem**: `~/.grande-control/` 包含 Task、audit、OAuth、attestation、job、receipt 等不可完全从 Git 重建的状态，但当前缺少完整的顺序 schema migration、迁移前 backup 与经过真实验证的 restore 路径；机器故障或 schema 升级失败仍可能把 Human 推回人工恢复。
-- **Evidence / Detail**: `CLAUDE.md` 历史 S0.5 遗留 #9；Human Owner 已指定本地 NAS 为长期备份目标。2026-08-22 post-Phase-6 architecture review 进一步确认 DB migration 与 backup/restore 属于同一控制平面恢复问题，不另开重复 ID。
-- **Next**: 保持 SQLite，不引入 ORM/外部数据库。实现最小顺序 `N → N+1` migration：迁移前创建可验证 backup，单事务执行 migration，成功后更新 `PRAGMA user_version`，失败时原库与 backup 保持可用；同时定义固定 backup root、有限保留策略和显式 Human restore。`secrets/` 必须排除或采用独立安全处理，不能进入普通 backup。
-- **Done when**: ① 至少支持当前前一 schema version → current 且 Task/audit/OAuth/attestation/receipt 不丢失；② migration 中途失败时事务回滚且旧库仍可由旧版本打开；③ backup 创建失败时原库零修改；④ 新建库与迁移后库 schema digest 一致；⑤ 完成一次真实 backup + restore；⑥ 明确哪些 control-plane 数据可恢复、哪些 secrets 不进入普通备份。
-
 ### GG-BL-008 — GitHub fine-grained PAT least-privilege 与生命周期
 
 - **Priority**: P2
@@ -183,36 +177,6 @@
 - **Remaining**: ChatGPT Web/iOS/fresh-Web 的完整两任务 release gate 与七天观察期仍属于根因关闭前的后续验证；平台侧 binding 故障并未宣称彻底消除。Automated Host Verifier 的 execution-plane hardening 不作为本项关闭条件的替代品。
 - **Related / Roadmap gate**: 本项保持独立 P0/MITIGATED，不阻塞 Phase 7/8；但 Phase 9 改变公开 tool snapshot 前必须达到 roadmap 定义的 release-ready 稳定门槛。不得通过频繁改变 tools/list、降低 annotations、绕过 Gateway 或增加第二执行通道来试探性规避 binding drift。
 - **Done when**: 完成跨客户端两任务 release gate 和稳定观察，或获得可控根因并证明长期稳定后再转 DONE；当前按 Human Owner closeout 决策保持 MITIGATED。
-
-### GG-BL-017 — Gateway / CLI 缺少跨进程 repo write lock
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: reliability / Git lifecycle / concurrency
-- **Problem**: 现有 repo write mutex 主要约束单个 Gateway 进程内的写操作；Gateway 与 `grande gc --apply` 或其他写 CLI 属于不同进程时，缺少共享的 repo 级排他边界，理论上可以同时修改同一 repo 的 worktree、branch 或 canonical。
-- **Evidence / Detail**: 2026-08-22 post-Phase-6 architecture review 将该跨进程缺口列为连续运行基础项；实施前必须重新读取最新 `repoWriteLock`、GC 和 CLI wiring，确认当前代码仍存在该缺口，不因旧设计快照机械重构。
-- **Next**: 增加一个窄的 per-repo cross-process advisory lock，Gateway 与会写 Git/worktree 的 CLI 共用；记录足够的 owner/process metadata 以诊断 busy/stale，获取失败快速返回结构化 busy；进程内 Promise mutex 继续保留。不增加持久队列、daemon、分布式锁或后台调度器。
-- **Done when**: ① 两个独立 Node 进程不能同时进入同一 repo 写临界区；② 不同 repo 可并行；③ Gateway 与 `gc --apply`/其他写 CLI 共用同一锁；④ 进程被强杀后 stale lock 可安全恢复；⑤ busy/timeout 零部分 Git/worktree 副作用；⑥ read-only tools 不受影响。
-
-### GG-BL-018 — GrandeGPT 自身缺少最小独立 CI gate
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: verification / GitHub CI
-- **Problem**: GrandeGPT 自身核心变更仍可能出现 PR `CI=none`，基础 unit/typecheck/tool-contract 主要依赖本机 agent/attestation；Host Verifier 能证明 Mac/host 边界，但不应代替一条独立、不可遗漏的普通 CI 基线。
-- **Evidence / Detail**: 2026-08-22 PR #20 在候选与 Host Verifier 均通过时仍观察到 `CI=none`；这不是 Host Verifier 缺陷，而是远程基础 CI 缺口。
-- **Next**: 增加最小 GitHub CI：固定 Node 24 与 pnpm lockfile，`pnpm install --frozen-lockfile`，运行 `unit-selfhost`、`typecheck` 和 tool-contract/diff check。Seatbelt、loopback、LaunchAgent 等 Mac host suite 继续由 trusted Host Verifier 承担，不建设复杂 matrix。
-- **Done when**: ① GrandeGPT PR 可稳定获得真实 CI 状态而非长期 `none`；② fresh install 后 `unit-selfhost`、`typecheck`、tool-contract checks PASS；③ merge gate 对 exact PR head 读取该 CI；④ Mac-only host suite 仍由 Host Verifier 承担；⑤ 不引入与轻量定位无关的复杂 CI matrix/release train。
-
-### GG-BL-019 — Production activation 缺少 durable evidence / receipt
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: production activation / evidence
-- **Problem**: `GG-BL-004` 已解决“merged 不等于 activated”的识别和 runtime identity 展示，但 activation 证据仍主要依赖即时 restart/read probe 与状态读取，没有一个 durable evidence object 把 target build、实际 runtime build、toolset identity 与 activation probe 绑定起来；跨会话 closeout 仍需要人工重新拼接这些事实。
-- **Evidence / Detail**: `GG-BL-004` 已证明当前 `gatewayBuild/toolsetEpoch/toolsCount/toolsDigest` 可以正确区分 merge 与 runtime activation；2026-08-22 PR #20 merge 后仍需 Human restart，再由新会话读取 production status 才证明 build `eb020384...` 已真正运行。新项只收敛 durable activation evidence，不重新打开 GG-BL-004。
-- **Next**: 复用现有 runtime identity 与 restart/readiness/read-probe primitives，定义最小 activation receipt/evidence；至少绑定 target build、runtime build、toolset epoch/digest、activation/restart 时间和 trusted read probe。不要把 merge receipt、deploy receipt 与 activation receipt 混成大型 release workflow，也不要自动更换 issuer/credential/policy。
-- **Done when**: ① merge、deploy、activation 在 status/evidence 中明确分开；② activation evidence 至少绑定 target build、runtime build、toolset epoch/digest、restart/activation 时间和 read probe；③ runtime build/toolset 与 target 不一致时 activation 明确失败；④ restart success 只有在 LaunchAgent/endpoint/read probe 恢复后成立；⑤ 后续会话可读取 durable evidence 判断目标 build 是否已 activated，而不需要人工重建时间线。
 
 ### GG-BL-020 — Task 缺少 `deliveryTarget = local | pr | deploy`
 
@@ -369,3 +333,43 @@
 - **Phase / task**: Phase 6 S20 / `task-p6-20260822-001`
 - **Fix**: 统一 `candidate | infrastructure | integrity` failure taxonomy；trusted runtime 持久化 class/reason；candidate zero retry；同 SHA infrastructure 最多一次 bounded retry、第二次 Human escalation；current-SHA receipt/result/SHA/policy identity mismatch 作为 integrity zero-retry immediate fail-closed；old-SHA verification/retry state 不复用。修复了一个 RED-first 暴露的真实缺口：integrity attempt 原会从 merge gate 漏入 coordinator dispatch，现在显式在 dispatch 前 Human-gate fail closed。
 - **Verification evidence**: load-bearing tests 覆盖 candidate no-retry、transient infra retry+recovery、persistent infra escalation、integrity zero-retry/fail-closed、SHA change isolation；Phase 6 code gate 为 97 files / 817 tests PASS、`typecheck` PASS。最终 exact-SHA production auto verifier receipt/merge audit 作为 host-only关闭证据。
+
+### GG-BL-007 — Control-plane backup、SQLite migration 与 restore 路径不完整
+
+- **Priority**: P1
+- **Status**: DONE
+- **Category**: resilience / state migration / operations
+- **DONE date**: 2026-08-23
+- **Phase / task**: Phase 7 / `task-p7-20260822-001`
+- **Fix**: 保持 SQLite，新增显式有序 5→6 migration、`BEGIN IMMEDIATE` 事务边界、迁移前 `VACUUM INTO` verified backup、固定 managed backup root 与 retention、integrity/schema verification，以及 dry-run 默认且 `--yes` 才原子替换的 Human restore CLI。普通 backup 明确不包含 `secrets/`；live-handle 检测使用 SQLite WAL exclusive transition 语义而不是仅凭残留 `-wal/-shm` 文件判断。
+- **Verification evidence**: 真实 version-5 fixtures 覆盖 Task/audit/OAuth/attestation/receipt 保留、backup failure 零修改、migration failure rollback、managed backup restore、invalid/outside-root/live-handle fail-closed。Phase 7 exact candidate `unit-selfhost` 109 files / 859 tests PASS、`typecheck` PASS；PR #22 与 host/CI gates 均通过后 merge 到 canonical `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`。
+
+### GG-BL-017 — Gateway / CLI 缺少跨进程 repo write lock
+
+- **Priority**: P1
+- **Status**: DONE
+- **Category**: reliability / Git lifecycle / concurrency
+- **DONE date**: 2026-08-23
+- **Phase / task**: Phase 7 / `task-p7-20260822-001`
+- **Fix**: 在既有 process-local FIFO mutex 下增加固定 control-root 的 per-repo cross-process lock；使用 exclusive create、`pid/repoId/acquiredAt/nonce` metadata、live PID busy fail-closed、仅 ESRCH 视为 stale、malformed metadata 不自动删除、release 校验 ownership/nonce。Gateway writes 与 `gc --apply` 共用同一锁，不同 repo 仍可并行。
+- **Verification evidence**: 两独立 Node 进程覆盖同 repo 冲突、不同 repo 并行、stale recovery、malformed fail-closed、nonce ownership，以及 GC busy 零部分副作用；最终 exact candidate local `unit-selfhost` 109/859 PASS、typecheck PASS，GitHub CI PASS，Host outer-test 10/171 PASS。
+
+### GG-BL-018 — GrandeGPT 自身缺少最小独立 CI gate
+
+- **Priority**: P1
+- **Status**: DONE
+- **Category**: verification / GitHub CI
+- **DONE date**: 2026-08-23
+- **Phase / task**: Phase 7 / `task-p7-20260822-001`
+- **Fix**: 新增最小 GitHub Actions CI，固定 `macos-15`、Node 24、pnpm 10.33.0、frozen lockfile，运行 selfhost-safe unit selection、typecheck 与 focused tool-contract checks；Host Verifier 继续独立承担 trusted host-only suite。首轮 Ubuntu runner 暴露 Darwin assumptions 后改为 pinned macOS；第二轮 macOS CI 又暴露 `sbpl.test.ts` 对 `xcrun`/Homebrew Git 布局的错误测试假设，修正为与 runtime `which git`→仅 `/usr/bin/git` shim 时 fallback `xcrun` 的同一选择规则。
+- **Verification evidence**: final exact PR head `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa` 的 GitHub Actions run `32585178938` PASS；merge gate 读取真实 exact-head CI 而非 `CI=none`。同一候选 local `unit-selfhost` 109 files / 859 tests PASS、`typecheck` PASS，Host outer-test 10 files / 171 tests PASS。
+
+### GG-BL-019 — Production activation 缺少 durable evidence / receipt
+
+- **Priority**: P1
+- **Status**: DONE
+- **Category**: production activation / evidence
+- **DONE date**: 2026-08-23
+- **Phase / task**: Phase 7 / `task-p7-20260822-001`
+- **Fix**: 新增独立 durable activation receipt，将 target/runtime build、toolset epoch/count/digest、activation timestamp、LaunchAgent running、endpoint readiness 与 trusted read probe 绑定；build/tool identity 不一致时 fail closed。receipt 与 merge/deploy evidence 保持分离，只有 restart readiness、running status 与 trusted read probe 全部成功后才持久化。
+- **Verification evidence**: PR #22 merge 后 canonical 为 `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`。production `gateway restart` 成功记录 receipt；后续独立 `grande_task_status` readback 返回 `targetBuild = runtimeBuild = git:aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`、`toolsetEpoch=2`、`toolsCount=25`、`toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`、LaunchAgent running、endpointReady=true、trusted read probe HTTP 200。由此满足跨会话 durable activation closeout，且公开 tool contract 未变化。

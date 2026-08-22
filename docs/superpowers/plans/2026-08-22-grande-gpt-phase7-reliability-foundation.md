@@ -10,6 +10,8 @@
 
 **Spec:** `docs/BACKLOG.md` (`Phase 7 — Reliability Foundation`) and `docs/superpowers/specs/2026-08-22-grande-gpt-lightweight-architecture-and-development-flow-optimization-design.md`
 
+**Final status:** DONE — implementation PR #22 merged 2026-08-23; canonical merge SHA `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`; production activation receipt persisted and read back successfully.
+
 ## Global Constraints
 
 - Production public tool contract stays at 25 tools during Phase 7 and Phase 8; no tool additions/removals/renames and no toolset epoch bump.
@@ -97,11 +99,11 @@
   - After the runner correction contract was added, fresh registered `unit-selfhost`: 109 files / 859 tests PASS.
   - `typecheck`: PASS.
 - [x] **Step 4: Stop at the real Human Gate for `.github/workflows/ci.yml`**. Do not use GitHub or filesystem bypasses to defeat the existing read-only-path policy.
-- [ ] **Step 5: After the Human-applied workflow commit is present on this task branch, run the same commands locally, open PR, and require a real exact-head CI status before merge.**
-  - PR #22 on exact head `653b156a8cca1f85d0b1b2b2b58d0eefcc2a1f5b` produced a real GitHub Actions result rather than `CI=none`, but the first workflow used `ubuntu-latest` and failed 5 tests because the selfhost-safe suite still contains deliberate macOS runtime assumptions (`sandbox-exec`/LaunchAgent CLI behavior and Darwin `/bin/cp -Rc` clonefile semantics).
-  - Added a RED CI-contract assertion requiring pinned `macos-15`; it failed exactly against the old `ubuntu-latest` workflow. Human then changed only the protected workflow runner line to `macos-15`.
-  - Local GREEN after the protected workflow correction: registered `unit-selfhost` 109 files / 859 tests PASS; `typecheck` PASS.
-  - Remaining for Step 5: commit/push the corrected exact candidate and require the rerun GitHub CI to PASS on that exact PR head.
+- [x] **Step 5: Commit/push the Human-applied workflow, run the same commands locally, and require real exact-head GitHub CI before merge.**
+  - PR #22 first produced a real GitHub Actions result rather than `CI=none`, but the initial `ubuntu-latest` runner failed 5 selfhost-safe tests because the suite contains deliberate Darwin runtime assumptions (`sandbox-exec`/LaunchAgent CLI behavior and Darwin `/bin/cp -Rc` clonefile semantics).
+  - Added a RED CI-contract assertion requiring pinned `macos-15`; it failed exactly against the old workflow. Human changed only the protected runner line to `macos-15`.
+  - The first macOS run then exposed one test-only portability assumption: `tests/sbpl.test.ts` unconditionally preferred `xcrun --find git`, while production `defaultExecRoots()` correctly uses `which git` and falls back to `xcrun` only for `/usr/bin/git` shim. The test was aligned with the runtime selection rule; production sandbox code was unchanged.
+  - Final exact PR head `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa`: local `unit-selfhost` 109 files / 859 tests PASS, `typecheck` PASS, GitHub Actions run `32585178938` PASS.
 
 ### Task 3: GG-BL-017 — fail-closed per-repo cross-process write lock
 
@@ -156,17 +158,19 @@
 - [x] **Step 3: Implement atomic durable receipt persistence under the trusted control root or an existing backward-compatible auxiliary table; do not introduce another status store.**
 - [x] **Step 4: Reuse existing restart/readiness/selfcheck primitives to record the receipt only after successful activation.**
 - [x] **Step 5: Expose latest activation evidence in status without changing public tool count/schema beyond additive result fields.**
-- [ ] **Step 6: Verify GREEN** with targeted tests, full `unit-selfhost`, `typecheck`, then trusted production activation and later-session readback evidence.
-  - Local implementation evidence after final diff review: fresh registered `unit-selfhost` on the current worktree: 109 files / 858 tests PASS; `typecheck`: PASS.
-  - Diff review confirms the receipt remains separate from merge/deploy evidence, fails closed on build/tool identity mismatch, and is only persisted after restart readiness, running status, and trusted read probe succeed.
-  - Review found and corrected one evidence-timing bug: `activatedAt` was originally sampled before restart. A new regression test failed RED on the old behavior, then GREEN after changing the default timestamp to be sampled only when the fully eligible receipt is persisted.
-  - Remaining for Step 6: trusted production activation on the exact merged candidate SHA plus a later-session `grande_task_status` readback of the durable receipt.
+- [x] **Step 6: Verify GREEN with local tests, trusted exact-SHA Host gate, production activation, and later-session readback evidence.**
+  - Review found and corrected one evidence-timing bug: `activatedAt` was originally sampled before restart. A regression test failed RED on the old behavior, then GREEN after sampling only when the fully eligible receipt is persisted.
+  - Final exact PR head `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa`: local `unit-selfhost` 109 files / 859 tests PASS; `typecheck` PASS; Host outer-test 10 files / 171 tests PASS; GitHub CI PASS.
+  - PR #22 merged to canonical `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`.
+  - Production `gateway restart` persisted an activation receipt after LaunchAgent running + endpoint readiness + trusted read probe. A subsequent independent `grande_task_status` readback returned `targetBuild = runtimeBuild = git:aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`, `toolsetEpoch=2`, `toolsCount=25`, `toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`, `endpointReady=true`, and read probe HTTP 200.
 
 ## Phase 7 Closeout
 
-- [ ] Each backlog item meets its own `Done when` in `docs/BACKLOG.md`; only then move it to Archive/DONE.
-- [ ] Fresh `unit-selfhost` and `typecheck` pass on exact candidate SHA.
-- [ ] Trusted Host Verifier passes for host-only boundaries on exact candidate SHA.
-- [ ] The PR has real independent CI on exact PR head, not `CI=none`.
-- [ ] Production activation receipt proves target/runtime build and toolset identity after restart/read probe.
-- [ ] Re-read `toolsCount/toolsetEpoch/toolsDigest`; confirm Phase 7 did not change the public tool contract.
+- [x] Each backlog item meets its own `Done when` in `docs/BACKLOG.md`; `GG-BL-007`, `GG-BL-017`, `GG-BL-018`, and `GG-BL-019` moved to Archive/DONE on 2026-08-23.
+- [x] Fresh `unit-selfhost` and `typecheck` pass on exact candidate SHA `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa`: 109 files / 859 tests PASS; typecheck PASS.
+- [x] Trusted Host verification passes for host-only boundaries on exact candidate SHA: manual-only outer-test 10 files / 171 tests PASS with exact-SHA receipt.
+- [x] PR #22 has real independent CI on exact PR head, not `CI=none`: GitHub Actions run `32585178938` PASS.
+- [x] PR #22 merged and canonical safely refreshed to merge SHA `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`.
+- [x] Production activation receipt proves exact target/runtime build and toolset identity after restart/read probe; later `grande_task_status` readback confirms durable persistence.
+- [x] Re-read `toolsCount/toolsetEpoch/toolsDigest`: `25 / 2 / sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`; Phase 7 did not change the public tool contract.
+- [x] Phase 8 entry condition is satisfied. Phase 7 is closed.
