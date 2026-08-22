@@ -38,7 +38,7 @@ describe("ChatGPT connector compatibility operational contract", () => {
     expect(text).toContain("server-side");
   });
 
-  it("records exact candidate host evidence and a fail-closed epoch-2 pre-deploy identity gate", () => {
+  it("records exact candidate host evidence while keeping the remaining cross-client gate explicit", () => {
     const backlog = read("docs/BACKLOG.md");
     const runbook = read("docs/chatgpt-connector-compatibility-runbook.md");
     const candidateCommit = "7b98f7dce2f0b10723b29be64ca28e1438f1a779";
@@ -57,8 +57,8 @@ describe("ChatGPT connector compatibility operational contract", () => {
     expect(runbook).toMatch(/SDK-generated[\s\S]{0,160}outputBytes=unknown/i);
 
     const incident = backlog.match(/### GG-BL-010[\s\S]*?(?=\n### |\s*$)/)?.[0] ?? "";
-    expect(incident).toMatch(/\*\*Status\*\*: OPEN/);
-    expect(incident).toMatch(/部署[\s\S]{0,160}待完成/);
-    expect(incident).toMatch(/Web[\s\S]{0,160}iOS[\s\S]{0,160}待完成/);
+    expect(incident).toMatch(/\*\*Status\*\*: MITIGATED/);
+    expect(incident).toMatch(/\*\*Remaining\*\*:[\s\S]*(Web|跨客户端)[\s\S]*(iOS|fresh-Web|两任务)/i);
+    expect(incident).toMatch(/\*\*Done when\*\*:[\s\S]*(跨客户端|cross-client)[\s\S]*(两任务|two-task|两个.*用户任务)/i);
   });
 });
