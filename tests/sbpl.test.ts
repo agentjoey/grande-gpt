@@ -21,38 +21,38 @@ describe("buildProfile()", () => {
   });
 
   it("worktree 可写", () => {
-    expect(buildProfile(paths)).toContain(`(allow file-write* (subpath "${paths.worktree}"))`);
+    expect(buildProfile(paths)).toContain(`(allow file-write* (subpath \"${paths.worktree}\"))`);
   });
 
   it("canonical 的 .git 不可写（hooks 为所有 worktree 共享）", () => {
-    expect(buildProfile(paths)).toContain(`(deny file-write* (subpath "${paths.canonicalGit}"))`);
+    expect(buildProfile(paths)).toContain(`(deny file-write* (subpath \"${paths.canonicalGit}\"))`);
   });
 
   it("控制平面根不可读", () => {
-    expect(buildProfile(paths)).toContain(`(deny file-read* (subpath "${paths.controlRoot}"))`);
+    expect(buildProfile(paths)).toContain(`(deny file-read* (subpath \"${paths.controlRoot}\"))`);
   });
 
   it("worktreesRoot 目录条目自身放行 file-read-metadata——否则向上遍历目录树找 workspace root 的工具（pnpm/npm/yarn/vitest/tsc）在 lstat(worktreesRoot) 这一级直接 EPERM，实测 100% 复现", () => {
     const p = buildProfile(paths);
-    expect(p).toContain(`(allow file-read-metadata (literal "${paths.worktreesRoot}"))`);
+    expect(p).toContain(`(allow file-read-metadata (literal \"${paths.worktreesRoot}\"))`);
   });
 
   it("worktree 与 worktreesRoot 之间的中间祖先目录（真实布局的 <repoId> 那一级）同样放行 file-read-metadata——否则向上遍历会先死在这一级而不是 worktreesRoot", () => {
     // fixture 的 worktree 是 worktreesRoot + "/demo/task_1"，中间夹着 "demo"
     // 这一级（对应真实布局 join(worktreesRoot, repoId, taskId) 里的 repoId）。
     const p = buildProfile(paths);
-    expect(p).toContain(`(allow file-read-metadata (literal "${paths.worktreesRoot}/demo"))`);
+    expect(p).toContain(`(allow file-read-metadata (literal \"${paths.worktreesRoot}/demo\"))`);
   });
 
   it("worktree 自己不出现在 file-read-metadata 的 literal 放行里——它已经由 file-read* 整体放行，不需要重复", () => {
     const p = buildProfile(paths);
-    expect(p).not.toContain(`(allow file-read-metadata (literal "${paths.worktree}"))`);
+    expect(p).not.toContain(`(allow file-read-metadata (literal \"${paths.worktree}\"))`);
   });
 
   it("先 deny worktrees 父目录、再 allow 本任务 worktree（依赖最具体规则优先）", () => {
     const p = buildProfile(paths);
-    const denyIdx = p.indexOf(`(deny file-read* (subpath "${paths.worktreesRoot}"))`);
-    const allowIdx = p.indexOf(`(allow file-read* (subpath "${paths.worktree}"))`);
+    const denyIdx = p.indexOf(`(deny file-read* (subpath \"${paths.worktreesRoot}\"))`);
+    const allowIdx = p.indexOf(`(allow file-read* (subpath \"${paths.worktree}\"))`);
     expect(denyIdx).toBeGreaterThan(-1);
     expect(allowIdx).toBeGreaterThan(-1);
     // I6：这条测试名字叫「先 deny 再 allow」，但此前只断言两行各自存在，从未
@@ -84,7 +84,7 @@ describe("buildProfile()", () => {
     const execLine = p.split("\n").find((l) => l.startsWith("(allow process-exec"));
     expect(execLine).toBeDefined();
     for (const root of paths.execRoots) {
-      expect(execLine).toContain(`(subpath "${root}")`);
+      expect(execLine).toContain(`(subpath \"${root}\")`);
     }
   });
 
@@ -116,19 +116,23 @@ describe("buildProfile()", () => {
     expect(rules.some((l) => l.includes('(subpath "/dev")'))).toBe(false);
   });
 
-  it("execRoots 里出现真实 git 所在目录", () => {
+  it("execRoots 里出现运行时实际选择的 git 所在目录", () => {
     const roots = defaultExecRoots();
-    // 用 xcrun --find 拿到真实 git 二进制路径（处理 /usr/bin/git 是 shim 的情况），
-    // 不可用时退回 which
+    // 与 production resolveBinaryDirs("git") 的选择语义一致：PATH 上已有真实 git
+    // 就使用它；只有 /usr/bin/git 这个 macOS xcrun shim 才解析到 Xcode/CLT 的真实 git。
     let gitPath = "";
     try {
-      gitPath = execFileSync("/usr/bin/xcrun", ["--find", "git"], { encoding: "utf8" }).trim();
-    } catch {
-      try {
-        gitPath = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
-      } catch {
-        return; // git 未安装，跳过
+      gitPath = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
+      if (gitPath === "/usr/bin/git") {
+        try {
+          const resolved = execFileSync("/usr/bin/xcrun", ["--find", "git"], { encoding: "utf8" }).trim();
+          if (resolved) gitPath = resolved;
+        } catch {
+          // xcrun 不可用时 production 同样沿用 /usr/bin/git。
+        }
       }
+    } catch {
+      return; // git 未安装，跳过
     }
     if (!gitPath) return;
     expect(roots).toContain(dirname(gitPath));
@@ -151,7 +155,7 @@ describe("buildProfile()", () => {
     const p = paths;
     const sb = buildProfile(p);
     for (const root of p.execRoots) {
-      expect(sb).toContain(`(allow file-read* (subpath "${root}"))`);
+      expect(sb).toContain(`(allow file-read* (subpath \"${root}\"))`);
     }
   });
 
@@ -164,8 +168,8 @@ describe("buildProfile()", () => {
   it("jobTmp 的 allow 必须排在 controlRoot 的 deny【之后】——Seatbelt 是后匹配者胜", () => {
     const p = paths;
     const sb = buildProfile(p);
-    const denyIdx = sb.indexOf(`(deny file-read* (subpath "${p.controlRoot}"))`);
-    const allowIdx = sb.indexOf(`(allow file-read* (subpath "${p.jobTmp}"))`);
+    const denyIdx = sb.indexOf(`(deny file-read* (subpath \"${p.controlRoot}\"))`);
+    const allowIdx = sb.indexOf(`(allow file-read* (subpath \"${p.jobTmp}\"))`);
     expect(denyIdx).toBeGreaterThan(-1);
     expect(allowIdx).toBeGreaterThan(denyIdx);
   });
