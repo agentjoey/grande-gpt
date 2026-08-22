@@ -6,6 +6,7 @@ import { addDeploymentTools } from "./deployment.ts";
 import { err } from "./envelope.ts";
 import { toToolError, redact, StateError } from "./errors.ts";
 import { loadGuidance } from "./guidance.ts";
+import { projectHostVerifierOperationalStatus } from "./hostVerifierStatus.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
 import { addOnboardingTools } from "./onboardingTools.ts";
 import { createPrMergeTool, createPrStatusTool, type PrLifecycleOptions } from "./prLifecycle.ts";
@@ -164,14 +165,23 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
   deploymentDeps.push(...capabilityTools);
 
   const serialized = withTaskRepoWriteLocks(deps, withCapabilities);
-  return stableToolDefinitions(withToolsetIdentity(withArgCheck(deps, serialized)));
+  return stableToolDefinitions(withToolsetIdentity(
+    deps,
+    withArgCheck(deps, serialized),
+    options.hostVerificationMode ?? "manual",
+  ));
 }
 
 /**
- * 通过现有 grande_task_status 暴露 server-side toolset identity；不新增额外 identity MCP tool。
- * identity 在完整 25-tool 列表组装完之后一次性计算，handler 包装不进入 digest。
+ * 通过现有 grande_task_status 暴露 server-side toolset identity 与最小 Host Verifier
+ * operational snapshot；不新增额外 MCP tool。两者都只包装 response，handler 包装
+ * 不进入 tool contract digest。
  */
-function withToolsetIdentity(tools: ToolDef[]): ToolDef[] {
+function withToolsetIdentity(
+  deps: ToolDeps,
+  tools: ToolDef[],
+  hostVerificationMode: "manual" | "auto",
+): ToolDef[] {
   const identity = toolsetIdentity(tools);
   const status = tools.find((tool) => tool.name === "grande_task_status");
   if (!status) return tools;
@@ -180,7 +190,19 @@ function withToolsetIdentity(tools: ToolDef[]): ToolDef[] {
   status.handler = async (args) => {
     const response = await inner(args);
     const envelope = response.structuredContent as { ok?: unknown; data?: Record<string, unknown> };
-    if (envelope.ok === true && envelope.data) Object.assign(envelope.data, identity);
+    if (envelope.ok === true && envelope.data) {
+      Object.assign(envelope.data, identity);
+      const progress = envelope.data.progress;
+      const taskHead = progress && typeof progress === "object" && typeof (progress as { taskHead?: unknown }).taskHead === "string"
+        ? (progress as { taskHead: string }).taskHead
+        : null;
+      envelope.data.hostVerifier = projectHostVerifierOperationalStatus(deps.db, {
+        mode: hostVerificationMode,
+        verifierBuild: identity.gatewayBuild,
+        currentSha: taskHead,
+        currentTaskId: typeof args.taskId === "string" ? args.taskId : null,
+      });
+    }
     return response;
   };
   return tools;

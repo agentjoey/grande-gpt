@@ -104,30 +104,45 @@ function persistReceipt(receipt: OuterTestReceiptV2): void {
     .run(JSON.stringify(receipt), Date.now(), taskId);
 }
 
-function eligible(): boolean {
+function inspection(commit = head) {
   const task = getTask(db, taskId)!;
-  return inspectCurrentHostVerification(db, task, head).receiptEligible;
+  return inspectCurrentHostVerification(db, task, commit);
+}
+
+function eligible(): boolean {
+  return inspection().receiptEligible;
 }
 
 describe("C3 V2 receipt tamper resistance", () => {
   it("accepts the untouched trusted terminal job receipt", () => {
     writeReceipt();
     expect(eligible()).toBe(true);
+    expect(inspection().integrityFailure).toBeNull();
   });
 
-  it("rejects a receipt whose jobId no longer binds to the trusted terminal job", () => {
+  it("classifies a current-SHA receipt whose jobId no longer binds as integrity failure", () => {
     const { receipt } = writeReceipt();
     persistReceipt({ ...receipt, jobId: "job_missing" });
-    expect(eligible()).toBe(false);
+    const current = inspection();
+    expect(current.receiptEligible).toBe(false);
+    expect(current.integrityFailure).toMatchObject({
+      failureClass: "integrity",
+      reason: "receipt_result_binding_mismatch",
+    });
   });
 
-  it("rejects final planDigest tampering even when SHA and jobId still match", () => {
+  it("classifies final planDigest tampering as integrity failure when SHA still matches", () => {
     const { receipt } = writeReceipt();
     persistReceipt({ ...receipt, planDigest: `sha256:${"0".repeat(64)}` });
-    expect(eligible()).toBe(false);
+    const current = inspection();
+    expect(current.receiptEligible).toBe(false);
+    expect(current.integrityFailure).toMatchObject({
+      failureClass: "integrity",
+      reason: "receipt_result_binding_mismatch",
+    });
   });
 
-  it("rejects a trusted-job summary that tries to include the production loopback port", () => {
+  it("classifies a trusted-job summary that includes the production loopback port as policy integrity failure", () => {
     const { jobId, receipt } = writeReceipt();
     const job = getJob(db, jobId)!;
     const original = job.summary as TamperSummary;
@@ -141,10 +156,12 @@ describe("C3 V2 receipt tamper resistance", () => {
       loopbackPorts: summary.loopbackPorts,
     });
     persistReceipt({ ...receipt, planDigest: digest });
-    expect(eligible()).toBe(false);
+    const current = inspection();
+    expect(current.receiptEligible).toBe(false);
+    expect(current.integrityFailure).toMatchObject({ failureClass: "integrity", reason: "policy_rejection" });
   });
 
-  it("rejects policy-version drift even when the receipt digest is recomputed to match the tampered summary", () => {
+  it("classifies policy-version drift as verifier identity integrity failure", () => {
     const { jobId, receipt } = writeReceipt();
     const job = getJob(db, jobId)!;
     const original = job.summary as TamperSummary;
@@ -158,6 +175,21 @@ describe("C3 V2 receipt tamper resistance", () => {
       loopbackPorts: summary.loopbackPorts,
     });
     persistReceipt({ ...receipt, planDigest: digest });
-    expect(eligible()).toBe(false);
+    const current = inspection();
+    expect(current.receiptEligible).toBe(false);
+    expect(current.integrityFailure).toMatchObject({ failureClass: "integrity", reason: "verifier_identity_mismatch" });
+  });
+
+  it("does not reuse or escalate an old-SHA receipt after the candidate SHA changes", () => {
+    writeReceipt();
+    writeFileSync(join(worktree, "src", "feature.ts"), "export const x = 2;\n", "utf8");
+    git(worktree, "add", "src/feature.ts");
+    git(worktree, "-c", "user.name=Grande", "-c", "user.email=grande@example.com", "commit", "-q", "-m", "next sha");
+    const newHead = git(worktree, "rev-parse", "HEAD");
+
+    const current = inspection(newHead);
+    expect(current.receiptEligible).toBe(false);
+    expect(current.latestAttempt).toBeNull();
+    expect(current.integrityFailure).toBeNull();
   });
 });

@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getAttestations } from "./attestation.ts";
 import { listAudit } from "./audit.ts";
 import { safeGit } from "./gitExec.ts";
+import type { HostVerifierFailureClass } from "./hostVerifierFailure.ts";
 import type { HostVerificationLevel } from "./hostVerification.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
 import { inspectCurrentHostVerification, type CurrentHostVerification } from "./prHostVerification.ts";
@@ -25,6 +26,7 @@ export type HostVerificationProgressState =
   | "failed"
   | "retryable-failure"
   | "retry-exhausted"
+  | "integrity-failure"
   | "passed"
   | "unknown";
 
@@ -33,6 +35,8 @@ export interface HostVerificationProgress {
   manualOnlyRequired: boolean;
   receiptEligible: boolean;
   state: HostVerificationProgressState;
+  failureClass: HostVerifierFailureClass | null;
+  failureReason: string | null;
   retryCount: number;
   jobId: string | null;
 }
@@ -95,6 +99,7 @@ const HOST_RUNTIME_PHASE = new Set<HostVerificationProgressState>([
   "failed",
   "retryable-failure",
   "retry-exhausted",
+  "integrity-failure",
 ]);
 const HOST_PENDING_PHASE = new Set<HostVerificationProgressState>(["required", "manual-required"]);
 
@@ -160,13 +165,15 @@ export function projectHostVerificationProgress(
   current: CurrentHostVerification,
   mode: HostVerificationMode = "manual",
 ): HostVerificationProgress {
-  const { plan, receiptEligible, latestAttempt } = current;
+  const { plan, receiptEligible, latestAttempt, integrityFailure } = current;
   if (plan.level === "none") {
     return {
       requiredLevel: "none",
       manualOnlyRequired: false,
       receiptEligible: true,
       state: "not-required",
+      failureClass: null,
+      failureReason: null,
       retryCount: 0,
       jobId: null,
     };
@@ -177,8 +184,22 @@ export function projectHostVerificationProgress(
       manualOnlyRequired: plan.manualOnlyRequired,
       receiptEligible: true,
       state: "passed",
+      failureClass: null,
+      failureReason: null,
       retryCount: 0,
       jobId: latestAttempt?.jobId ?? null,
+    };
+  }
+  if (integrityFailure) {
+    return {
+      requiredLevel: plan.level,
+      manualOnlyRequired: plan.manualOnlyRequired,
+      receiptEligible: false,
+      state: "integrity-failure",
+      failureClass: "integrity",
+      failureReason: integrityFailure.reason,
+      retryCount: 0,
+      jobId: integrityFailure.jobId,
     };
   }
   if (latestAttempt?.kind === "running") {
@@ -187,6 +208,8 @@ export function projectHostVerificationProgress(
       manualOnlyRequired: plan.manualOnlyRequired,
       receiptEligible: false,
       state: "running",
+      failureClass: null,
+      failureReason: null,
       retryCount: 0,
       jobId: latestAttempt.jobId,
     };
@@ -197,6 +220,20 @@ export function projectHostVerificationProgress(
       manualOnlyRequired: plan.manualOnlyRequired,
       receiptEligible: false,
       state: "failed",
+      failureClass: "candidate",
+      failureReason: latestAttempt.reason ?? "test_failed",
+      retryCount: 0,
+      jobId: latestAttempt.jobId,
+    };
+  }
+  if (latestAttempt?.kind === "integrity") {
+    return {
+      requiredLevel: plan.level,
+      manualOnlyRequired: plan.manualOnlyRequired,
+      receiptEligible: false,
+      state: "integrity-failure",
+      failureClass: "integrity",
+      failureReason: latestAttempt.reason ?? "unrecognized_verifier_result",
       retryCount: 0,
       jobId: latestAttempt.jobId,
     };
@@ -207,6 +244,8 @@ export function projectHostVerificationProgress(
       manualOnlyRequired: plan.manualOnlyRequired,
       receiptEligible: false,
       state: latestAttempt.infrastructureFailures >= 2 ? "retry-exhausted" : "retryable-failure",
+      failureClass: "infrastructure",
+      failureReason: latestAttempt.reason ?? "infrastructure_failure",
       retryCount: latestAttempt.infrastructureFailures,
       jobId: latestAttempt.jobId,
     };
@@ -216,6 +255,8 @@ export function projectHostVerificationProgress(
     manualOnlyRequired: plan.manualOnlyRequired,
     receiptEligible: false,
     state: plan.manualOnlyRequired || mode === "manual" ? "manual-required" : "required",
+    failureClass: null,
+    failureReason: null,
     retryCount: 0,
     jobId: null,
   };
@@ -227,12 +268,20 @@ function unknownHostVerification(): HostVerificationProgress {
     manualOnlyRequired: false,
     receiptEligible: false,
     state: "unknown",
+    failureClass: null,
+    failureReason: null,
     retryCount: 0,
     jobId: null,
   };
 }
 
 function hostBlocker(host: HostVerificationProgress, taskId: string): { blocker: string; nextAction: string } | null {
+  if (host.state === "integrity-failure") {
+    return {
+      blocker: `hostVerification: integrity failure (${host.failureReason ?? "unknown"})`,
+      nextAction: "停止自动重试；由 Human 检查 verifier/receipt/SHA/policy identity 后再继续",
+    };
+  }
   if (host.state === "retry-exhausted") {
     return {
       blocker: `hostVerification: verifier infrastructure retry exhausted (${host.retryCount}/2)`,

@@ -409,12 +409,37 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
                 "failed",
                 {
                   kind: "test",
+                  failureClass: attempt.failureClass ?? "candidate",
+                  reason: attempt.reason ?? "test_failed",
                   jobId: attempt.jobId,
                   artifactPath: attempt.artifactPath,
                   artifactExcerpt: attempt.artifactExcerpt,
                   retryable: false,
                 },
                 `host verifier 代码测试失败（job ${attempt.jobId}）；修复代码并产生新 SHA 后再走 merge gate。`,
+              );
+            }
+            if (current.integrityFailure || attempt?.kind === "integrity") {
+              const integrity = current.integrityFailure ?? {
+                failureClass: "integrity" as const,
+                reason: attempt?.reason ?? "unrecognized_verifier_result",
+                jobId: attempt?.jobId ?? null,
+              };
+              return hostVerificationPending(
+                taskId,
+                state.pr.number,
+                state.pr.headSha,
+                level,
+                "human_gate",
+                {
+                  kind: "integrity",
+                  failureClass: "integrity",
+                  reason: integrity.reason,
+                  jobId: integrity.jobId,
+                  retryable: false,
+                  nextAction: "Human inspection required before any further verification attempt",
+                },
+                `host verifier integrity failure (${integrity.reason})；已 fail closed 且不自动重试。Human Owner 必须检查 verifier/receipt/SHA/policy identity。`,
               );
             }
             if (attempt?.kind === "infrastructure" && attempt.infrastructureFailures >= 2) {
@@ -426,6 +451,8 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
                 "human_gate",
                 {
                   kind: "infrastructure",
+                  failureClass: attempt.failureClass ?? "infrastructure",
+                  reason: attempt.reason ?? "infrastructure_failure",
                   jobId: attempt.jobId,
                   consecutiveFailures: attempt.infrastructureFailures,
                   artifactPath: attempt.artifactPath,
