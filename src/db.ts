@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Layout } from "./layout.ts";
 import { SCHEMA_VERSION as CONTRACT_VERSION } from "./contract.ts";
+import { createStateDbBackup } from "./controlBackup.ts";
 import { canMigrate, migrateDb } from "./dbMigrations.ts";
 
 /**
@@ -42,10 +43,6 @@ export function openDb(layout: Layout): DatabaseSync {
   mkdirSync(dirname(layout.stateDb), { recursive: true });
   const db = new DatabaseSync(layout.stateDb);
 
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec("PRAGMA busy_timeout = 5000");
-
   const hasExistingSchema =
     db
       .prepare(
@@ -57,7 +54,13 @@ export function openDb(layout: Layout): DatabaseSync {
     const { user_version: onDisk } = db.prepare("PRAGMA user_version").get() as { user_version: number };
     if (onDisk !== SCHEMA_VERSION) {
       if (canMigrate(onDisk, SCHEMA_VERSION)) {
-        migrateDb(db, onDisk, SCHEMA_VERSION);
+        try {
+          createStateDbBackup(layout, db, `migration-${onDisk}-to-${SCHEMA_VERSION}`, onDisk);
+          migrateDb(db, onDisk, SCHEMA_VERSION);
+        } catch (error) {
+          db.close();
+          throw error;
+        }
       } else {
         db.close();
         throw new Error(
@@ -68,6 +71,11 @@ export function openDb(layout: Layout): DatabaseSync {
       }
     }
   }
+
+  // 这些 PRAGMA 可能改变磁盘状态，因此必须在版本判定与 pre-migration backup 成功后设置。
+  db.exec("PRAGMA journal_mode = WAL");
+  db.exec("PRAGMA foreign_keys = ON");
+  db.exec("PRAGMA busy_timeout = 5000");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS task (

@@ -8,6 +8,8 @@ export interface Layout {
   /** 控制平面根：状态、配置、审计、artifact。**沙箱不可见** */
   controlRoot: string;
   stateDb: string;
+  /** 受管状态库备份根；旧测试/调用方未提供时从 controlRoot 固定派生 */
+  stateBackupsDir?: string;
   configDir: string;
   reposConfig: string;
   artifactsDir: string;
@@ -85,6 +87,7 @@ export function loadLayout(): Layout {
     workspaceRoot,
     controlRoot,
     stateDb: join(controlRoot, "state", "grande.db"),
+    stateBackupsDir: join(controlRoot, "backups", "state"),
     configDir: join(controlRoot, "config"),
     reposConfig: join(controlRoot, "config", "repos.yaml"),
     artifactsDir: join(controlRoot, "artifacts"),

@@ -30,48 +30,54 @@
 - Create: `src/controlBackup.ts`
 - Modify: `src/db.ts`
 - Modify: `src/layout.ts`
-- Modify: `src/cli.ts`
+- Modify: `src/gatewayCli.ts`
 - Test: `tests/db.test.ts`
 - Create: `tests/dbMigrations.test.ts`
 - Create: `tests/controlBackup.test.ts`
-- Modify: `tests/cli.test.ts`
+- Create: `tests/controlRestore.test.ts`
+- Create: `tests/controlRestoreCli.test.ts`
+- Modify: `tests/gatewayCli.test.ts`
 
 **Interfaces:**
-- `controlBackup.ts` produces `createStateDbBackup(layout, db, reason)` and `restoreStateDbBackup(layout, backupPath)` with fixed managed roots, integrity verification, atomic replacement, and no secret copying.
-- `dbMigrations.ts` produces ordered migration metadata and `migrateDbToCurrent(db, layout, fromVersion)`; the first supported path is `5 -> 6`.
-- `openDb()` detects on-disk schema before any disk-mutating pragma, rejects future versions, creates and verifies a backup before a supported old-version migration, runs migration steps in one transaction, and updates `PRAGMA user_version` only in that transaction.
+- `controlBackup.ts` produces `createStateDbBackup(layout, db, reason, expectedVersion)`, `inspectStateDbBackup(layout, backupPath)`, and `restoreStateDbBackup(layout, backupPath)` with fixed managed roots, integrity verification, atomic replacement, and no secret copying.
+- `dbMigrations.ts` provides an ordered concrete migration list plus `canMigrate(fromVersion, toVersion)` / `migrateDb(db, fromVersion, toVersion)`; the first supported path is `5 -> 6`.
+- `openDb()` detects on-disk schema before any disk-mutating pragma, rejects unsupported old/future versions, creates and verifies a backup before a supported old-version migration, runs migration steps in one transaction, and updates `PRAGMA user_version` only in that transaction.
+- Human restore is exposed under the existing operations surface as `grande gateway restore-state <managed-backup-path> [--yes]`; it is dry-run by default.
 
-- [ ] **Step 1: Add failing migration tests**
+- [x] **Step 1: Add failing migration tests**
   - Build a real version-5 fixture containing representative `task`, `audit`, OAuth, attestation, and receipt rows.
   - Assert `openDb()` upgrades it to version 6, preserves those rows, creates `audit_ack`, and leaves a verified backup.
-  - Assert version 4 and version 99 still fail closed because only current-previous -> current is supported initially.
+  - Assert unsupported older/future versions still fail closed because only current-previous -> current is supported initially.
 
-- [ ] **Step 2: Verify RED**
-  - Run targeted DB tests through the registered `unit-selfhost` profile and confirm failure is due to missing migration/backup behavior.
+- [x] **Step 2: Verify RED**
+  - Registered `unit-selfhost` runs failed on the missing migration/backup/restore behaviors before each implementation slice.
 
-- [ ] **Step 3: Implement minimal 5 -> 6 migration**
+- [x] **Step 3: Implement minimal 5 -> 6 migration**
   - Add one explicit migration step creating `audit_ack`.
   - Use `BEGIN IMMEDIATE` / `COMMIT`; on any error issue `ROLLBACK` and leave `user_version=5`.
   - Do not create a general migration framework beyond an ordered list of concrete version-to-version steps.
 
-- [ ] **Step 4: Implement verified pre-migration backup**
+- [x] **Step 4: Implement verified pre-migration backup**
   - Put state DB backups under a fixed `controlRoot/backups/state/` directory.
   - Use SQLite `VACUUM INTO` against a unique destination so the source is not edited merely to create the backup.
   - Open the resulting backup and require `PRAGMA integrity_check = ok` plus the expected pre-migration `user_version` before migration can start.
   - Keep a small deterministic retention count; never copy `controlRoot/secrets`.
 
-- [ ] **Step 5: Add failure and restore tests**
+- [x] **Step 5: Add failure and restore tests**
   - Backup destination failure => source DB bytes/schema/user_version unchanged.
-  - Injected migration failure => transaction rolls back and old DB remains readable as version 5.
-  - Restore from a managed verified backup => restored DB matches the backup and reopens with the compatible binary.
+  - Migration failure => transaction rolls back and old DB remains readable as version 5.
+  - Restore from a managed verified backup => restored DB byte-matches the backup and reopens/migrates with the current compatible binary.
   - Reject restore sources outside the managed backup root, invalid SQLite files, and restore while a live DB handle is in use.
+  - Live-handle detection uses SQLite's WAL exclusive transition semantics rather than treating residual `-wal` / `-shm` files as proof of a live connection.
 
-- [ ] **Step 6: Add explicit Human CLI restore**
-  - Add a narrow CLI surface under the existing control-plane CLI, with dry-run by default and an explicit confirmation flag for restore.
-  - Output the exact managed backup path and schema version; do not expose secrets.
+- [x] **Step 6: Add explicit Human CLI restore**
+  - `grande gateway restore-state <managed-backup-path>` validates and prints exact path/schema/integrity without modifying state.
+  - `--yes` is required for the atomic replacement.
+  - No secrets are copied or printed.
 
-- [ ] **Step 7: Verify GREEN**
-  - Targeted tests, then fresh `unit-selfhost`, then `typecheck`.
+- [x] **Step 7: Verify GREEN**
+  - Fresh registered `unit-selfhost`: 102 files / 836 tests PASS.
+  - `typecheck`: PASS.
 
 ### Task 2: GG-BL-018 — minimal independent CI
 
@@ -88,7 +94,7 @@
 - [ ] **Step 2: Verify RED**, then add the minimal package script/config needed to make that command stable outside local control-plane profiles.
 - [ ] **Step 3: Verify GREEN** on a clean task worktree.
 - [ ] **Step 4: Stop at the real Human Gate for `.github/workflows/ci.yml`**. Do not use GitHub or filesystem bypasses to defeat the existing read-only-path policy.
-- [ ] **Step 5: After the Human-applied workflow commit is present on this task branch, run the same commands locally, open PR, and require a real exact-head CI status before merge.
+- [ ] **Step 5: After the Human-applied workflow commit is present on this task branch, run the same commands locally, open PR, and require a real exact-head CI status before merge.**
 
 ### Task 3: GG-BL-017 — fail-closed per-repo cross-process write lock
 

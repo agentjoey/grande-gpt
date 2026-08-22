@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { inspectStateDbBackup, restoreStateDbBackup } from "./controlBackup.ts";
 import { ensureLayout, loadLayout } from "./layout.ts";
 import {
   installGatewayLaunchAgent,
@@ -21,6 +22,7 @@ function printUsage(out: (line: string) => void): void {
   out("  grande gateway restart    重启 LaunchAgent");
   out("  grande gateway status     查看 LaunchAgent 是否已加载/运行");
   out("  grande gateway uninstall  停止并删除 LaunchAgent plist");
+  out("  grande gateway restore-state <backup> [--yes]  验证/恢复受管 state DB backup（默认 dry-run）");
 }
 
 function identity(out: (line: string) => void): { uid: number; homeDir: string } | null {
@@ -40,7 +42,43 @@ function isGatewayAction(value: string): value is GatewayAction {
   return ACTION_SET.has(value);
 }
 
+function runRestoreState(args: string[], out: (line: string) => void): number {
+  const [backupPath, ...flags] = args;
+  if (backupPath === undefined || flags.some((flag) => flag !== "--yes")) {
+    out("用法错误：grande gateway restore-state <managed-backup-path> [--yes]");
+    return 1;
+  }
+
+  let layout;
+  try {
+    layout = loadLayout();
+    ensureLayout(layout);
+    const inspected = inspectStateDbBackup(layout, backupPath);
+    out(`backup=${inspected.path}`);
+    out(`user_version=${inspected.schemaVersion}`);
+    out(`integrity_check=${inspected.integrityCheck}`);
+
+    if (!flags.includes("--yes")) {
+      out("dry-run：backup 已验证；未修改 state DB。确认 Gateway/相关进程已停止后加 --yes 恢复。");
+      return 0;
+    }
+
+    const restored = restoreStateDbBackup(layout, inspected.path);
+    out(`已恢复：${restored.stateDb}`);
+    out(`source=${restored.backupPath}`);
+    out(`user_version=${restored.schemaVersion}`);
+    return 0;
+  } catch (error) {
+    out(error instanceof Error ? error.message : String(error));
+    return 1;
+  }
+}
+
 export function runGatewayCli(args: string[], out: (line: string) => void): number {
+  if (args[0] === "restore-state") {
+    return runRestoreState(args.slice(1), out);
+  }
+
   if (args.length !== 1 || !isGatewayAction(args[0] ?? "")) {
     if (args.length > 0) out(`未知 gateway action：${args.join(" ")}`);
     printUsage(out);
