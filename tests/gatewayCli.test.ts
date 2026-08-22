@@ -9,7 +9,7 @@ function syncCli(argv: string[]): { code: number; text: string } {
 }
 
 describe("grande gateway", () => {
-  it("缺少或给错 action 时列出完整的六个最小运维动作", () => {
+  it("缺少或给错 action 时列出完整的最小运维动作，包括 Human restore-state", () => {
     for (const argv of [["gateway"], ["gateway", "bogus"]]) {
       const result = syncCli(argv);
       expect(result.code).toBe(1);
@@ -19,6 +19,7 @@ describe("grande gateway", () => {
       expect(result.text).toContain("gateway restart");
       expect(result.text).toContain("gateway status");
       expect(result.text).toContain("gateway uninstall");
+      expect(result.text).toContain("gateway restore-state");
     }
   });
 

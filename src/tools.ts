@@ -1,3 +1,4 @@
+import { getLatestActivationReceipt } from "./activationReceipt.ts";
 import { checkArgs } from "./argCheck.ts";
 import { beginAudit } from "./audit.ts";
 import { addCapabilityTools } from "./capabilities.ts";
@@ -44,7 +45,7 @@ const TASK_SCOPED_REPO_WRITES = new Set([
 ]);
 
 /**
- * 给已有 task-scoped repo 写操作套一层进程内 repo mutex。这里只按 taskId 反查可信
+ * 给已有 task-scoped repo 写操作套一层 repo mutex。这里只按 taskId 反查可信
  * repoId；不存在的 task 仍交给原 handler 生成既有 TASK_NOT_FOUND 信封。
  *
  * task_open 没有既存 task，单独在 buildTools 中处理。pr_merge 只读取一次当前 PR/CI
@@ -60,7 +61,7 @@ function withTaskRepoWriteLocks(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
       if (!taskId) return inner(args);
       const task = getTask(deps.db, taskId);
       if (!task) return inner(args);
-      return withRepoWriteLock(task.repoId, () => inner(args));
+      return withRepoWriteLock(task.repoId, () => inner(args), deps.layout);
     };
   }
   return tools;
@@ -145,7 +146,7 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
           if (guidance !== undefined) envelope.data.guidance = guidance;
         }
         return result;
-      });
+      }, deps.layout);
     };
   }
 
@@ -173,9 +174,9 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
 }
 
 /**
- * 通过现有 grande_task_status 暴露 server-side toolset identity 与最小 Host Verifier
- * operational snapshot；不新增额外 MCP tool。两者都只包装 response，handler 包装
- * 不进入 tool contract digest。
+ * 通过现有 grande_task_status 暴露 server-side toolset identity、最小 Host Verifier
+ * operational snapshot 与最近 production activation receipt；不新增额外 MCP tool。
+ * 这些都只包装 response，handler 包装不进入 tool contract digest。
  */
 function withToolsetIdentity(
   deps: ToolDeps,
@@ -192,6 +193,7 @@ function withToolsetIdentity(
     const envelope = response.structuredContent as { ok?: unknown; data?: Record<string, unknown> };
     if (envelope.ok === true && envelope.data) {
       Object.assign(envelope.data, identity);
+      envelope.data.activationReceipt = getLatestActivationReceipt(deps.db);
       const progress = envelope.data.progress;
       const taskHead = progress && typeof progress === "object" && typeof (progress as { taskHead?: unknown }).taskHead === "string"
         ? (progress as { taskHead: string }).taskHead

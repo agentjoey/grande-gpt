@@ -180,7 +180,7 @@ describe("Verification Attestation", () => {
     expect(toolchain.lockfileSha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
-  it("schema 版本门禁：旧版本的库被响亮拒绝，不静默当作可用", () => {
+  it("schema 版本门禁：不在受支持 migration 链上的更老版本仍被响亮拒绝", () => {
     const disk = new DatabaseSync(layout.stateDb);
     expect((disk.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(SCHEMA_VERSION);
     disk.close();
@@ -189,11 +189,12 @@ describe("Verification Attestation", () => {
     rmSync(layout.stateDb, { force: true });
     rmSync(`${layout.stateDb}-wal`, { force: true });
     rmSync(`${layout.stateDb}-shm`, { force: true });
+    const unsupportedVersion = SCHEMA_VERSION - 2;
     const old = new DatabaseSync(layout.stateDb);
-    old.exec(`CREATE TABLE task (taskId TEXT PRIMARY KEY); PRAGMA user_version = ${SCHEMA_VERSION - 1};`);
+    old.exec(`CREATE TABLE task (taskId TEXT PRIMARY KEY); PRAGMA user_version = ${unsupportedVersion};`);
     old.close();
     expect(() => openDb(layout)).toThrow(
-      new RegExp(`期望 user_version=${SCHEMA_VERSION}.*user_version=${SCHEMA_VERSION - 1}`),
+      new RegExp(`user_version=${SCHEMA_VERSION}.*user_version=${unsupportedVersion}`),
     );
     deps = { ...deps, db: new DatabaseSync(":memory:") };
   });
