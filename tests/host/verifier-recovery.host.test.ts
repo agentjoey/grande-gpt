@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -74,7 +74,11 @@ describe("host verifier restart recovery", () => {
         state: "READY",
       });
 
-      const disposableRoot = mkdtempSync(join(tmpdir(), "grande-host-verifier-"));
+      // Match the trusted production writer exactly: createHostVerifierLauncher()
+      // canonicalizes mkdtemp() before persisting disposableRoot. On macOS,
+      // tmpdir() may use /var while realpath is /private/var; persisting the raw
+      // alias would correctly fail the recovery anti-symlink guard.
+      const disposableRoot = realpathSync(mkdtempSync(join(tmpdir(), "grande-host-verifier-")));
       roots.push(disposableRoot);
       const child = spawn(process.execPath, [
         "-e",

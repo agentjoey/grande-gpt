@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -106,6 +106,26 @@ describe("D1 host verifier startup reconciliation", () => {
     expect(killCalls).toBe(0);
     expect(getJob(db, "job_no_pgid")?.state).toBe("killed");
     expect(getJob(db, "job_no_pgid")?.summary?.reason).toBe("interrupted_by_gateway_restart");
+  });
+
+  it("fails closed for a non-canonical symlink disposableRoot instead of deleting its target", async () => {
+    const target = mkdtempSync(join(root, "grande-host-verifier-target-"));
+    const alias = join(root, "grande-host-verifier-alias");
+    symlinkSync(target, alias, "dir");
+    verifier("job_symlink_root", null, alias);
+
+    expect(await reconcileHostVerifierJobsAtStartup({ db, layout })).toBe(1);
+    expect(existsSync(target)).toBe(true);
+    expect(existsSync(alias)).toBe(true);
+    expect(getJob(db, "job_symlink_root")).toMatchObject({
+      state: "killed",
+      summary: {
+        infrastructureFailure: true,
+        reason: "interrupted_by_gateway_restart",
+        cleaned: false,
+        cleanupError: "disposable verifier root resolved through a symlink",
+      },
+    });
   });
 
   it("does not touch ordinary running jobs or overwrite a verifier that already reached a real terminal result", async () => {
