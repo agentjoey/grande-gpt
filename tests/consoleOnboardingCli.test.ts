@@ -4,7 +4,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -58,11 +57,29 @@ afterEach(() => {
 
 describe("console-safe repo onboarding helper", () => {
   it("空 direct-child 目录一键完成最小 Git 初始化并注册", () => {
-    mkdirSync(join(ws, "empty-project"));
+    const repo = join(ws, "empty-project");
+    mkdirSync(repo);
+
     expect(run("empty-project")).toBe(0);
+    expect(loadRegistry(loadLayout()).get("empty-project")?.registered).toBe(true);
+    expect(lines.join("\n")).toContain("已完成最小 Git 初始化");
+    expect(lines.join("\n")).toContain("已注册");
+
+    const db = openDb(loadLayout());
+    try {
+      const rows = listAudit(db);
+      const init = rows.find((item) => item.tool === "grande_repo_init");
+      const apply = rows.find((item) => item.tool === "grande_repo_add_apply");
+      expect(init).toMatchObject({ decision: "ALLOWED", state: "SUCCEEDED" });
+      expect(init?.pathsTouched).toHaveLength(1);
+      expect(apply).toMatchObject({ decision: "ALLOWED", state: "SUCCEEDED" });
+      expect(apply?.pathsTouched.some((path) => path.endsWith("repos.yaml"))).toBe(true);
+    } finally {
+      db.close();
+    }
   });
 
-  it.skip("非空且不是有效 Git repo 时 fail closed，既有内容不动", () => {
+  it("非空且不是有效 Git repo 时 fail closed，既有内容不动", () => {
     const repo = join(ws, "not-ready");
     mkdirSync(repo);
     const marker = join(repo, "README.md");
@@ -75,7 +92,7 @@ describe("console-safe repo onboarding helper", () => {
     expect(lines.join("\n")).toMatch(/not ready|valid Git repository|readiness/i);
   });
 
-  it.skip("path security 拒绝 symlink candidate，真实目录不被初始化", () => {
+  it("path security 拒绝 symlink candidate，真实目录不被初始化", () => {
     const real = join(ws, "real-empty");
     mkdirSync(real);
     symlinkSync("real-empty", join(ws, "link-empty"), "dir");
@@ -86,7 +103,7 @@ describe("console-safe repo onboarding helper", () => {
     expect(lines.join("\n")).toMatch(/PATH_ESCAPE|不是工作区下的真实目录|符号链接/);
   });
 
-  it.skip("普通 ready Git repo 不做初始化，只走 canonical registration + audit", () => {
+  it("普通 ready Git repo 不做初始化，只走 canonical registration + audit", () => {
     const repo = join(ws, "fresh");
     initRepo(repo);
 
