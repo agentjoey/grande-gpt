@@ -1,8 +1,9 @@
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { SandboxPaths } from "../../src/sbpl.ts";
+import { buildProfile, type SandboxPaths } from "../../src/sbpl.ts";
 import { defaultExecRoots, runSandboxed } from "../../src/sandbox.ts";
 
 let root: string;
@@ -32,6 +33,32 @@ function executable(path: string, source: string): void {
   chmodSync(path, 0o755);
 }
 
+function runWithoutExactTargetAllow(bin: string) {
+  const home = join(paths.jobTmp, "reverse-home");
+  mkdirSync(home, { recursive: true });
+  const canonical: SandboxPaths = {
+    worktree: realpathSync(paths.worktree),
+    canonicalGit: realpathSync(paths.canonicalGit),
+    jobTmp: realpathSync(paths.jobTmp),
+    controlRoot: realpathSync(paths.controlRoot),
+    worktreesRoot: realpathSync(paths.worktreesRoot),
+    execRoots: paths.execRoots.map((rootPath) => realpathSync(rootPath)),
+    // Deliberately omit worktreeExecTargets: this is the load-bearing reverse proof.
+  };
+  const profilePath = join(paths.jobTmp, "reverse-without-target.sb");
+  writeFileSync(profilePath, buildProfile(canonical), "utf8");
+  return spawnSync("/usr/bin/sandbox-exec", ["-f", profilePath, bin], {
+    cwd: paths.worktree,
+    env: {
+      PATH: canonical.execRoots.join(":"),
+      HOME: home,
+      LANG: "en_US.UTF-8",
+      TMPDIR: paths.jobTmp,
+    },
+    encoding: "utf8",
+  });
+}
+
 describe("GG-BL-027 npm .bin symlink execution", () => {
   it("executes an npm-style .bin symlink whose real target stays inside this worktree node_modules", async () => {
     const target = join(paths.worktree, "node_modules", "demo-cli", "bin", "cli.js");
@@ -45,6 +72,19 @@ describe("GG-BL-027 npm .bin symlink execution", () => {
 
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("npm-bin-ok");
+  });
+
+  it("load-bearing reverse proof: removing the exact target allow makes the same npm .bin execution fail", () => {
+    const target = join(paths.worktree, "node_modules", "demo-cli", "bin", "cli.js");
+    executable(target, "#!/usr/bin/env node\nconsole.log('must-not-run-without-target')\n");
+    const bin = join(paths.worktree, "node_modules", ".bin", "demo-cli");
+    symlinkSync("../demo-cli/bin/cli.js", bin);
+
+    const result = runWithoutExactTargetAllow(bin);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout).not.toContain("must-not-run-without-target");
+    expect(result.stderr + result.stdout).toMatch(/operation not permitted|not permitted/i);
   });
 
   it("does not grant exec when an npm-style .bin symlink resolves outside node_modules", async () => {
