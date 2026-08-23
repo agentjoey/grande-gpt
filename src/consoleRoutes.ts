@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 import type { DatabaseSync } from "node:sqlite";
 import { AccessDeniedError, createAccessGate, type AccessConfig } from "./accessGate.ts";
 import { beginAudit } from "./audit.ts";
+import { registerRepoFromConsole } from "./consoleRepoOnboarding.ts";
 import { getJob, finishJob, TERMINAL } from "./jobs.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
 
@@ -55,6 +56,33 @@ export function mountConsoleRoutes(app: Hono, deps: ConsoleDeps): void {
       throw e;
     }
   };
+
+  /**
+   * 项目一键注册。Human Owner 点击按钮就是显式授权，但执行权仍只在 Gateway。
+   * 领域函数只接受 repoId：空目录可做最小 Git 初始化，真正注册复用 canonical
+   * onboarding inspect/apply，并分别留下 grande_repo_init / grande_repo_add_apply 审计。
+   * 这条 HTTP route 不属于 MCP tool surface，所以不会扰动 connector toolset epoch。
+   */
+  app.post("/console/repos/:repoId/register", async (c) => {
+    const denied = await gate(c.req.raw.headers);
+    if (denied) return c.json(denied.body, denied.status);
+
+    const result = registerRepoFromConsole(c.req.param("repoId"));
+    if (result.ok) {
+      return c.json({
+        ok: true,
+        data: { repoId: result.repoId, initialized: result.initialized, registered: result.registered },
+      });
+    }
+
+    const status = result.code === "invalid_input"
+      ? 400
+      : result.code === "already_registered" || result.code === "repo_not_ready"
+        ? 409
+        : 500;
+    const f = fail(result.code, result.message, status);
+    return c.json(f.body, f.status);
+  });
 
   /**
    * 杀掉一个在跑的 job。
