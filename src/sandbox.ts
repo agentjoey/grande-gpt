@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, readdirSync, realpathSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { buildProfile, type SandboxPaths } from "../src/sbpl.ts";
 
 /**
@@ -132,6 +132,39 @@ export function defaultExecRoots(): string[] {
 }
 
 /**
+ * npm 传统 `.bin` 布局使用 symlink，例如 `.bin/vitest -> ../vitest/vitest.mjs`。
+ * Seatbelt 在 process-exec 裁决前解析 symlink，因此只 allow `.bin` 自身覆盖不到真实 target。
+ * 这里只枚举 `.bin` 暴露出来的 symlink，并且只保留 realpath 后仍位于当前 worktree
+ * `node_modules` 内的普通文件。越界、断链、目录 target 都跳过，后续继续由 deny default 拒绝。
+ */
+export function resolveWorktreeBinExecTargets(worktree: string): string[] {
+  const canonicalWorktree = realpathSync(worktree);
+  const nodeModulesRoot = join(canonicalWorktree, "node_modules");
+  const binDir = join(nodeModulesRoot, ".bin");
+  if (!existsSync(binDir)) return [];
+
+  const targets = new Set<string>();
+  for (const entry of readdirSync(binDir, { withFileTypes: true })) {
+    if (!entry.isSymbolicLink()) continue;
+    let target: string;
+    try {
+      target = realpathSync(join(binDir, entry.name));
+    } catch {
+      continue;
+    }
+    const rel = relative(nodeModulesRoot, target);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) continue;
+    try {
+      if (!statSync(target).isFile()) continue;
+    } catch {
+      continue;
+    }
+    targets.add(target);
+  }
+  return [...targets].sort();
+}
+
+/**
  * 断言路径的**每一段**都与磁盘上的实际拼写逐字节相同。
  *
  * 为什么不是 `realpathSync(p) === p`：那个检查抓不到本条要防的东西（本机实测）。
@@ -170,8 +203,9 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   // 路径一致。sbpl.ts 保持纯函数（测试要用不存在的假路径），解析放在这个本就与真实文件
   // 系统打交道的层。
   const profilePath = join(o.paths.jobTmp, "profile.sb");
+  const canonicalWorktree = realpathSync(o.paths.worktree);
   const canonicalPaths: SandboxPaths = {
-    worktree: realpathSync(o.paths.worktree),
+    worktree: canonicalWorktree,
     canonicalGit: realpathSync(o.paths.canonicalGit),
     jobTmp: realpathSync(o.paths.jobTmp),
     controlRoot: realpathSync(o.paths.controlRoot),
@@ -179,6 +213,9 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     // 同样的道理适用于 execRoots：调用方即便已经用 defaultExecRoots() 解析过，
     // 这里仍统一再 realpathSync 一遍——不依赖调用方自律，跟上面五个字段一致。
     execRoots: o.paths.execRoots.map((r) => realpathSync(r)),
+    // 不接受调用方传入的额外 worktree exec allow；每次都从当前 `.bin` 实际 symlink
+    // 重新推导 exact target，避免 stale/untrusted path 扩大 process-exec。
+    worktreeExecTargets: resolveWorktreeBinExecTargets(canonicalWorktree),
   };
 
   for (const [label, value] of [
@@ -187,6 +224,7 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     ["worktreesRoot", canonicalPaths.worktreesRoot],
   ] as const) assertOnDiskSpelling(label, value);
   canonicalPaths.execRoots.forEach((r, i) => assertOnDiskSpelling(`execRoots[${i}]`, r));
+  canonicalPaths.worktreeExecTargets?.forEach((r, i) => assertOnDiskSpelling(`worktreeExecTargets[${i}]`, r));
 
   writeFileSync(profilePath, buildProfile(canonicalPaths), "utf8");
 

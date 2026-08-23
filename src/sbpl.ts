@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 
 /**
  * 一条绝对路径从自身的父目录一路向上到（但不含）`/` 的每一级。
@@ -56,6 +56,12 @@ export interface SandboxPaths {
    *  报 `Operation not permitted`。本机的默认值见 sandbox.ts 的 defaultExecRoots()
    *  ——那里才是允许碰真实文件系统（realpathSync/which）的层。 */
   execRoots: string[];
+  /**
+   * npm `.bin` symlink 在 Seatbelt 裁决前会被解析成 `.bin` 之外的真实 target。
+   * 这里只允许 `runSandboxed()` 从当前 worktree 实际 `.bin` 重新推导出的 exact target；
+   * buildProfile 仍会再次验证它们位于本 worktree `node_modules` 内。
+   */
+  worktreeExecTargets?: string[];
 }
 
 /** SBPL 字符串字面量里只需转义反斜杠与双引号 */
@@ -97,6 +103,24 @@ function worktreeAncestors(worktreesRoot: string, worktree: string): string[] {
   return [worktreesRoot];
 }
 
+function validateWorktreeExecTargets(p: SandboxPaths): string[] {
+  const targets = p.worktreeExecTargets ?? [];
+  const nodeModulesRoot = join(p.worktree, "node_modules");
+  for (const target of targets) {
+    if (!isAbsolute(target)) {
+      throw new SbplError("INVALID_INPUT", `worktreeExecTargets 必须是绝对路径，收到：${target}`);
+    }
+    const rel = relative(nodeModulesRoot, target);
+    if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+      throw new SbplError(
+        "INVALID_INPUT",
+        `worktreeExecTargets 只能位于当前 worktree 的 node_modules 内，收到：${target}`,
+      );
+    }
+  }
+  return [...new Set(targets)].sort();
+}
+
 /**
  * 生成本 job 的 SBPL 策略。
  *
@@ -115,6 +139,7 @@ export function buildProfile(p: SandboxPaths): string {
       "execRoots 不能为空：空数组会让 (allow process-exec) 退化成不带过滤条件的规则，等于放行一切可执行文件",
     );
   }
+  const worktreeExecTargets = validateWorktreeExecTargets(p);
   // worktreeAncestors 只覆盖 worktreesRoot **以下**那几级；白名单化读放行之后还要补
   // worktreesRoot 与 canonicalGit 各自往上直到 `/` 的每一级，否则 git 向上找仓库根时
   // 在 `/Users` 就断了（实测 `fatal: Invalid path '/Users': Operation not permitted`）。
@@ -271,6 +296,10 @@ export function buildProfile(p: SandboxPaths): string {
     ";; 换一种从子目录到根的匹配策略）——这不是把这一行 subpath 换个路径就能覆盖的，是需要",
     ";; 单独设计的后续工作，S0-C 实现前必须先确认目标仓库的 workspace 布局。",
     `(allow process-exec (subpath "${q(join(p.worktree, "node_modules", ".bin"))}"))`,
+    ";; npm 的 `.bin` 常是 symlink。Seatbelt 在 process-exec 前解析真实 target，所以 `.bin`",
+    ";; subpath 本身覆盖不到 target。这里只补 `runSandboxed()` 从当前 `.bin` 推导并经",
+    ";; node_modules containment 双重验证的 exact literal；不放开整个 node_modules/worktree。",
+    ...worktreeExecTargets.map((target) => `(allow process-exec (literal "${q(target)}"))`),
     "(allow process-fork)",
     "(allow sysctl-read)",
     "",

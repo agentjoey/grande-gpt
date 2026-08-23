@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, readFileSync, readlinkSync } from "node:fs";
 import { join } from "node:path";
@@ -6,13 +5,14 @@ import type { DatabaseSync } from "node:sqlite";
 import { StateError } from "./errors.ts";
 import { GitExecError, safeGit } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
+import {
+  capturePackageManagerIdentity,
+  isValidHostToolchainIdentity,
+  type HostToolchainIdentity,
+} from "./packageManagerIdentity.ts";
 import { GitError } from "./worktree.ts";
 
-export interface HostToolchain {
-  node: string;
-  pnpm: string;
-  lockfileSha256: string;
-}
+export type HostToolchain = HostToolchainIdentity;
 
 export interface VerificationContext {
   workspaceDigest: string;
@@ -109,28 +109,11 @@ export function workspaceDigest(worktreePath: string): string {
   return hash.digest("hex");
 }
 
-function hostToolchain(worktreePath: string): HostToolchain {
-  const lockfile = readFileSync(join(worktreePath, "pnpm-lock.yaml"));
-  const pnpm = execFileSync("pnpm", ["--version"], {
-    cwd: worktreePath,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
-  if (!process.version || !pnpm) {
-    throw new StateError("INVALID_INPUT", "无法记录本机验证工具链：node 或 pnpm 版本为空。 ");
-  }
-  return {
-    node: process.version,
-    pnpm,
-    lockfileSha256: createHash("sha256").update(lockfile).digest("hex"),
-  };
-}
-
 export function captureVerificationContext(layout: Layout, worktreePath: string): VerificationContext {
   void layout;
   return {
     workspaceDigest: workspaceDigest(worktreePath),
-    hostToolchain: hostToolchain(worktreePath),
+    hostToolchain: capturePackageManagerIdentity(worktreePath),
   };
 }
 
@@ -149,12 +132,16 @@ function parseToolchain(value: unknown): HostToolchain {
   if (typeof value !== "string" || value.length === 0) {
     throw new StateError("INVALID_INPUT", "本机验证记录缺少 hostToolchain，不能签发 attestation。 ");
   }
-  const parsed = JSON.parse(value) as Partial<HostToolchain>;
-  if (!parsed.node || !parsed.pnpm || !parsed.lockfileSha256 ||
-      parsed.node === "unknown" || parsed.pnpm === "unknown" || parsed.lockfileSha256 === "unknown") {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new StateError("INVALID_INPUT", "本机验证记录的 hostToolchain 不是合法 JSON，不能签发 attestation。 ");
+  }
+  if (!isValidHostToolchainIdentity(parsed)) {
     throw new StateError("INVALID_INPUT", "本机验证记录的 hostToolchain 不完整，不能签发 attestation。 ");
   }
-  return parsed as HostToolchain;
+  return parsed;
 }
 
 export function prepareAttestationCandidate(
