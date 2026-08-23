@@ -157,7 +157,7 @@ describe("production Host Verifier lifecycle wiring", () => {
     expect(launches).toBe(1);
   });
 
-  it("projects the same trusted auto mode through grande_task_status", async () => {
+  it("projects the same trusted auto mode through grande_task_status without mandatory pr_status preflight", async () => {
     const prAudit = beginAudit(deps.db, { taskId, tool: "grande_pr_open", input: { taskId } });
     expect(prAudit.allowed()).toBe(true);
     expect(prAudit.executing()).toBe(true);
@@ -168,8 +168,10 @@ describe("production Host Verifier lifecycle wiring", () => {
     expect(status).toBeDefined();
 
     const envelope = (await status.handler({ taskId })).structuredContent as Record<string, any>;
+    expect(envelope.data.deliveryTarget).toBe("pr");
+    expect(envelope.data.developmentRisk).toBe("L2");
     expect(envelope.data.progress).toMatchObject({
-      phase: "ci",
+      phase: "host-verification",
       hostVerification: {
         requiredLevel: "smoke",
         manualOnlyRequired: false,
@@ -179,7 +181,7 @@ describe("production Host Verifier lifecycle wiring", () => {
         jobId: null,
       },
       blocker: null,
-      nextAction: "调用 grande_pr_status 查看当前 exact-head CI；失败则按 bounded diagnostics 修复",
+      nextAction: "直接调用 grande_pr_merge 创建或观察当前 exact-SHA host verifier",
     });
     expect(envelope.data.hostVerifier).toMatchObject({
       mode: "auto",
