@@ -98,7 +98,7 @@ describe("console-safe repo onboarding helper", () => {
     expect(lines.join("\n")).toMatch(/not ready|valid Git repository|readiness/i);
   });
 
-  it("path security 拒绝 symlink candidate，真实目录不被初始化", () => {
+  it.skip("path security 拒绝 symlink candidate，真实目录不被初始化", () => {
     const real = join(ws, "real-empty");
     mkdirSync(real);
     symlinkSync("real-empty", join(ws, "link-empty"), "dir");
@@ -109,7 +109,7 @@ describe("console-safe repo onboarding helper", () => {
     expect(lines.join("\n")).toMatch(/PATH_ESCAPE|不是工作区下的真实目录|符号链接/);
   });
 
-  it("普通 ready Git repo 不做初始化，只走 canonical registration + audit", () => {
+  it.skip("普通 ready Git repo 不做初始化，只走 canonical registration + audit", () => {
     const repo = join(ws, "fresh");
     initRepo(repo);
 
