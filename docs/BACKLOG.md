@@ -89,7 +89,7 @@
 **进入条件**：
 
 1. Phase 7、Phase 8 完成；**已满足**。
-2. `GG-BL-010` 达到 release-ready 稳定门槛：当前 Web、fresh Web、iOS fresh conversation 的真实调用可用，server tool identity 与 client/session binding snapshot 可区分，已有可靠 App refresh/new-session release procedure，且最近没有新的 unexplained `tool disabled` recurrence；**当前未满足**。
+2. `GG-BL-010` 达到 release-ready 稳定门槛：完成 `C-Web-1 + C-iOS + C-Web-2` 三次 same-conversation two-task formal runs，其中 iOS 因当前目标客户端已真实暴露 GrandeGPT capability 而纳入；server tool identity 与 client/session binding snapshot 可区分，已有可靠 App refresh/new-session release procedure，且最近没有新的 unexplained `tool disabled` recurrence。若某目标客户端在 gate 开始前已不再暴露 custom MCP capability，必须记录版本/时间/capability absence 并显式 rebaseline，不把不可达产品路径变成永久 hard gate；**当前未满足**。
 3. 在条件 2 满足前，production **25-tool contract 冻结**，除阻断性安全/可靠性修复外不主动改变工具快照。
 
 **一次性变更目标**：
@@ -101,7 +101,7 @@
 - 正常完成路径将 `grande_task_close` 移出公开 MCP，异常/放弃任务继续走 CLI/Console；
 - 不长期同时暴露新旧 alias，不为了整数目标合并风险不同的核心工具。
 
-**退出条件**：新 tool count/epoch/digest 稳定；Dev App 与 Production App 完成 refresh；Web/iOS 新聊天完成真实任务；失败时可直接回滚上一 Gateway build/tool epoch。
+**退出条件**：新 tool count/epoch/digest 稳定；Dev App 与 Production App 完成 refresh；所有当时实际 capability-supported 的目标 release clients 完成 fresh conversation 真实任务；失败时可直接回滚上一 Gateway build/tool epoch。
 
 ### Phase 10 — Internal Convergence
 
@@ -163,8 +163,10 @@
 - **Release A evidence (2026-08-21)**: candidate `7b98f7dce2f0b10723b29be64ca28e1438f1a779` 加入真实 `buildTools` handler/fixture 行为回归与 canonical result-budget coverage；exact candidate Host boundary 验证为 **5 files / 160 tests PASS**。该历史证据继续作为 connector-compatibility 文档契约的一部分，不因为 Phase 8 closeout 被压缩掉。
 - **Mitigation**: 保留 server-side toolset identity、32 KiB result budget、单次终态 result、有界轮询/分页、compatibility runbook 与长会话真实工具调用回归；不降低 annotations、不绕过 Gateway、不增加第二执行通道。
 - **2026-08-23 Phase 8 evidence**: Phase 8 在不改变 25-tool identity 的情况下完成大量真实 status/read/edit/run/PR/merge 调用并成功 activation，说明 flow simplification 可独立发布；这**不等于** binding drift 已根因关闭。
-- **Remaining**: 完成当前 Web、fresh Web、iOS fresh conversation 的真实两任务 release gate、可靠 App refresh/new-session release procedure，并达到稳定观察要求；最近不得有新的 unexplained `tool disabled` recurrence。该 Remaining 同时构成 Phase 9 public Tool Epoch 的 release gate。
-- **Done when**: 完成**跨客户端两任务** release gate 和稳定观察，或获得可控根因并证明长期稳定后再转 DONE。当前保持 MITIGATED。
+- **2026-08-23 target-client capability evidence**: OpenAI Help Center 当日公开说明仍写 custom/full MCP apps mobile unavailable / web only，但 Human Owner 当前 ChatGPT iOS 原生会话可以真实连续调用 GrandeGPT direct tools。平台文档与实际 rollout/account/product-path 存在冲突；本项目 release gate 因此以目标客户端真实 capability 为准。当前 iOS capability 已确认，所以本轮 formal matrix 仍包含 iOS。
+- **Remaining**: 完成 `C-Web-1 + C-iOS + C-Web-2` 三次 same-conversation two-task formal gate；每次保持 frozen build/epoch/count/digest、无 reconnect/refresh/restart，Task A/B 各 ≤50 external calls、合计 result ≤1 MiB、单 result ≤32 KiB，并对账 Gateway correlation。随后完成 7 天 ordinary-use observation，至少 5 个 conversation、每个 ≥2 个真实任务，覆盖 Web 与当时实际 capability-supported 的其他目标客户端。该 Remaining 同时构成 Phase 9 public Tool Epoch 的 release gate。
+- **Escalation**: 若在 frozen identity / under-budget 条件下出现两个独立、当前 epoch、证据完整的 pre-Gateway disable 样本，且失败调用未到 Gateway、无 401/restart/identity change，则停止继续通过 server payload/OAuth/annotations/tools-list 试探，转 `BLOCKED — ChatGPT platform/session binding boundary` 并附完整证据。
+- **Done when**: **跨客户端两任务** formal matrix 三次全绿，随后 7 天 / ≥5 ordinary conversations 无 unexplained disablement，或获得可控根因并证明长期稳定后再转 DONE。当前保持 MITIGATED。
 
 ### GG-BL-024 — 下一次 Tool Epoch 收敛公开 MCP surface
 
@@ -174,7 +176,7 @@
 - **Problem**: 当前 25-tool contract 中仍有 onboarding 两工具、capability inspect、deploy verify、task close 等可在保持风险语义的前提下合并或内部化；Phase 8 的 internal delivery-target projection 也尚未进入 public TaskBrief schema。零散修改 tools/list 会放大 ChatGPT binding/snapshot 排障变量。
 - **Evidence / Detail**: 2026-08-22 owner-approved simplification proposal 要求一次正式 tool epoch 收敛；Phase 8 已完成 no-tool-epoch primitives，且 production 仍保持 25 tools / epoch 2 / 原 digest。`GG-BL-010` 证明 session/app binding 与 server tool identity 可分叉，因此本项目前被 release gate 阻塞。
 - **Next**: **先完成 `GG-BL-010` release-ready gate，不提前改 production contract。** gate 满足后一次 release 完成：① public `TaskBrief.deliveryTarget`；② `repo_add_propose/apply → grande_repo_register`；③ capability inspect 并入 list filter；④ deploy verify 并入可重入 deploy；⑤正常完成路径移除公开 task_close；⑥ bump toolset epoch 并执行 Dev/Production App refresh。
-- **Done when**: ①旧 25-tool identity 与新 identity 明确不同且新 count/epoch/digest 稳定；② public deliveryTarget 正式可选且扩大外部副作用需要 Human confirmation；③删除工具不再出现在 tools/list；④ `repo_register` 不接受 path/force，proposal 零写入，register 保持 Human Gate/stale protection；⑤ deploy 重入不重复外部副作用；⑥ task 自动 cleanup 不暴露通用 delete；⑦ Dev/Production App refresh 后 Web/iOS 新聊天完成真实任务；⑧失败可直接 rollback 上一 Gateway build/tool epoch。
+- **Done when**: ①旧 25-tool identity 与新 identity 明确不同且新 count/epoch/digest 稳定；② public deliveryTarget 正式可选且扩大外部副作用需要 Human confirmation；③删除工具不再出现在 tools/list；④ `repo_register` 不接受 path/force，proposal 零写入，register 保持 Human Gate/stale protection；⑤ deploy 重入不重复外部副作用；⑥ task 自动 cleanup 不暴露通用 delete；⑦ Dev/Production App refresh 后所有当时实际 capability-supported 的目标 release clients 用 fresh conversation 完成真实任务；⑧失败可直接 rollback 上一 Gateway build/tool epoch。
 
 ### GG-BL-025 — 内部执行、receipt 与 tool assembly 存在潜在重复和隐式耦合
 
