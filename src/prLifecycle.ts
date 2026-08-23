@@ -478,7 +478,7 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
 
             const verificationAudit = beginAudit(deps.db, {
               taskId,
-              tool: "grande_pr_merge",
+              tool: "grande_pr_merge_host_verification",
               input: {
                 taskId,
                 prNumber: state.pr.number,
