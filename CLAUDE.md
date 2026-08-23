@@ -2,9 +2,9 @@
 
 让用户在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行层，定位于个人开发者、小团队和中小型/轻量项目。
 
-> **当前状态（2026-08-23）**：S0–S3、Phase 4、Phase 5、Phase 5.5、Reliability & Automated Host Verifier、Phase 6 与 **Phase 7 Reliability Foundation 均已完成**。Phase 7 closeout 已进入 canonical `main`；**下一阶段是 Phase 8 — Flow Simplification**。
+> **当前状态（2026-08-23）**：S0–S3、Phase 4、Phase 5、Phase 5.5、Reliability & Automated Host Verifier、Phase 6、Phase 7 Reliability Foundation 与 **Phase 8 Flow Simplification 均已完成**。Phase 8 implementation 已进入 canonical `main` 并完成 production activation/readback；**下一阶段是 Phase 9 — Tool Surface Convergence**，但公开 contract 变更仍受 `GG-BL-010` release-ready gate 约束。
 >
-> 当前 production public contract 保持 **25 tools / `toolsetEpoch=2`**；Phase 8 不改变公开 tool surface。当前 production tool digest 为 `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`。
+> 当前 production public contract 仍为 **25 tools / `toolsetEpoch=2`**，tool digest 为 `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`。Phase 8 未改变公开 tool surface。
 
 ## 当前权威入口
 
@@ -12,7 +12,7 @@
 - [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) —— 当前项目/production 快照；
 - [`docs/BACKLOG.md`](docs/BACKLOG.md) —— **当前 backlog、优先级和 roadmap 状态的唯一权威来源**；
 - [`docs/chatgpt-connector-compatibility-runbook.md`](docs/chatgpt-connector-compatibility-runbook.md) —— ChatGPT App tool snapshot / binding / release / recovery；
-- [`docs/superpowers/plans/2026-08-22-grande-gpt-phase7-reliability-foundation.md`](docs/superpowers/plans/2026-08-22-grande-gpt-phase7-reliability-foundation.md) —— Phase 7 实施与 closeout 证据。
+- [`docs/research/2026-08-23-phase8-flow-simplification-closeout.md`](docs/research/2026-08-23-phase8-flow-simplification-closeout.md) —— Phase 8 implementation、dogfood、Host/CI 与 production activation closeout 证据。
 
 2026-08-23 之前混在旧 `CLAUDE.md` 里的 dated 事故复盘与历史“已知遗留”已**原样保留**在 [`docs/history/2026-08-23-CLAUDE-pre-phase8-snapshot.md`](docs/history/2026-08-23-CLAUDE-pre-phase8-snapshot.md)。`docs/research/**`、旧 spec/plan 和该历史快照只保存当时证据，不维护当前状态。
 
@@ -40,9 +40,10 @@
 Request
 → inspect repo
 → TaskBrief / acceptance criteria
+→ classify L1 / L2 / L3
 → code + local verify
-→ commit + push
-→ ready PR
+→ commit + push（按 delivery target）
+→ ready PR（如需要）
 → independent CI / diagnosis
 → exact-SHA attestation + Host gate（按 classifier）
 → expected-SHA merge
@@ -51,6 +52,8 @@ Request
 → durable verify evidence
 → DONE
 ```
+
+Phase 8 在现有 tool contract 后面增加内部 delivery-target projection：`local / pr / deploy` 只显示当前目标需要的阶段。**Phase 8 没有公开 `TaskBrief.deliveryTarget` schema**；该公开字段与 tool-surface convergence 一并留给 Phase 9 的正式 Tool Epoch。
 
 Bug、新需求、Issue 与 PR feedback 重新创建 Task，继续走同一条闭环；不建设独立 Requirement Management、Release、Incident 或 Deployment Platform。
 
@@ -62,7 +65,7 @@ production public MCP contract：
 - `toolsetEpoch=2`
 - `toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`
 
-相对早期 epoch 1 / 23-tool contract，正式 onboarding release 新增 `grande_repo_add_propose` 与 `grande_repo_add_apply`。Phase 7 未改变 tool count/epoch/digest。
+相对早期 epoch 1 / 23-tool contract，正式 onboarding release 新增 `grande_repo_add_propose` 与 `grande_repo_add_apply`。Phase 7 与 Phase 8 都未改变 tool count/epoch/digest。
 
 当前核心工具按职责分组：
 
@@ -73,7 +76,7 @@ production public MCP contract：
 - onboarding：`grande_repo_add_propose`、`grande_repo_add_apply`；
 - cleanup：`grande_task_close`。
 
-不要为了减少工具数在 Phase 8 零散合并/重命名工具。公开 surface 收敛属于 Phase 9 / `GG-BL-024`，必须一次正式 Tool Epoch 完成，并受 `GG-BL-010` release-ready gate 约束。
+公开 surface 收敛属于 Phase 9 / `GG-BL-024`，必须一次正式 Tool Epoch 完成，并受 `GG-BL-010` release-ready gate 约束。在该 gate 满足前，禁止为了“先试试看”零散合并/重命名工具或改变 production `tools/list`。
 
 ## 当前 CLI / production
 
@@ -148,10 +151,10 @@ activation receipt 独立于 merge/deploy evidence，至少绑定：
 
 只有上述条件全部满足才持久化；build/tool identity mismatch 必须 fail closed。后续会话必须能直接从 status 读回 receipt，而不是靠聊天重建时间线。
 
-Phase 7 production receipt 已读回：
+Phase 8 当前 production receipt 已读回：
 
 ```text
-targetBuild = runtimeBuild = git:aec10bbdd8ce01ef7cfc1eada18cb52d692bb162
+targetBuild = runtimeBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97
 toolsetEpoch = 2
 toolsCount = 25
 toolsDigest = sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815
@@ -160,37 +163,51 @@ endpointReady = true
 readProbe = HTTP 200
 ```
 
+## Phase 8 Flow Simplification — 已完成
+
+- 内部 `DeliveryTarget = local | pr | deploy` primitive + TaskProgress projection 已落地；local/pr 不再被无关 deploy 阶段制造 blocker。公开 `TaskBrief.deliveryTarget` contract 留给 Phase 9。
+- `grande_run` 增加固定短 bounded wait；预算内 terminal job 首次调用直接返回终态，超预算返回稳定 jobId，继续使用 `grande_run_result`。
+- 正常 PR flow 不要求先调用 `grande_pr_status`；merge gate 自己返回真实 blocker，status 只按需诊断。verifier 完成后 agent 可在同一 task authorization 下再次进入 merge gate，每次都重新读取 exact PR head / CI / attestation / Host receipt。
+- verifier/runner 永不拥有 merge 权限。
+- 新增 L1/L2/L3 development-risk classifier；未知路径 fail closed 到 L3。
+
+Phase 8 implementation PR #25 exact head `e902877854e2513cfa1d6545ffb15b22cc8410f9`：`unit-selfhost` **112 files / 871 tests PASS**、`typecheck` PASS、GitHub Actions PASS、manual-only Host outer-test **10 files / 172 tests PASS**；merge SHA `217a2dadc2887046decdeb9ab3c2813060ae7d97` 已 activation，durable receipt readback PASS。
+
 ## 当前验证纪律
 
-GrandeGPT 自举任务至少遵守：
+先按 change shape 判断 development risk，再决定流程重量。不要把“更谨慎”误解成“每个 README 都办一场峰会”。
 
-1. worktree 内 fresh `unit-selfhost + typecheck`；
-2. PR exact head 必须有真实 independent CI，不把 `CI=none` 当长期正常；
-3. attestation 必须绑定 current exact SHA；
-4. host-sensitive 变更按 classifier 要求 Host verification；receipt 与 PR head 不一致即无效；
-5. merge 时重新读取 current PR head / CI / attestation / host receipt；
-6. merge 后 canonical 只做安全 refresh；
-7. 需要 production activation 的变更，必须记录 durable activation receipt 并做后续 readback。
+### L1 — 文档 / 非运行资源
 
-Phase 7 最终 implementation candidate `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa` 的证据：
+- 简短 TaskBrief；
+- 基础一致性检查；
+- 不要求独立 design spec、implementation plan、independent reviewer 或 Host verifier；
+- 若实际 diff 触及运行/安全边界，立即升级，不允许继续按 L1。
 
-- `unit-selfhost`：**109 files / 859 tests PASS**；
-- `typecheck`：PASS；
-- GitHub Actions exact-head CI：PASS；
-- manual-only Host outer-test：**10 files / 171 tests PASS**；
-- PR #22 merge：PASS；
-- production activation + later readback：PASS。
+### L2 — 常规业务源码 / 普通 bug
 
-## Phase 8 — 下一阶段
+- 简短 TaskBrief + acceptance criteria；
+- 行为测试，RED → GREEN；
+- 有界 ordinary review；
+- Host verification 按 classifier 走 none/smoke；
+- 不为普通 bug 强制维护独立 spec/plan/Pact ceremony。
 
-Phase 8 的范围与状态只以 [`docs/BACKLOG.md`](docs/BACKLOG.md) 为准。当前计划项：
+### L3 — 核心执行 / 安全 / release 边界
 
-- `GG-BL-020`：`deliveryTarget = local | pr | deploy`，只投影必要阶段；
-- `GG-BL-021`：短 `grande_run` bounded wait，预算内直接返回 terminal result；
-- `GG-BL-022`：减少正常 PR/verifier 的无意义往返，但不削弱任何 exact-SHA gate；
-- `GG-BL-023`：正式落地 L1/L2/L3 开发风险等级。
+- design/spec + implementation plan；
+- independent reviewer；
+- fresh `unit-selfhost + typecheck` 或任务要求的等价完整验证；
+- real independent GitHub CI；
+- full/manual-only Host gate 按 classifier；
+- exact-SHA attestation / receipt / merge checks；
+- 无法分类默认 L3，不允许 agent 自行降级。
 
-**Phase 8 不改变公开 25-tool contract，不 bump toolset epoch。**
+所有等级继续遵守：
+
+1. attestation 必须绑定 current exact SHA；
+2. PR merge 时重新读取 current PR head / CI / attestation / Host receipt；
+3. merge 后 canonical 只做安全 refresh；
+4. 需要 production activation 的变更，必须记录 durable activation receipt 并做后续 readback。
 
 ## 三条铁律
 
@@ -205,6 +222,7 @@ Phase 8 的范围与状态只以 [`docs/BACKLOG.md`](docs/BACKLOG.md) 为准。�
 实现时继续满足：
 
 - 工具调用存在平台超时边界 → 长任务通过 async job + bounded result retrieval，不让普通 MCP call 无限阻塞；
+- `grande_run` 的 bounded wait 只观察已由 runner 建立/持久化的 job；不得让 wrapper 接管进程 ownership、restart/kill/reparent；
 - 响应可能被截断 → 工具必须自己执行 bounded output，并显式返回 `truncated` / `nextCursor`；
 - 写/破坏性/触网工具 annotation 必须如实标注，不能为了客户端可调用性撒谎；
 - 会话状态不依赖 ChatGPT conversation memory，可信状态放 Gateway/SQLite 并按 Task/receipt 索引；
@@ -252,6 +270,12 @@ Phase 8 的范围与状态只以 [`docs/BACKLOG.md`](docs/BACKLOG.md) 为准。�
 - 按 [`docs/chatgpt-connector-compatibility-runbook.md`](docs/chatgpt-connector-compatibility-runbook.md) Refresh/Reconnect，并用 fresh conversation 做 read probe。
 
 Phase 9 改公开 tool snapshot 前，必须满足 [`docs/BACKLOG.md`](docs/BACKLOG.md) 定义的 `GG-BL-010` release-ready gate。
+
+## 下一阶段：Phase 9 — Tool Surface Convergence
+
+Phase 9 范围以 `GG-BL-024` 为准，只在 `GG-BL-010` release-ready gate 满足后进入 public contract change。计划在一次 Tool Epoch 中完成 public `TaskBrief.deliveryTarget` 与公开 tool surface 收敛；不长期并存新旧 alias，不用多个小 epoch 反复扰动 ChatGPT App snapshot。
+
+在 gate 满足前，继续使用 Phase 8 已 activation 的内部 flow simplification，production **25 tools / epoch 2 / current digest** 保持冻结。
 
 ## 目录约定
 

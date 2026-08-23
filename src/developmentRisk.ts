@@ -36,6 +36,7 @@ const L3_SOURCE_BASENAMES = new Set([
 
 const DOC_ROOT_FILES = new Set([
   "README.md",
+  "CLAUDE.md",
   "CHANGELOG.md",
   "CONTRIBUTING.md",
   "LICENSE",

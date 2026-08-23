@@ -4,7 +4,7 @@ import { classifyHostVerification } from "../src/hostVerification.ts";
 
 describe("Phase 8 development risk classifier", () => {
   it("classifies documentation and non-runtime assets as L1", () => {
-    expect(classifyDevelopmentRisk(["README.md", "docs/runbook.md", "assets/logo.svg"])).toBe("L1");
+    expect(classifyDevelopmentRisk(["README.md", "CLAUDE.md", "docs/runbook.md", "assets/logo.svg"])).toBe("L1");
   });
 
   it("classifies ordinary source, ordinary tests and schema text as L2", () => {
