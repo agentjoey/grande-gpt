@@ -14,27 +14,29 @@ GrandeGPT has completed:
 - Phase 5.5 reliability gates;
 - Reliability & Automated Host Verifier activation;
 - Phase 6 Post-Activation Hardening;
-- **Phase 7 Reliability Foundation**.
+- Phase 7 Reliability Foundation;
+- **Phase 8 Flow Simplification**.
 
-**Current development stage: Phase 8 — Flow Simplification.** Its entry condition is satisfied. Phase 8 must keep the current public MCP tool contract frozen.
+**Next planned development stage: Phase 9 — Tool Surface Convergence.** Phase 9 has not entered public contract change yet. `GG-BL-010` remains the release gate, so production stays on the current 25-tool / epoch-2 contract until that gate is satisfied.
 
 ## Current canonical state
 
-- Phase 7 implementation PR: **#22**
-- Phase 7 final implementation head: `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa`
-- Phase 7 implementation merge SHA: `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`
-- Phase 7 project-management closeout PR: **#23**
-- Canonical after Phase 7 closeout: `f796b47dcaa6649b4ae9869e35cea07466ceaf09`
+- Phase 8 implementation PR: **#25**
+- Phase 8 exact implementation head: `e902877854e2513cfa1d6545ffb15b22cc8410f9`
+- Phase 8 implementation merge SHA / activated runtime source: `217a2dadc2887046decdeb9ab3c2813060ae7d97`
+- Phase 8 closeout task: `task-p8-closeout-20260823-001`
 
-Later documentation-only commits may advance canonical without requiring a production Gateway activation. Do not infer runtime build from canonical HEAD alone.
+Earlier Phase 7 implementation PR #22 merged at `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`; its project-management closeout PR #23 later advanced canonical to `f796b47dcaa6649b4ae9869e35cea07466ceaf09` before subsequent work.
+
+Documentation-only commits after the Phase 8 activation may advance canonical without requiring another production Gateway activation. Do not infer runtime build from canonical HEAD alone.
 
 ## Production identity
 
-The most recent Phase 7 production activation receipt was persisted and later read back through the running Gateway:
+The Phase 8 production activation receipt was persisted and then independently read back through the running Gateway:
 
 ```text
-targetBuild = git:aec10bbdd8ce01ef7cfc1eada18cb52d692bb162
-runtimeBuild = git:aec10bbdd8ce01ef7cfc1eada18cb52d692bb162
+targetBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97
+runtimeBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97
 toolsetEpoch = 2
 toolsCount = 25
 toolsDigest = sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815
@@ -44,7 +46,9 @@ readProbe.ok = true
 readProbe.httpStatus = 200
 ```
 
-This proves production activation for the Phase 7 implementation merge. It is deliberately separate from merge evidence and from any deploy receipt.
+The running Host Verifier reports `verifierBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97`.
+
+This proves production activation for the Phase 8 implementation merge. It is deliberately separate from merge evidence and from any deploy receipt.
 
 ## Public MCP contract
 
@@ -54,11 +58,11 @@ Current production tool contract:
 - `toolsetEpoch=2`
 - `toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`
 
-Phase 7 did not add/remove/rename public tools and did not bump the epoch.
+Phase 7 and Phase 8 did not add/remove/rename public tools and did not bump the epoch. Phase 8 changed flow behavior behind the existing public contract.
 
-Phase 8 also keeps the 25-tool contract frozen. Public surface convergence is reserved for Phase 9 / `GG-BL-024`, after Phase 8 completes and `GG-BL-010` reaches the roadmap's release-ready stability gate.
+Public surface convergence is reserved for Phase 9 / `GG-BL-024`. That one-time Tool Epoch must not start until `GG-BL-010` reaches the roadmap's release-ready stability gate.
 
-## Reliability baseline after Phase 7
+## Reliability baseline after Phase 8
 
 ### State migration / recovery
 
@@ -81,9 +85,9 @@ Phase 8 also keeps the 25-tool contract frozen. Public surface convergence is re
 - ownership/nonce checked on release;
 - Gateway write paths and Git/worktree-writing CLI paths share the same boundary.
 
-### Independent CI
+### Independent CI / Host verification
 
-GrandeGPT PRs now have a real GitHub Actions baseline rather than relying on `CI=none`:
+GrandeGPT PRs use a real GitHub Actions baseline rather than relying on `CI=none`:
 
 - runner: pinned `macos-15`;
 - Node 24;
@@ -94,6 +98,16 @@ GrandeGPT PRs now have a real GitHub Actions baseline rather than relying on `CI
 - focused tool-contract checks.
 
 Host-sensitive Seatbelt/LaunchAgent/loopback/real-host boundaries remain with the trusted Host Verifier and are not moved into ordinary CI.
+
+### Phase 8 flow simplification
+
+- an internal `local | pr | deploy` delivery-target primitive projects only the stages relevant to the current target;
+- Phase 8 intentionally does not expose a public `TaskBrief.deliveryTarget` schema; that public contract belongs to Phase 9;
+- `grande_run` observes a newly created job for a fixed short bounded-wait budget and returns a terminal result when it finishes in-budget; long/recovery jobs retain stable `jobId + grande_run_result` semantics;
+- normal PR flow can enter `grande_pr_merge` directly; `grande_pr_status` is diagnosis-on-demand rather than mandatory preflight;
+- after verifier completion, the agent may re-enter the merge gate under the same task authorization, but every merge call still re-reads current PR head, CI, attestation and Host receipt;
+- verifier/runner never receives merge authority;
+- development risk is formally classified L1/L2/L3, with unknown paths failing closed to L3.
 
 ### Production activation evidence
 
@@ -108,40 +122,40 @@ A restart is not considered successful activation until:
 
 A later session can read that receipt instead of reconstructing activation from chat history.
 
-## Final Phase 7 verification evidence
+## Final Phase 8 verification evidence
 
-Final exact implementation candidate `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa`:
+Final exact implementation candidate `e902877854e2513cfa1d6545ffb15b22cc8410f9`:
 
-- local `unit-selfhost`: **109 files / 859 tests PASS**;
+- local `unit-selfhost`: **112 files / 871 tests PASS**;
 - `typecheck`: **PASS**;
-- GitHub Actions exact-head CI: **PASS** (run `32585178938`);
-- manual-only Host outer-test: **10 files / 171 tests PASS**;
-- exact-SHA host receipt: recorded;
-- PR #22: merged;
-- canonical refresh: succeeded;
-- production activation receipt: persisted and later read back.
+- GitHub Actions exact-head CI: **PASS**;
+- manual-only Host outer-test: **10 files / 172 tests PASS**;
+- exact-SHA transitional manual Host receipt: recorded;
+- PR #25: merged;
+- canonical refresh: succeeded to `217a2dadc2887046decdeb9ab3c2813060ae7d97`;
+- production activation receipt: persisted and later read back;
+- public tool identity: unchanged at **25 / epoch 2 / `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`**.
 
-Phase 7 documentation closeout also passed fresh `unit-selfhost` 109/859 + typecheck and GitHub CI before PR #23 merged.
+The Phase 8 PR itself dogfooded the simplified PR continuation path: direct merge first, status only after a real CI blocker, then merge re-entry after CI and again after the real manual-only Host Gate.
 
 ## Current backlog / roadmap
 
-The following Phase 7 items are **DONE / archived**:
+The following Phase 8 items are **DONE / archived**:
 
-- `GG-BL-007` — control-plane backup / SQLite migration / restore;
-- `GG-BL-017` — cross-process repo write lock;
-- `GG-BL-018` — independent GitHub CI;
-- `GG-BL-019` — durable production activation receipt.
-
-Current planned Phase 8 scope:
-
-- `GG-BL-020` — `deliveryTarget = local | pr | deploy`;
+- `GG-BL-020` — internal delivery-target primitive / TaskProgress projection for the no-tool-epoch phase;
 - `GG-BL-021` — bounded wait for short `grande_run` jobs;
-- `GG-BL-022` — reduce unnecessary PR/verifier round trips;
+- `GG-BL-022` — reduce unnecessary PR/verifier round trips while retaining exact-SHA merge authority;
 - `GG-BL-023` — formal L1/L2/L3 development risk levels.
+
+The public `TaskBrief.deliveryTarget` schema is **not** claimed as Phase 8 work. It is part of Phase 9 / `GG-BL-024` together with the one-time public tool-surface convergence.
+
+Next planned roadmap item:
+
+- `GG-BL-024` — Phase 9 Tool Surface Convergence, currently gated before public contract change by `GG-BL-010` release readiness.
 
 Important maintenance/release gate that remains independent:
 
-- `GG-BL-010` — ChatGPT App/session binding drift remains **P0 / MITIGATED** and is a Phase 9 release gate, not a Phase 8 blocker.
+- `GG-BL-010` — ChatGPT App/session binding drift remains **P0 / MITIGATED**. It no longer blocks Phase 8 because Phase 8 is complete, but it still blocks Phase 9's public Tool Epoch.
 
 For all live priority/status changes, use [`docs/BACKLOG.md`](BACKLOG.md), not this snapshot.
 
@@ -165,12 +179,13 @@ The control plane remains outside the code workspace so sandboxed/untrusted repo
 For GrandeGPT self-hosting changes:
 
 1. use a task worktree;
-2. run fresh `unit-selfhost + typecheck`;
-3. require real independent GitHub CI on the exact PR head;
-4. require exact-SHA Host verification when the classifier says the change touches host-only boundaries;
-5. merge only when all current-head gates agree;
-6. refresh canonical safely;
-7. if production activation is required, restart through the guarded Gateway flow and persist/read back activation evidence.
+2. classify development risk before choosing ceremony: L1 docs/non-runtime resources use lightweight checks, L2 ordinary source/bug changes use behavior tests and bounded ordinary review, L3 critical execution/security boundaries require the full design/review/Host gates; unknown classification fails closed to L3;
+3. for code changes, run the profiles required by the task/risk level and keep attestation bound to the exact commit;
+4. require real independent GitHub CI on the exact PR head for PR delivery;
+5. require exact-SHA Host verification when the classifier says the change touches host-only boundaries;
+6. merge only when all current-head gates agree, and re-read them on every merge call;
+7. refresh canonical safely;
+8. if production activation is required, restart through the guarded Gateway flow and persist/read back activation evidence.
 
 Do not substitute old-SHA receipts, a previous CI run, or chat statements for current exact-SHA evidence.
 
@@ -183,6 +198,7 @@ Use these documents by purpose:
 - **Current backlog / roadmap status:** [`BACKLOG.md`](BACKLOG.md)
 - **Coding-agent hard constraints:** [`../CLAUDE.md`](../CLAUDE.md)
 - **ChatGPT connector release/recovery:** [`chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)
+- **Phase 8 closeout evidence:** [`research/2026-08-23-phase8-flow-simplification-closeout.md`](research/2026-08-23-phase8-flow-simplification-closeout.md)
 - **Historical evidence / incident timeline:** `docs/research/**`
 - **Historical design/implementation plans:** `docs/superpowers/specs/**` and `docs/superpowers/plans/**`
 
