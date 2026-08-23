@@ -2,7 +2,9 @@ import type { Hono } from "hono";
 import type { DatabaseSync } from "node:sqlite";
 import { AccessDeniedError, createAccessGate, type AccessConfig } from "./accessGate.ts";
 import { beginAudit } from "./audit.ts";
+import { ConsoleRepoOnboardingError, registerConsoleRepo } from "./consoleRepoOnboarding.ts";
 import { getJob, finishJob, TERMINAL } from "./jobs.ts";
+import { loadLayout } from "./layout.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
 
 /**
@@ -55,6 +57,29 @@ export function mountConsoleRoutes(app: Hono, deps: ConsoleDeps): void {
       throw e;
     }
   };
+
+  /**
+   * Console 项目注册。点击按钮本身就是 Human Owner 对这个 repoId 的显式确认；
+   * 真正写入仍由 Gateway 内的 canonical onboarding primitive 执行。
+   */
+  app.post("/console/repos/:repoId/register", async (c) => {
+    const denied = await gate(c.req.raw.headers);
+    if (denied) return c.json(denied.body, denied.status);
+
+    const repoId = c.req.param("repoId");
+    try {
+      const data = registerConsoleRepo(deps.db, loadLayout(), repoId);
+      return c.json({ ok: true as const, data });
+    } catch (error) {
+      if (error instanceof ConsoleRepoOnboardingError) {
+        const status = error.code === "initialization_failed" || error.code === "registration_failed" ? 500 : 409;
+        const f = fail(error.code, error.message, status);
+        return c.json(f.body, f.status);
+      }
+      const f = fail("registration_failed", "项目注册失败；详情见 Gateway 日志。", 500);
+      return c.json(f.body, f.status);
+    }
+  });
 
   /**
    * 杀掉一个在跑的 job。
