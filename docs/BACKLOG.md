@@ -89,7 +89,7 @@
 **进入条件**：
 
 1. Phase 7、Phase 8 完成；**已满足**。
-2. `GG-BL-010` 达到 release-ready 稳定门槛：完成 `C-Web-1 + C-iOS + C-Web-2` 三次 same-conversation two-task formal runs，其中 iOS 因当前目标客户端已真实暴露 GrandeGPT capability 而纳入；server tool identity 与 client/session binding snapshot 可区分，已有可靠 App refresh/new-session release procedure，且最近没有新的 unexplained `tool disabled` recurrence。若某目标客户端在 gate 开始前已不再暴露 custom MCP capability，必须记录版本/时间/capability absence 并显式 rebaseline，不把不可达产品路径变成永久 hard gate；**当前未满足**。
+2. `GG-BL-010` 达到 release-ready 稳定门槛：§7.2 `C-Web-1 + C-iOS + C-Web-2` 三次 same-conversation two-task formal runs 已于 2026-08-23 **3/3 PASS**；server tool identity 与 client/session binding snapshot 可区分，已有可靠 App refresh/new-session release procedure。当前仍需完成 §7.3 **7-day ordinary-use observation**：至少 5 个普通 conversation、每个至少 2 个真实任务、覆盖 Web 与当前实际 capability-supported 的 iOS，且无 unexplained disablement；**formal matrix 已满足，整体 release-ready gate 仍未满足**。
 3. 在条件 2 满足前，production **25-tool contract 冻结**，除阻断性安全/可靠性修复外不主动改变工具快照。
 
 **一次性变更目标**：
@@ -164,9 +164,10 @@
 - **Mitigation**: 保留 server-side toolset identity、32 KiB result budget、单次终态 result、有界轮询/分页、compatibility runbook 与长会话真实工具调用回归；不降低 annotations、不绕过 Gateway、不增加第二执行通道。
 - **2026-08-23 Phase 8 evidence**: Phase 8 在不改变 25-tool identity 的情况下完成大量真实 status/read/edit/run/PR/merge 调用并成功 activation，说明 flow simplification 可独立发布；这**不等于** binding drift 已根因关闭。
 - **2026-08-23 target-client capability evidence**: OpenAI Help Center 当日公开说明仍写 custom/full MCP apps mobile unavailable / web only，但 Human Owner 当前 ChatGPT iOS 原生会话可以真实连续调用 GrandeGPT direct tools。平台文档与实际 rollout/account/product-path 存在冲突；本项目 release gate 因此以目标客户端真实 capability 为准。当前 iOS capability 已确认，所以本轮 formal matrix 仍包含 iOS。
-- **Remaining**: 完成 `C-Web-1 + C-iOS + C-Web-2` 三次 same-conversation two-task formal gate；每次保持 frozen build/epoch/count/digest、无 reconnect/refresh/restart，Task A/B 各 ≤50 external calls、合计 result ≤1 MiB、单 result ≤32 KiB，并对账 Gateway correlation。随后完成 7 天 ordinary-use observation，至少 5 个 conversation、每个 ≥2 个真实任务，覆盖 Web 与当时实际 capability-supported 的其他目标客户端。该 Remaining 同时构成 Phase 9 public Tool Epoch 的 release gate。
+- **2026-08-23 formal matrix evidence**: `C-Web-1 + C-iOS + C-Web-2` 已 **3/3 PASS**。三次运行均在 frozen `toolsetEpoch=2` / `toolsCount=25` / digest `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815` 下完成 same-conversation two-task gate，无 unexplained disabled / Resource not found / unexpected formal-path 401 / Gateway restart / identity drift；详见 C-Web-1、C-iOS、C-Web-2 独立 evidence。另有 `C-macOS-App supplemental validation: PASS`，只作为额外客户端覆盖，不改变 formal matrix 组成。
+- **Remaining**: §7.2 formal matrix 已完成。现在只剩 §7.3 **7-day ordinary-use observation**：至少 5 个普通 conversation、每个 conversation 至少 2 个真实用户任务，覆盖 Web 与当前实际 capability-supported 的 iOS；只保留 redacted telemetry summary，7 天内不得出现 unexplained disablement，并要求 frozen formal identity 仍成立。该 Remaining 同时构成 Phase 9 public Tool Epoch 的 release gate。
 - **Escalation**: 若在 frozen identity / under-budget 条件下出现两个独立、当前 epoch、证据完整的 pre-Gateway disable 样本，且失败调用未到 Gateway、无 401/restart/identity change，则停止继续通过 server payload/OAuth/annotations/tools-list 试探，转 `BLOCKED — ChatGPT platform/session binding boundary` 并附完整证据。
-- **Done when**: **跨客户端两任务** formal matrix 三次全绿，随后 7 天 / ≥5 ordinary conversations 无 unexplained disablement，或获得可控根因并证明长期稳定后再转 DONE。当前保持 MITIGATED。
+- **Done when**: **跨客户端两任务** formal matrix 三次全绿，随后 7 天 / ≥5 ordinary conversations 无 unexplained disablement，或获得可控根因并证明长期稳定后再转 DONE。formal matrix 已满足；当前仍保持 MITIGATED，等待 observation 完成。
 
 ### GG-BL-024 — 下一次 Tool Epoch 收敛公开 MCP surface
 
