@@ -208,6 +208,8 @@ Task A / Task B 应使用两个 disposable development tasks，覆盖真实 insp
 
 这些 50 calls / 1 MiB / 32 KiB 是**验收预算**，不是对 ChatGPT 平台隐藏配额的推断。禁止建立“达到 magic call count 就应该失败”的测试。
 
+**2026-08-23 formal matrix result: 3/3 PASS (`C-Web-1 + C-iOS + C-Web-2`)。** 这只完成 §7.2；`GG-BL-010` 仍保持 `MITIGATED`，并进入 §7.3 的 7-day ordinary-use observation。
+
 ### 7.3 7-day observation 与关闭条件
 
 Formal matrix 三次全部通过后，`GG-BL-010` 仍保持 `MITIGATED`，进入 7 天 ordinary-use observation：
@@ -239,8 +241,7 @@ Release A 只组合历史 Tasks 1–5：Gateway 边界遥测、单份 canonical 
 release 不重建 App，也不执行 App Refresh / Scan Tools；部署和 Gateway restart 只能走现有受保护
 流程，并由获授权的操作者另行执行。
 
-下表是 Release A 的统一证据账本：历史资料没有记录的字段明确写“未记录”，不能倒推；
-candidate 行在 formal matrix 完成前明确保持“等待外部门禁”，不能用本地自动测试代填。
+下表是 Release A 的统一证据账本。历史资料没有记录的字段明确写“未记录”，不能倒推；三次 formal candidate 已在 2026-08-23 完成并按实际 telemetry 回填。
 `任务 A/B calls / bytes` 中的 bytes 只有一个定义：实际交付的完整 MCP result
 对象 `JSON.stringify(toMcpTextResult(envelope))` 的 UTF-8 字节数，包含外层 JSON
 对 text 内容做的转义；不得改记 inner logical envelope 大小。对于绕过 GrandeGPT
@@ -252,11 +253,10 @@ result，否则记 `outputBytes=unknown`，绝不记 `0`。correlation 只记录
 |---|---|---|---|---|---|---|---|---|---|---|
 | Baseline B-89（失败样本） | 未记录 | 未记录 | installed/enabled；精确 version/count 未记录 | 未记录 | 未记录 | 76 / bytes 未保留 | 13 / bytes 未保留 | 未记录 | disabled 调用未到 Gateway；此前最后一个精确 correlation 未保留 | 未观察到 401 或 restart |
 | Baseline B-256（独立失败样本） | 未记录 | 未记录 | 精确 version/count 未记录 | 未记录 | 未记录 | 未按任务拆分；累计 256 calls / bytes 未保留 | 未按任务拆分 | 未记录 | 第 257 次 disabled 调用未到 Gateway；此前最后一个精确 correlation 未保留 | 未观察到 401 或 restart |
-| Candidate C-Web-1 | fresh ChatGPT Web，等待 formal gate | 等待运行时记录 | 等待运行时记录 version / count | 运行前后记录 | 必须为 `2` / 当前 frozen digest | 等待 Task A 实测 | 等待 Task B 实测 | 无禁用则记 `none observed` | 等待逐调用对账 | 任务间必须 0 / 0 |
-| Candidate C-iOS | 当前 capability-confirmed iOS，等待 formal gate | 等待运行时记录 | 等待运行时记录 version / count | 运行前后记录 | 必须为 `2` / 当前 frozen digest | 等待 Task A 实测 | 等待 Task B 实测 | 无禁用则记 `none observed` | 等待逐调用对账 | 任务间必须 0 / 0 |
-| Candidate C-Web-2 | 第二个 fresh ChatGPT Web，等待 formal gate | 等待运行时记录 | 等待运行时记录 version / count | 运行前后记录 | 必须为 `2` / 当前 frozen digest | 等待 Task A 实测 | 等待 Task B 实测 | 无禁用则记 `none observed` | 等待逐调用对账 | 任务间必须 0 / 0 |
+| Candidate C-Web-1 — **PASS** | fresh ChatGPT Web | GPT-5.6 Sol | App version 未观察；tool count 25 | `git:1b9c620267137ac0af641b323c33183d3bdb13e0` | `2` / `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815` | 16 / 50,835 B | 14 / 37,837 B | none observed | `none` | 0 / 0 |
+| Candidate C-iOS — **PASS** | ChatGPT iOS native | GPT-5.6 Sol | `1.2026.224` / tool count 未观察 | `git:1b9c620267137ac0af641b323c33183d3bdb13e0` | `2` / `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815` | 16 / 38,625 B | 20 / 47,637 B | none observed | `none` | 0 / 0 |
+| Candidate C-Web-2 — **PASS** | second fresh ChatGPT Web | GPT-5.6 Sol | App version / client-visible tool count 未观察 | `git:1b9c620267137ac0af641b323c33183d3bdb13e0` | `2` / `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815` | 16 / 46,776 B | 14 / 22,897 B | none observed | `none` | 0 / 0 |
 
-截至 2026-08-21，本地行为回归已经覆盖真实 built handlers 产生的 `repo_read`、`repo_search`、
-`run_result` 与 error envelopes，再走 canonical `toMcpTextResult` 计算完整编码大小。
-exact candidate host boundary tests 已在 code commit
-`7b98f7dce2f0b10723b29be64ca28e1438f1a779` 通过：5 files / 160 tests。Phase 8 之后 production 已多次在 epoch 2 / 25 tools / frozen digest 下完成 activation 与真实 GrandeGPT 调用；这些证据降低了 server-controlled 风险，但不能替代 7.2 的三次 formal matrix 和 7.3 的稳定观察。因此 `GG-BL-010` 当前准确状态为 **MITIGATED**。
+C-Web-2 的完整 35-call window（含 3 个 preflight 与最终 2 个 probes）为 99,830 B，最大单 result 18,928 B；Task A → Task B 间隔 10.747 秒。最初 Host reconciliation 把最终 `grande_repo_read` 误报为 `MISSING`，原因是脚本错误假定 `POST /mcp` 出现在 `[tool]` 之后。Human Owner 随后提供 exact Host slice，确认真实日志顺序为 `[rpc] 12:25:37.827 → [gw] 12:25:37.828 POST /mcp → 200 → [tool] 12:25:37.830 grande_repo_read ... result=ok outputBytes=3650`，因此最后 boundary 已闭合。
+
+截至 2026-08-23，§7.2 formal matrix 已 **3/3 PASS**。本地行为回归仍覆盖真实 built handlers 产生的 `repo_read`、`repo_search`、`run_result` 与 error envelopes，并通过 canonical `toMcpTextResult` 计算完整编码大小；exact candidate host boundary tests 在 code commit `7b98f7dce2f0b10723b29be64ca28e1438f1a779` 为 5 files / 160 tests PASS。`GG-BL-010` 当前准确状态仍为 **MITIGATED**；剩余关闭条件是 §7.3 的 7-day ordinary-use observation，而不是新的 formal matrix run。
