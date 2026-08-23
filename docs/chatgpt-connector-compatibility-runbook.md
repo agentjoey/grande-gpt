@@ -166,16 +166,81 @@ finally { db.close(); }
 - contract 已变：Scan/Refresh Tools → 新聊天 → `grande_task_status` read probe → 再恢复写操作。
 - onboarding release 的 read probe 必须看到 `toolsetEpoch=2`、`toolsCount=25` 与新的 `toolsDigest`；只有随后才对真实 repo 执行 propose/confirm/apply。
 
-## 7. Release A baseline / candidate 证据表
+## 7. GG-BL-010 release-ready gate / Release A evidence
 
-Release A 只组合 Tasks 1–5：Gateway 边界遥测、单份 canonical tool result、有界
+`GG-BL-010` 当前状态是 **P0 / MITIGATED**。server-controlled 风险已经通过 toolset identity、32 KiB result budget、bounded result、safe correlation telemetry 与兼容性 runbook 降低，但 ChatGPT conversation/App binding 的根因没有被 server-side 证明关闭。
+
+### 7.1 目标客户端 capability 规则
+
+Release gate 以**目标客户端当前真实 capability**为准，不能只根据通用平台文档推断，也不能因为历史上某客户端曾可用就永久要求它可用。
+
+截至 2026-08-23，OpenAI Help Center 的 “Developer mode and MCP apps in ChatGPT” 页面写明 MCP apps 为 web only / mobile unavailable；但同日 Human Owner 在 ChatGPT iOS 原生客户端的当前会话中可以真实调用 GrandeGPT direct tools。两者存在 rollout / account / product-path 层面的事实冲突。
+
+因此本项目采用以下规则：
+
+- 当前 iOS 已有真实 GrandeGPT capability，所以**本轮 formal gate 仍包含 iOS**；
+- 若未来某个目标客户端在 gate 开始前已经不再暴露 GrandeGPT/custom MCP capability，记录客户端版本、时间与 capability absence，并由 backlog 明确 rebaseline；不得把一个产品侧不可达路径变成永久无法满足的 hard gate；
+- 反过来，也不得仅凭平台文档写“不支持”就跳过一个当前实际可调用的 release target；
+- 平台文档只作为 observation，真实 target-client probe 才决定该客户端是否进入 formal matrix。
+
+### 7.2 Formal matrix：同一会话连续两任务
+
+当前 formal matrix 固定为三次独立运行：
+
+1. **C-Web-1**：fresh ChatGPT Web conversation；
+2. **C-iOS**：当前明确可调用 GrandeGPT 的 ChatGPT iOS 客户端 fresh conversation；
+3. **C-Web-2**：第二个 fresh ChatGPT Web conversation，用于排除单一 Web session 偶然性。
+
+每次运行都在**同一个 conversation 内连续完成 Task A 与 Task B**。Task A 完成后 Task B 必须在 5 分钟内开始；两任务之间不得 reconnect、Refresh/Scan Tools、重建 App、重启 Gateway、切换 toolset identity 或人为加入长 idle。
+
+Task A / Task B 应使用两个 disposable development tasks，覆盖真实 inspect、分页/line-range read、至少两次 edit、failing→passing verification、最终 status/read；至少一个真实 async job 应通过稳定 `jobId` 路径最终只调用一次外部 `grande_run_result` 取得终态。无需为了增加调用数制造无意义操作。
+
+**每次 formal run 的 hard pass criteria：**
+
+- zero `The GrandeGPT tool has been disabled` / `Resource not found`；
+- 每个真正由 ChatGPT 派发并抵达 server 的调用都有可对账的 `/mcp → [rpc] tools/call → [tool]` 证据；
+- 无 unexpected 401、Gateway restart 或 toolset identity change；
+- Task A / Task B 各不超过 50 次外部 GrandeGPT 调用；
+- 两任务 serialized MCP result 合计不超过 1 MiB；
+- 单个 result 不超过 32 KiB；
+- 最终 Task B 的 `grande_task_status` 与 `grande_repo_read` 仍成功；
+- 运行前后记录 `gatewayBuild / toolsetEpoch / toolsCount / toolsDigest`，其中 epoch/count/digest 必须稳定。
+
+这些 50 calls / 1 MiB / 32 KiB 是**验收预算**，不是对 ChatGPT 平台隐藏配额的推断。禁止建立“达到 magic call count 就应该失败”的测试。
+
+### 7.3 7-day observation 与关闭条件
+
+Formal matrix 三次全部通过后，`GG-BL-010` 仍保持 `MITIGATED`，进入 7 天 ordinary-use observation：
+
+- 至少 5 个普通 conversation；
+- 每个 conversation 完成至少 2 个真实用户任务；
+- Web 必须覆盖；当前 iOS 因为已确认属于实际 release target，也必须在观察窗口中覆盖；若窗口开始前 capability 已消失，按 7.1 记录并 rebaseline；
+- 只保留 redacted summary：conversation correlation、成功调用数、累计 input/output bytes、tool distribution、401/auth failure、Gateway restart、pre-Gateway disable report；不保存内容正文或 token；
+- 7 天内没有 unexplained disablement，且 formal matrix / frozen tool identity 仍成立，才可把 `GG-BL-010` 从 `MITIGATED` 转为 `DONE`。
+
+### 7.4 再次复现时何时停止修改 server
+
+如果在当前 frozen contract 与上述预算内再次出现 disablement，必须先分边界：
+
+- 若请求到达 Gateway 并出现 401 / protocol / handler failure，诊断该具体 server boundary；
+- 若 UI/agent 报 disabled，但失败调用**没有任何对应 `/mcp` 请求到达 Gateway**，同时 Gateway health 正常、无 401、无 restart、`gatewayBuild / epoch / count / digest` 未变化，则记录为 `pre-Gateway binding failure`。
+
+当出现**两个独立、当前 epoch、证据完整**的 `pre-Gateway binding failure` 样本，并且都满足上述 frozen identity / under-budget 条件时，不再通过继续压缩 Gateway payload、降低 annotations、改 OAuth 或改变 tools/list 进行试探。此时 `GG-BL-010` 应转为：
+
+`BLOCKED — ChatGPT platform/session binding boundary`
+
+证据至少包含：时间、client/platform/model、App/tool count、server build/epoch/digest、最后成功 correlation、失败调用未到 Gateway 的日志窗口、401/restart=0，以及最小复现步骤。
+
+### 7.5 Release A baseline / candidate 证据表
+
+Release A 只组合历史 Tasks 1–5：Gateway 边界遥测、单份 canonical tool result、有界
 `grande_run_result` 等待，以及 repo read/search 输出预算。它不改变 tool name、input schema
 或 annotations，所以 `toolsetEpoch` 必须保持 `2`，`toolsDigest` 必须保持不变。这个 patch
 release 不重建 App，也不执行 App Refresh / Scan Tools；部署和 Gateway restart 只能走现有受保护
 流程，并由获授权的操作者另行执行。
 
 下表是 Release A 的统一证据账本：历史资料没有记录的字段明确写“未记录”，不能倒推；
-candidate 行在真实 Web/iOS 门禁完成前明确保持“等待外部门禁”，不能用本地自动测试代填。
+candidate 行在 formal matrix 完成前明确保持“等待外部门禁”，不能用本地自动测试代填。
 `任务 A/B calls / bytes` 中的 bytes 只有一个定义：实际交付的完整 MCP result
 对象 `JSON.stringify(toMcpTextResult(envelope))` 的 UTF-8 字节数，包含外层 JSON
 对 text 内容做的转义；不得改记 inner logical envelope 大小。对于绕过 GrandeGPT
@@ -187,21 +252,11 @@ result，否则记 `outputBytes=unknown`，绝不记 `0`。correlation 只记录
 |---|---|---|---|---|---|---|---|---|---|---|
 | Baseline B-89（失败样本） | 未记录 | 未记录 | installed/enabled；精确 version/count 未记录 | 未记录 | 未记录 | 76 / bytes 未保留 | 13 / bytes 未保留 | 未记录 | disabled 调用未到 Gateway；此前最后一个精确 correlation 未保留 | 未观察到 401 或 restart |
 | Baseline B-256（独立失败样本） | 未记录 | 未记录 | 精确 version/count 未记录 | 未记录 | 未记录 | 未按任务拆分；累计 256 calls / bytes 未保留 | 未按任务拆分 | 未记录 | 第 257 次 disabled 调用未到 Gateway；此前最后一个精确 correlation 未保留 | 未观察到 401 或 restart |
-| Candidate C-Web-1 | ChatGPT Web，等待外部门禁 | 等待运行时记录 | 等待运行时记录 version / count | 等待受保护部署后 `selfcheck` | 必须为 `2` / 等待 `selfcheck` 精确 digest | 等待 Task A 实测 | 等待 Task B 实测 | 等待时间窗核对；无禁用则记 `none observed` | 等待逐调用 `/mcp → [rpc] → [tool]` 对账 | 等待日志核对；任务间必须 0 restart |
-| Candidate C-iOS | 当前 iOS App，等待外部门禁 | 等待运行时记录 | 等待运行时记录 version / count | 等待受保护部署后 `selfcheck` | 必须为 `2` / 等待 `selfcheck` 精确 digest | 等待 Task A 实测 | 等待 Task B 实测 | 等待时间窗核对；无禁用则记 `none observed` | 等待逐调用 `/mcp → [rpc] → [tool]` 对账 | 等待日志核对；任务间必须 0 restart |
-| Candidate C-Web-2 | 第二个 fresh Web conversation，等待外部门禁 | 等待运行时记录 | 等待运行时记录 version / count | 等待受保护部署后 `selfcheck` | 必须为 `2` / 等待 `selfcheck` 精确 digest | 等待 Task A 实测 | 等待 Task B 实测 | 等待时间窗核对；无禁用则记 `none observed` | 等待逐调用 `/mcp → [rpc] → [tool]` 对账 | 等待日志核对；任务间必须 0 restart |
-
-每次 candidate 运行必须同时保留起止时间和以下判定：Task A、Task B 各不超过 50 次外部
-GrandeGPT 调用；两任务 serialized result 合计不超过 1 MiB；单个结果不超过 32 KiB；至少一个
-真实 job 只用一次外部 `grande_run_result` 取得终态。这里的 50 次、1 MiB、32 KiB 是 Release A
-验收上限，不是 ChatGPT 平台的推断配额，也不能让测试依赖“累计到某个 magic call count 就失败”。
-部署后的 `gatewayBuild / toolsetEpoch / toolsCount / toolsDigest` 必须在每次运行前后分别由
-`selfcheck` 记录；任一身份变化、意外 401、Gateway restart 或 pre-Gateway disablement 都按真实
-边界记录，不得改写成应用 handler 失败。
+| Candidate C-Web-1 | fresh ChatGPT Web，等待 formal gate | 等待运行时记录 | 等待运行时记录 version / count | 运行前后记录 | 必须为 `2` / 当前 frozen digest | 等待 Task A 实测 | 等待 Task B 实测 | 无禁用则记 `none observed` | 等待逐调用对账 | 任务间必须 0 / 0 |
+| Candidate C-iOS | 当前 capability-confirmed iOS，等待 formal gate | 等待运行时记录 | 等待运行时记录 version / count | 运行前后记录 | 必须为 `2` / 当前 frozen digest | 等待 Task A 实测 | 等待 Task B 实测 | 无禁用则记 `none observed` | 等待逐调用对账 | 任务间必须 0 / 0 |
+| Candidate C-Web-2 | 第二个 fresh ChatGPT Web，等待 formal gate | 等待运行时记录 | 等待运行时记录 version / count | 运行前后记录 | 必须为 `2` / 当前 frozen digest | 等待 Task A 实测 | 等待 Task B 实测 | 无禁用则记 `none observed` | 等待逐调用对账 | 任务间必须 0 / 0 |
 
 截至 2026-08-21，本地行为回归已经覆盖真实 built handlers 产生的 `repo_read`、`repo_search`、
 `run_result` 与 error envelopes，再走 canonical `toMcpTextResult` 计算完整编码大小。
 exact candidate host boundary tests 已在 code commit
-`7b98f7dce2f0b10723b29be64ca28e1438f1a779` 通过：5 files / 160 tests。该绑定证据不等于
-production activation；受保护部署/Gateway restart、部署后 `selfcheck`，以及三次 Web/iOS
-真实验收仍是明确待完成的外部门禁。因此 `GG-BL-010` 保持 `OPEN`。
+`7b98f7dce2f0b10723b29be64ca28e1438f1a779` 通过：5 files / 160 tests。Phase 8 之后 production 已多次在 epoch 2 / 25 tools / frozen digest 下完成 activation 与真实 GrandeGPT 调用；这些证据降低了 server-controlled 风险，但不能替代 7.2 的三次 formal matrix 和 7.3 的稳定观察。因此 `GG-BL-010` 当前准确状态为 **MITIGATED**。
