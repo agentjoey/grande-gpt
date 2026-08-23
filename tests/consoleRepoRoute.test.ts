@@ -66,6 +66,22 @@ describe("POST /console/repos/:repoId/register", () => {
     }
   });
 
+  it("重复注册返回 409，不把幂等失败伪装成第二次成功", async () => {
+    mkdirSync(join(ws, "repeat-project"));
+    const { a, db } = app();
+    try {
+      const first = await a.request("/console/repos/repeat-project/register", { method: "POST" });
+      expect(first.status).toBe(200);
+
+      const second = await a.request("/console/repos/repeat-project/register", { method: "POST" });
+      expect(second.status).toBe(409);
+      const body = await second.json() as { ok: boolean; error: { code: string } };
+      expect(body).toEqual({ ok: false, error: { code: "already_registered", message: "仓库 repeat-project 已注册；拒绝重复注册。" } });
+    } finally {
+      db.close();
+    }
+  });
+
   it("非空非 Git 目录 readiness 失败时 409 且不注册", async () => {
     const repo = join(ws, "plain");
     mkdirSync(repo);
