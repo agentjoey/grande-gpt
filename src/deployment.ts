@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
 import { parse } from "yaml";
 import { beginAudit, type AuditHandle } from "./audit.ts";
+import { startDeploymentHostJob, type StartedDeploymentHostJob } from "./deploymentHostRunner.ts";
 import { err, ok } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import { getJob, TERMINAL } from "./jobs.ts";
-import { getProfile } from "./profiles.ts";
+import { getDeploymentProfile, type RunProfile } from "./profiles.ts";
 import { MAX_REPO_READ_BYTES, repoRead } from "./repoFile.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
@@ -21,6 +22,8 @@ export interface DeploymentSpec {
 
 export interface DeploymentToolOptions {
   requireMerged?: (taskId: string) => Promise<{ merged: boolean; mergeSha?: string }>;
+  /** Test seam only; production leaves this undefined and uses startDeploymentHostJob. */
+  startHostProfile?: (args: { taskId: string; repoId: string; profileName: string }) => StartedDeploymentHostJob;
 }
 
 interface DeploymentReceipt {
@@ -182,10 +185,16 @@ function unwrap(response: { structuredContent: unknown }, action: string): Recor
     : {};
 }
 
-function assertProfileRole(deps: ToolDeps, task: TaskRow, action: DeploymentAction, role: "deploy" | "verify" | "rollback"): void {
-  if (action.kind !== "profile") return;
+function assertProfileRole(
+  deps: ToolDeps,
+  task: TaskRow,
+  action: DeploymentAction,
+  role: "deploy" | "verify" | "rollback",
+): RunProfile | undefined {
+  if (action.kind !== "profile") return undefined;
+  let profile: RunProfile;
   try {
-    getProfile(deps.layout, task.repoId, action.profile);
+    profile = getDeploymentProfile(deps.layout, task.repoId, action.profile);
   } catch (error) {
     throw new StateError("INVALID_INPUT", error instanceof Error ? error.message : String(error));
   }
@@ -201,6 +210,7 @@ function assertProfileRole(deps: ToolDeps, task: TaskRow, action: DeploymentActi
       `rollback.profile=${action.profile} 不是 rollback/rollback-*。`,
     );
   }
+  return profile;
 }
 
 async function assertCapabilityRole(
@@ -253,11 +263,28 @@ async function executeAction(
   task: TaskRow,
   action: DeploymentAction,
   role: "deploy" | "verify" | "rollback",
+  options: DeploymentToolOptions,
 ): Promise<ActionResult> {
-  assertProfileRole(deps, task, action, role);
+  const profile = assertProfileRole(deps, task, action, role);
   await assertCapabilityRole(tools, action, role);
 
   if (action.kind === "profile") {
+    if (profile?.execution === "deployment-host") {
+      if (role === "rollback") {
+        throw new StateError(
+          "POLICY_DENIED",
+          `deployment-host profile ${task.repoId}/${action.profile} 只允许 grande_deploy / grande_deploy_verify；rollback 不得使用 trusted host execution。`,
+        );
+      }
+      const started = options.startHostProfile
+        ? options.startHostProfile({ taskId: task.taskId, repoId: task.repoId, profileName: action.profile })
+        : startDeploymentHostJob(
+            { db: deps.db, layout: deps.layout },
+            { taskId: task.taskId, repoId: task.repoId, profileName: action.profile },
+          );
+      return { complete: false, jobId: started.jobId };
+    }
+
     const run = toolByName(tools, "grande_run");
     const data = unwrap(await run.handler({ taskId: task.taskId, profile: action.profile }), `${role} profile`);
     if (typeof data.jobId !== "string") throw new StateError("INVALID_INPUT", `${role} profile 未返回 jobId。`);
@@ -424,7 +451,7 @@ export function createDeploymentTools(
           };
         }
 
-        const result = await executeAction(deps, tools, task, spec.deploy, "deploy");
+        const result = await executeAction(deps, tools, task, spec.deploy, "deploy", options);
         const receipt: DeploymentReceipt = {
           ...baseReceipt(taskId, spec, merged),
           deployComplete: result.complete,
@@ -514,7 +541,7 @@ export function createDeploymentTools(
         }
 
         audit = beginToolAudit(deps, taskId, "grande_deploy_verify", { taskId, verifyRef: actionRef(spec.verify) });
-        const result = await executeAction(deps, tools, task, spec.verify, "verify");
+        const result = await executeAction(deps, tools, task, spec.verify, "verify", options);
         if (result.complete) {
           receipt.verifyComplete = true;
           receipt.verifiedAt = Date.now();
@@ -565,7 +592,7 @@ export function createDeploymentTools(
         }
 
         audit = beginToolAudit(deps, taskId, "grande_deploy_rollback", { taskId, rollbackRef: actionRef(spec.rollback) });
-        const result = await executeAction(deps, tools, task, spec.rollback, "rollback");
+        const result = await executeAction(deps, tools, task, spec.rollback, "rollback", options);
         if (result.jobId) receipt.rollbackJobId = result.jobId;
         if (result.complete) receipt.rolledBackAt = Date.now();
         saveReceipt(deps, receipt);
