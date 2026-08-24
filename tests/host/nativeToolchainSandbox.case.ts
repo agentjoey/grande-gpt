@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveNativeToolchainClosure } from "../../src/nativeToolchain.ts";
 import { buildProfile, type SandboxPaths } from "../../src/sbpl.ts";
@@ -69,6 +69,18 @@ function runWithProfileTransform(source: string, output: string, transform: (pro
   });
 }
 
+function developerRoot(canonical: SandboxPaths): string {
+  const rootPath = canonical.toolchainReadRoots!.find((value) => basename(value) === "Developer");
+  if (!rootPath) throw new Error("test fixture could not resolve active Developer Directory");
+  return rootPath;
+}
+
+function xcodeContentsRoot(canonical: SandboxPaths): string | null {
+  const developer = developerRoot(canonical);
+  const contents = dirname(developer);
+  return basename(contents) === "Contents" && basename(dirname(contents)).endsWith(".app") ? contents : null;
+}
+
 describe("GG-BL-029 controlled macOS native toolchain execution", () => {
   it("lets an approved darwin-clang profile compile repo-owned source/output", async () => {
     const { source, output } = writeProbe();
@@ -99,15 +111,35 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
   it("load-bearing reverse proof: removing active Developer Directory read root makes clang report it inaccessible", () => {
     const { source, output } = writeProbe();
     const result = runWithProfileTransform(source, output, (profile, canonical) => {
-      const developerRoot = canonical.toolchainReadRoots!.find((rootPath) => rootPath !== "/var/select")!;
+      const developer = developerRoot(canonical);
       return profile
         .split("\n")
-        .filter((line) => line.trim() !== `(allow file-read* (subpath "${developerRoot}"))`)
+        .filter((line) => line.trim() !== `(allow file-read* (subpath "${developer}"))`)
         .join("\n");
     });
 
     expect(result.status).not.toBe(0);
     expect(result.stderr + result.stdout).toMatch(/developer directory .* isn't accessible|operation not permitted/i);
+  });
+
+  it("load-bearing reverse proof: removing Xcode Contents read root blocks Info.plist/shared-framework resolution", () => {
+    const { source, output } = writeProbe();
+    const result = runWithProfileTransform(source, output, (profile, canonical) => {
+      const contents = xcodeContentsRoot(canonical);
+      if (!contents) return profile;
+      return profile
+        .split("\n")
+        .filter((line) => line.trim() !== `(allow file-read* (subpath "${contents}"))`)
+        .join("\n");
+    });
+
+    const canonical = canonicalPaths();
+    if (xcodeContentsRoot(canonical)) {
+      expect(result.status).not.toBe(0);
+      expect(result.stderr + result.stdout).toMatch(/Info\.plist|SharedFrameworks|blocked by sandbox|operation not permitted/i);
+    } else {
+      expect(result.status).toBe(0);
+    }
   });
 
   it("load-bearing reverse proof: removing exact toolchain exec targets prevents the compile", () => {

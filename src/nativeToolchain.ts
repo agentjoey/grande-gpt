@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { realpathSync, statSync } from "node:fs";
-import { relative, sep } from "node:path";
+import { basename, dirname, relative, sep } from "node:path";
 
 export type NativeToolchain = "darwin-clang";
 
@@ -36,6 +36,15 @@ function isUnder(parent: string, child: string): boolean {
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`));
 }
 
+function xcodeContentsRoot(developerDir: string): string | null {
+  if (basename(developerDir) !== "Developer") return null;
+  const contents = dirname(developerDir);
+  if (basename(contents) !== "Contents") return null;
+  const app = dirname(contents);
+  if (!basename(app).endsWith(".app")) return null;
+  return contents;
+}
+
 /**
  * 解析受控 Darwin clang toolchain 的宿主依赖闭包。
  *
@@ -43,6 +52,12 @@ function isUnder(parent: string, child: string): boolean {
  * 返回 active Developer Directory 的只读根，以及编译一个 C 可执行文件实际需要的
  * clang/ld 精确 executable。`/var/select` 保留原始 spelling，因为 xcode-select 的
  * 失败路径正是这个 spelling；把它 realpath 成 `/private/var/select` 会再次漏掉同一权限。
+ *
+ * 完整 Xcode 安装还有一个额外只读依赖：`xcodebuild` 会读取同一 bundle 的
+ * `Contents/Info.plist` 与 `Contents/SharedFrameworks/*`。只有当 active Developer
+ * Directory 确实形如 `<Xcode.app>/Contents/Developer` 时才把对应 `Contents` 加入
+ * read closure；CommandLineTools 的 `/Library/Developer/CommandLineTools` 不满足这个
+ * 结构，因此不会顺手把 `/Library/Developer` 放开。
  */
 export function resolveNativeToolchainClosure(toolchain: NativeToolchain): NativeToolchainClosure {
   if (toolchain !== "darwin-clang") {
@@ -71,8 +86,9 @@ export function resolveNativeToolchainClosure(toolchain: NativeToolchain): Nativ
     }
   }
 
+  const xcodeContents = xcodeContentsRoot(developerDir);
   return {
-    readRoots: ["/var/select", developerDir],
+    readRoots: [...new Set(["/var/select", ...(xcodeContents ? [xcodeContents] : []), developerDir])],
     execTargets: [...new Set([clang, ld])],
   };
 }
