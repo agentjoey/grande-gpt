@@ -402,17 +402,24 @@ export function createDeploymentTools(
           if (existing.deployUncertain) {
             return uncertainDeployEnvelope(taskId, true, existing.deployRef);
           }
-          return {
-            structuredContent: ok({
-              taskId,
-              data: {
-                state: currentState(existing),
-                jobId: existing.deployJobId ?? existing.verifyJobId,
-                existing: true,
-              },
-              hint: `任务 ${taskId} 已有同一 deploy spec 的 receipt，未重复部署。`,
-            }),
-          };
+          const retryFailedProfileDeploy =
+            spec.deploy.kind === "profile" &&
+            !existing.deployComplete &&
+            existing.deployJobId !== undefined &&
+            profileJobState(deps, task, existing.deployJobId, spec.deploy.profile) === "failed";
+          if (!retryFailedProfileDeploy) {
+            return {
+              structuredContent: ok({
+                taskId,
+                data: {
+                  state: currentState(existing),
+                  jobId: existing.deployJobId ?? existing.verifyJobId,
+                  existing: true,
+                },
+                hint: `任务 ${taskId} 已有同一 deploy spec 的 receipt，未重复部署。`,
+              }),
+            };
+          }
         }
 
         const merged = await (options.requireMerged
