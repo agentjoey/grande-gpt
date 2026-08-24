@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import type { Layout } from "./layout.ts";
+import type { NativeToolchain } from "./nativeToolchain.ts";
 
 export class ProfileError extends Error {
   readonly code: string;
@@ -18,6 +19,8 @@ export interface RunProfile {
   timeoutSeconds: number;
   maxOutputBytes: number;
   maxRssMb: number;
+  /** Trusted control-plane opt-in. Repo content/model input cannot provide host toolchain paths. */
+  toolchain?: NativeToolchain;
 }
 
 /** 墙钟超时是唯一可靠的资源兜底（规格 §6.5），上限防止一个笔误挂住 job 一整天 */
@@ -65,7 +68,7 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
       throw new ProfileError("BAD_CONFIG", `${where} 必须是映射`);
     }
-    const { argv, timeoutSeconds, maxOutputBytes, maxRssMb } = raw as Record<string, unknown>;
+    const { argv, timeoutSeconds, maxOutputBytes, maxRssMb, toolchain } = raw as Record<string, unknown>;
 
     if (!Array.isArray(argv)) {
       throw new ProfileError(
@@ -93,6 +96,12 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
     if (maxRssMb !== undefined && (typeof maxRssMb !== "number" || maxRssMb <= 0)) {
       throw new ProfileError("BAD_CONFIG", `${where} 的 maxRssMb 必须是正数`);
     }
+    if (toolchain !== undefined && toolchain !== "darwin-clang") {
+      throw new ProfileError(
+        "BAD_CONFIG",
+        `${where} 的 toolchain 只允许固定枚举 darwin-clang；不接受任意 executable/path。`,
+      );
+    }
 
     out.set(name, {
       name,
@@ -100,6 +109,7 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
       timeoutSeconds,
       maxOutputBytes: (maxOutputBytes as number | undefined) ?? DEFAULT_MAX_OUTPUT_BYTES,
       maxRssMb: (maxRssMb as number | undefined) ?? DEFAULT_MAX_RSS_MB,
+      toolchain: toolchain as NativeToolchain | undefined,
     });
   }
   return out;

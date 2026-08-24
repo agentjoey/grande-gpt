@@ -47,6 +47,24 @@ describe("loadProfiles()", () => {
     expect(p.maxRssMb).toBeGreaterThan(0);
   });
 
+  it("只接受受控 darwin-clang toolchain 枚举，普通 profile 默认没有 toolchain 权限", () => {
+    const l = writeConfig(
+      'repos:\n  demo:\n' +
+      '    native: { argv: ["pnpm", "test"], timeoutSeconds: 300, toolchain: "darwin-clang" }\n' +
+      '    unit: { argv: ["pnpm", "test"], timeoutSeconds: 300 }\n',
+    );
+    const profiles = loadProfiles(l, "demo");
+    expect(profiles.get("native")?.toolchain).toBe("darwin-clang");
+    expect(profiles.get("unit")?.toolchain).toBeUndefined();
+  });
+
+  it("拒绝任意/未知 toolchain 名称，避免配置退化成 generic host toolchain escape hatch", () => {
+    const l = writeConfig(
+      'repos:\n  demo:\n    native: { argv: ["pnpm", "test"], timeoutSeconds: 300, toolchain: "arbitrary-host" }\n',
+    );
+    expect(() => loadProfiles(l, "demo")).toThrow(expect.objectContaining({ code: "BAD_CONFIG" }));
+  });
+
   it("仓库之间互不可见：demo 的 profile 不会出现在 other 里", () => {
     // 这一条不是形式主义——两个仓库共用一份配置文件，若按 repoId 过滤写错，
     // 一个仓库就能跑另一个仓库注册的命令。
@@ -90,7 +108,7 @@ describe("loadProfiles()", () => {
 });
 
 describe("getProfile()", () => {
-  it("未注册的 profile 抛 PROFILE_NOT_FOUND，且错误信息列出可用的 profile", () => {
+  it("未注册的 profile 抛 PROFILE_NOT_FOUND，且错误信息列出可用项", () => {
     const l = writeConfig('repos:\n  demo:\n    unit: { argv: ["a"], timeoutSeconds: 10 }\n    lint: { argv: ["b"], timeoutSeconds: 10 }\n');
     try {
       getProfile(l, "demo", "nope");

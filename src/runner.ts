@@ -176,6 +176,7 @@ export function startJob(
         worktree, canonicalGit, jobTmp: realpathSync(jobTmp),
         controlRoot: layout.controlRoot, worktreesRoot, execRoots: defaultExecRoots(),
       },
+      toolchain: profile.toolchain,
       timeoutMs: profile.timeoutSeconds * 1000,
       maxOutputBytes: profile.maxOutputBytes,
       maxRssMb: profile.maxRssMb,

@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { resolveNativeToolchainClosure, type NativeToolchain } from "./nativeToolchain.ts";
 import { buildProfile, type SandboxPaths } from "../src/sbpl.ts";
 
 /**
@@ -23,6 +24,8 @@ export interface RunOptions {
   paths: SandboxPaths;
   timeoutMs: number;
   maxOutputBytes: number;
+  /** Only a trusted control-plane profile may opt in; the resolver accepts no caller paths/argv. */
+  toolchain?: NativeToolchain;
   /** 进程组总 RSS 上限（MB）。省略则不做内存兜底 */
   maxRssMb?: number;
   /** 在子进程 spawn 后同步回调，传入 pgid —— 调用方不需要 await 就能拿到 pgid */
@@ -204,6 +207,7 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   // 系统打交道的层。
   const profilePath = join(o.paths.jobTmp, "profile.sb");
   const canonicalWorktree = realpathSync(o.paths.worktree);
+  const toolchain = o.toolchain ? resolveNativeToolchainClosure(o.toolchain) : undefined;
   const canonicalPaths: SandboxPaths = {
     worktree: canonicalWorktree,
     canonicalGit: realpathSync(o.paths.canonicalGit),
@@ -216,6 +220,10 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     // 不接受调用方传入的额外 worktree exec allow；每次都从当前 `.bin` 实际 symlink
     // 重新推导 exact target，避免 stale/untrusted path 扩大 process-exec。
     worktreeExecTargets: resolveWorktreeBinExecTargets(canonicalWorktree),
+    // 同样不接受 caller-supplied native-toolchain roots/files/targets。只有 fixed enum 解析器能产生。
+    toolchainReadRoots: toolchain ? [...toolchain.readRoots] : [],
+    toolchainReadFiles: toolchain ? [...toolchain.readFiles] : [],
+    toolchainExecTargets: toolchain ? [...toolchain.execTargets] : [],
   };
 
   for (const [label, value] of [
@@ -225,6 +233,9 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   ] as const) assertOnDiskSpelling(label, value);
   canonicalPaths.execRoots.forEach((r, i) => assertOnDiskSpelling(`execRoots[${i}]`, r));
   canonicalPaths.worktreeExecTargets?.forEach((r, i) => assertOnDiskSpelling(`worktreeExecTargets[${i}]`, r));
+  canonicalPaths.toolchainReadRoots?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadRoots[${i}]`, r));
+  canonicalPaths.toolchainReadFiles?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadFiles[${i}]`, r));
+  canonicalPaths.toolchainExecTargets?.forEach((r, i) => assertOnDiskSpelling(`toolchainExecTargets[${i}]`, r));
 
   writeFileSync(profilePath, buildProfile(canonicalPaths), "utf8");
 
