@@ -62,6 +62,12 @@ export interface SandboxPaths {
    * buildProfile 仍会再次验证它们位于本 worktree `node_modules` 内。
    */
   worktreeExecTargets?: string[];
+  /**
+   * Trusted native-toolchain closure。普通 caller 不能直接扩这些字段：production
+   * `runSandboxed()` 会根据 control-plane profile 的固定 toolchain enum 重新推导。
+   */
+  toolchainReadRoots?: string[];
+  toolchainExecTargets?: string[];
 }
 
 /** SBPL 字符串字面量里只需转义反斜杠与双引号 */
@@ -103,6 +109,15 @@ function worktreeAncestors(worktreesRoot: string, worktree: string): string[] {
   return [worktreesRoot];
 }
 
+function isUnder(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+function overlaps(a: string, b: string): boolean {
+  return isUnder(a, b) || isUnder(b, a);
+}
+
 function validateWorktreeExecTargets(p: SandboxPaths): string[] {
   const targets = p.worktreeExecTargets ?? [];
   const nodeModulesRoot = join(p.worktree, "node_modules");
@@ -119,6 +134,36 @@ function validateWorktreeExecTargets(p: SandboxPaths): string[] {
     }
   }
   return [...new Set(targets)].sort();
+}
+
+function validateToolchainClosure(p: SandboxPaths): { readRoots: string[]; execTargets: string[] } {
+  const readRoots = [...new Set(p.toolchainReadRoots ?? [])].sort();
+  const execTargets = [...new Set(p.toolchainExecTargets ?? [])].sort();
+  const sensitive = [p.worktree, p.canonicalGit, p.jobTmp, p.controlRoot, p.worktreesRoot];
+
+  for (const root of readRoots) {
+    if (!isAbsolute(root)) {
+      throw new SbplError("INVALID_INPUT", `toolchainReadRoots 必须是绝对路径，收到：${root}`);
+    }
+    if (sensitive.some((value) => overlaps(value, root))) {
+      throw new SbplError("INVALID_INPUT", `toolchainReadRoots 不得与任务/控制平面敏感根重叠：${root}`);
+    }
+  }
+  for (const target of execTargets) {
+    if (!isAbsolute(target)) {
+      throw new SbplError("INVALID_INPUT", `toolchainExecTargets 必须是绝对路径，收到：${target}`);
+    }
+    if (sensitive.some((value) => isUnder(value, target))) {
+      throw new SbplError("INVALID_INPUT", `toolchainExecTargets 不得位于任务/控制平面敏感根：${target}`);
+    }
+    if (!readRoots.some((root) => isUnder(root, target)) && !p.execRoots.some((root) => isUnder(root, target))) {
+      throw new SbplError(
+        "INVALID_INPUT",
+        `toolchainExecTargets 必须位于已批准 toolchain read root 或现有 execRoot 内：${target}`,
+      );
+    }
+  }
+  return { readRoots, execTargets };
 }
 
 /**
@@ -140,6 +185,7 @@ export function buildProfile(p: SandboxPaths): string {
     );
   }
   const worktreeExecTargets = validateWorktreeExecTargets(p);
+  const toolchain = validateToolchainClosure(p);
   // worktreeAncestors 只覆盖 worktreesRoot **以下**那几级；白名单化读放行之后还要补
   // worktreesRoot 与 canonicalGit 各自往上直到 `/` 的每一级，否则 git 向上找仓库根时
   // 在 `/Users` 就断了（实测 `fatal: Invalid path '/Users': Operation not permitted`）。
@@ -154,6 +200,7 @@ export function buildProfile(p: SandboxPaths): string {
     // 才把它暴露出来（`EPERM: operation not permitted, lstat '/Users'`，栈顶是
     // `Module._findPath`）。**不要因为生产上碰巧不复现就省掉这条。**
     ...p.execRoots.flatMap((r) => pathAncestors(r)),
+    ...toolchain.readRoots.flatMap((r) => pathAncestors(r)),
   ];
   // macOS 把 /var、/tmp、/etc 做成指向 /private/... 的符号链接。调用方传进来的路径
   // 已经 realpath 过（见 sandbox.ts 的 canonicalPaths），于是这里拿到的一律是
@@ -207,13 +254,12 @@ export function buildProfile(p: SandboxPaths): string {
     ";; （curl 报的是 `Auto configuration failed` 加一串 libressl 的内部路径）。",
     "(allow file-read* (subpath \"/etc\"))",
     "(allow file-read* (subpath \"/private/etc\"))",
-    ";; macOS system selectors have two path spellings. /bin/sh currently reads",
-    ";; `/private/var/select/sh`, while /usr/bin/clang's Developer Tools lookup reaches",
-    ";; `/var/select/developer_dir`. Seatbelt matches the spelling used by the process, so",
-    ";; allowing only the canonical /private alias is insufficient. Keep the closure to",
-    ";; this selector directory only; do not grant /var or /private/var generally.",
-    "(allow file-read* (subpath \"/var/select\"))",
+    ";; /bin/sh uses the canonical selector spelling. Keep it globally because ordinary JS",
+    ";; package-manager profiles need shell shims; the /var/select alias is toolchain-only below.",
     "(allow file-read* (subpath \"/private/var/select\"))",
+    ";; Optional native-toolchain read closure is derived only from a trusted control-plane enum.",
+    ";; It may include /var/select plus the active Developer Directory, never caller-provided paths.",
+    ...toolchain.readRoots.map((root) => `(allow file-read* (subpath "${q(root)}"))`),
     ";; 根目录条目本身：动态链接器与多数工具启动时会 readdir \"/\"。这里必须是",
     ";; file-read*（含 file-read-data，对目录即 readdir），file-read-metadata 不够",
     ";; ——实测只给 metadata 时 /bin/echo 都起不来。放行的内容仅仅是「根下有哪些",
@@ -302,6 +348,8 @@ export function buildProfile(p: SandboxPaths): string {
     ";; subpath 本身覆盖不到 target。这里只补 `runSandboxed()` 从当前 `.bin` 推导并经",
     ";; node_modules containment 双重验证的 exact literal；不放开整个 node_modules/worktree。",
     ...worktreeExecTargets.map((target) => `(allow process-exec (literal "${q(target)}"))`),
+    ";; Native toolchain executables remain exact literals; never authorize an entire Developer/bin subtree.",
+    ...toolchain.execTargets.map((target) => `(allow process-exec (literal "${q(target)}"))`),
     "(allow process-fork)",
     "(allow sysctl-read)",
     "",

@@ -1,0 +1,78 @@
+import { execFileSync } from "node:child_process";
+import { realpathSync, statSync } from "node:fs";
+import { relative, sep } from "node:path";
+
+export type NativeToolchain = "darwin-clang";
+
+export interface NativeToolchainClosure {
+  readonly readRoots: readonly string[];
+  readonly execTargets: readonly string[];
+}
+
+export class NativeToolchainError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = `NativeToolchainError [${code}]`;
+    this.code = code;
+  }
+}
+
+function commandOutput(executable: string, argv: readonly string[], label: string): string {
+  try {
+    const out = execFileSync(executable, [...argv], { encoding: "utf8" }).trim();
+    if (!out) throw new Error("empty output");
+    return out;
+  } catch (e) {
+    throw new NativeToolchainError(
+      "TOOLCHAIN_UNAVAILABLE",
+      `${label} 解析失败：${(e as Error).message}`,
+    );
+  }
+}
+
+function isUnder(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`));
+}
+
+/**
+ * 解析受控 Darwin clang toolchain 的宿主依赖闭包。
+ *
+ * 这里没有 caller-provided path/argv：只执行固定的 macOS discovery commands，
+ * 返回 active Developer Directory 的只读根，以及编译一个 C 可执行文件实际需要的
+ * clang/ld 精确 executable。`/var/select` 保留原始 spelling，因为 xcode-select 的
+ * 失败路径正是这个 spelling；把它 realpath 成 `/private/var/select` 会再次漏掉同一权限。
+ */
+export function resolveNativeToolchainClosure(toolchain: NativeToolchain): NativeToolchainClosure {
+  if (toolchain !== "darwin-clang") {
+    throw new NativeToolchainError("INVALID_INPUT", `不支持的 native toolchain：${toolchain}`);
+  }
+  if (process.platform !== "darwin") {
+    throw new NativeToolchainError("TOOLCHAIN_UNAVAILABLE", "darwin-clang 仅支持 macOS host");
+  }
+
+  const developerDir = realpathSync(commandOutput("/usr/bin/xcode-select", ["-p"], "xcode-select -p"));
+  const clang = realpathSync(commandOutput("/usr/bin/xcrun", ["--find", "clang"], "xcrun --find clang"));
+  const ld = realpathSync(commandOutput("/usr/bin/xcrun", ["--find", "ld"], "xcrun --find ld"));
+
+  if (!statSync(developerDir).isDirectory()) {
+    throw new NativeToolchainError("TOOLCHAIN_UNAVAILABLE", `Developer Directory 不是目录：${developerDir}`);
+  }
+  for (const [label, executable] of [["clang", clang], ["ld", ld]] as const) {
+    if (!statSync(executable).isFile()) {
+      throw new NativeToolchainError("TOOLCHAIN_UNAVAILABLE", `${label} 不是普通文件：${executable}`);
+    }
+    if (!isUnder(developerDir, executable)) {
+      throw new NativeToolchainError(
+        "TOOLCHAIN_UNAVAILABLE",
+        `${label} 不在 active Developer Directory 内：${executable}`,
+      );
+    }
+  }
+
+  return {
+    readRoots: ["/var/select", developerDir],
+    execTargets: [...new Set([clang, ld])],
+  };
+}
