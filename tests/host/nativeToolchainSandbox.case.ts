@@ -93,16 +93,8 @@ function runWithProfileTransform(source: string, output: string, transform: (pro
   });
 }
 
-function developerRoot(canonical: SandboxPaths): string {
-  const developer = canonical.toolchainReadRoots!.find((rootPath) => basename(rootPath) === "Developer");
-  if (!developer) throw new Error("test fixture expected active Developer Directory in toolchain read closure");
-  return developer;
-}
-
 function xcodeContentsRoot(canonical: SandboxPaths): string | null {
-  const developer = developerRoot(canonical);
-  const contents = dirname(developer);
-  return basename(contents) === "Contents" && basename(dirname(contents)).endsWith(".app") ? contents : null;
+  return canonical.toolchainReadRoots!.find((rootPath) => basename(rootPath) === "Contents" && basename(dirname(rootPath)).endsWith(".app")) ?? null;
 }
 
 describe("GG-BL-029 controlled macOS native toolchain execution", () => {
@@ -126,52 +118,42 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
     expect(result.exitCode, result.stderr).toBe(0);
   });
 
-  it("load-bearing reverse proof: removing /var/select reintroduces xcode-select EPERM", () => {
+  it("full Xcode closure does not retain redundant /var/select or child Developer roots", () => {
     requireHostToolchainPrerequisites();
-    const { source, output } = writeProbe();
-    const result = runWithProfileTransform(source, output, (profile) => profile
-      .split("\n")
-      .filter((line) => line.trim() !== '(allow file-read* (subpath "/var/select"))')
-      .join("\n"));
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr + result.stdout).toMatch(/\/var\/select\/developer_dir|operation not permitted/i);
-  });
-
-  it("load-bearing reverse proof: removing active Developer Directory read root makes clang report it inaccessible", () => {
-    requireHostToolchainPrerequisites();
-    const { source, output } = writeProbe();
-    const result = runWithProfileTransform(source, output, (profile, canonical) => {
-      const developer = developerRoot(canonical);
-      return profile
-        .split("\n")
-        .filter((line) => line.trim() !== `(allow file-read* (subpath "${developer}"))`)
-        .join("\n");
-    });
-
-    expect(result.status).not.toBe(0);
-    expect(result.stderr + result.stdout).toMatch(/developer directory .* isn't accessible|operation not permitted/i);
+    const canonical = canonicalPaths();
+    if (!xcodeContentsRoot(canonical)) return;
+    expect(canonical.toolchainReadRoots).not.toContain("/var/select");
+    expect(canonical.toolchainReadRoots!.some((rootPath) => basename(rootPath) === "Developer")).toBe(false);
   });
 
   it("load-bearing reverse proof: removing Xcode Contents read root blocks Info.plist/shared-framework resolution", () => {
     requireHostToolchainPrerequisites();
-    const { source, output } = writeProbe();
-    const result = runWithProfileTransform(source, output, (profile, canonical) => {
-      const contents = xcodeContentsRoot(canonical);
-      if (!contents) return profile;
-      return profile
-        .split("\n")
-        .filter((line) => line.trim() !== `(allow file-read* (subpath "${contents}"))`)
-        .join("\n");
-    });
-
     const canonical = canonicalPaths();
-    if (xcodeContentsRoot(canonical)) {
-      expect(result.status).not.toBe(0);
-      expect(result.stderr + result.stdout).toMatch(/Info\.plist|SharedFrameworks|blocked by sandbox|operation not permitted/i);
-    } else {
-      expect(result.status).toBe(0);
-    }
+    const contents = xcodeContentsRoot(canonical);
+    if (!contents) return;
+    const { source, output } = writeProbe();
+    const result = runWithProfileTransform(source, output, (profile) => profile
+      .split("\n")
+      .filter((line) => line.trim() !== `(allow file-read* (subpath "${contents}"))`)
+      .join("\n"));
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toMatch(/Info\.plist|SharedFrameworks|blocked by sandbox|operation not permitted|developer directory/i);
+  });
+
+  it("load-bearing reverse proof: CommandLineTools selector/developer roots are required when no Xcode Contents root exists", () => {
+    requireHostToolchainPrerequisites();
+    const canonical = canonicalPaths();
+    if (xcodeContentsRoot(canonical)) return;
+    const { source, output } = writeProbe();
+    const removed = new Set(canonical.toolchainReadRoots);
+    const result = runWithProfileTransform(source, output, (profile) => profile
+      .split("\n")
+      .filter((line) => ![...removed].some((rootPath) => line.trim() === `(allow file-read* (subpath "${rootPath}"))`))
+      .join("\n"));
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toMatch(/operation not permitted|developer directory|xcode-select/i);
   });
 
   it("load-bearing reverse proof: removing exact Xcode license-state read reintroduces license denial", () => {
