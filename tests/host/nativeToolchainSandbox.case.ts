@@ -2,13 +2,28 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { resolveNativeToolchainClosure } from "../../src/nativeToolchain.ts";
 import { buildProfile, type SandboxPaths } from "../../src/sbpl.ts";
 import { defaultExecRoots, runSandboxed } from "../../src/sandbox.ts";
 
 let root: string;
 let paths: SandboxPaths;
+let hostPrerequisiteError: string | null = null;
+let hostPrerequisiteRoot: string | null = null;
+
+beforeAll(() => {
+  hostPrerequisiteRoot = mkdtempSync(join(tmpdir(), "native-toolchain-host-preflight-"));
+  const source = join(hostPrerequisiteRoot, "probe.c");
+  const output = join(hostPrerequisiteRoot, "probe");
+  writeFileSync(source, "int main(void) { return 0; }\n", "utf8");
+  const result = spawnSync("/usr/bin/clang", clangArgv(source, output).slice(1), { encoding: "utf8" });
+  if (result.status !== 0) hostPrerequisiteError = result.stderr + result.stdout;
+});
+
+afterAll(() => {
+  if (hostPrerequisiteRoot) rmSync(hostPrerequisiteRoot, { recursive: true, force: true });
+});
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "native-toolchain-sandbox-"));
@@ -26,6 +41,14 @@ beforeEach(() => {
 });
 
 afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+function requireHostToolchainPrerequisites(): void {
+  if (!hostPrerequisiteError) return;
+  throw new Error(
+    "HOST_PREREQUISITE_FAILED: unsandboxed /usr/bin/clang cannot compile a minimal C program on this host. " +
+      hostPrerequisiteError.trim(),
+  );
+}
 
 function writeProbe(): { source: string; output: string } {
   const source = join(paths.worktree, "probe.c");
@@ -70,9 +93,9 @@ function runWithProfileTransform(source: string, output: string, transform: (pro
 }
 
 function developerRoot(canonical: SandboxPaths): string {
-  const rootPath = canonical.toolchainReadRoots!.find((value) => basename(value) === "Developer");
-  if (!rootPath) throw new Error("test fixture could not resolve active Developer Directory");
-  return rootPath;
+  const developer = canonical.toolchainReadRoots!.find((rootPath) => basename(rootPath) === "Developer");
+  if (!developer) throw new Error("test fixture expected active Developer Directory in toolchain read closure");
+  return developer;
 }
 
 function xcodeContentsRoot(canonical: SandboxPaths): string | null {
@@ -82,7 +105,12 @@ function xcodeContentsRoot(canonical: SandboxPaths): string | null {
 }
 
 describe("GG-BL-029 controlled macOS native toolchain execution", () => {
+  it("host prerequisite: unsandboxed /usr/bin/clang can compile a minimal C program", () => {
+    requireHostToolchainPrerequisites();
+  });
+
   it("lets an approved darwin-clang profile compile repo-owned source/output", async () => {
+    requireHostToolchainPrerequisites();
     const { source, output } = writeProbe();
 
     const result = await runSandboxed({
@@ -98,6 +126,7 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
   });
 
   it("load-bearing reverse proof: removing /var/select reintroduces xcode-select EPERM", () => {
+    requireHostToolchainPrerequisites();
     const { source, output } = writeProbe();
     const result = runWithProfileTransform(source, output, (profile) => profile
       .split("\n")
@@ -109,6 +138,7 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
   });
 
   it("load-bearing reverse proof: removing active Developer Directory read root makes clang report it inaccessible", () => {
+    requireHostToolchainPrerequisites();
     const { source, output } = writeProbe();
     const result = runWithProfileTransform(source, output, (profile, canonical) => {
       const developer = developerRoot(canonical);
@@ -123,6 +153,7 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
   });
 
   it("load-bearing reverse proof: removing Xcode Contents read root blocks Info.plist/shared-framework resolution", () => {
+    requireHostToolchainPrerequisites();
     const { source, output } = writeProbe();
     const result = runWithProfileTransform(source, output, (profile, canonical) => {
       const contents = xcodeContentsRoot(canonical);
@@ -143,6 +174,7 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
   });
 
   it("load-bearing reverse proof: removing exact toolchain exec targets prevents the compile", () => {
+    requireHostToolchainPrerequisites();
     const { source, output } = writeProbe();
     const result = runWithProfileTransform(source, output, (profile, canonical) => {
       const exactAllows = new Set(canonical.toolchainExecTargets!.map(
