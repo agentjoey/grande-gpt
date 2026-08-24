@@ -4,7 +4,13 @@ import { StateError } from "./errors.ts";
 import { GitExecError, safeGit } from "./gitExec.ts";
 import type { RunnableHostVerificationLevel } from "./hostVerification.ts";
 import { getJob } from "./jobs.ts";
+import {
+  isValidReceiptHostToolchainIdentity,
+  type HostToolchainIdentity,
+} from "./packageManagerIdentity.ts";
 import { getTask } from "./tasks.ts";
+
+export type { HostToolchainIdentity } from "./packageManagerIdentity.ts";
 
 export interface OuterTestReceiptV1 {
   taskId: string;
@@ -21,12 +27,6 @@ export interface HostVerifierResourceLimits {
   wallTimeoutMs: number;
   maxRssMb: number;
   maxOutputBytes: number;
-}
-
-export interface HostToolchainIdentity {
-  node: string;
-  pnpm: string;
-  lockfileSha256: string;
 }
 
 export interface OuterTestReceiptV2 {
@@ -90,11 +90,7 @@ function finitePositive(value: unknown): value is number {
 }
 
 function validToolchain(value: unknown): value is HostToolchainIdentity {
-  if (!value || typeof value !== "object") return false;
-  const toolchain = value as Partial<HostToolchainIdentity>;
-  return typeof toolchain.node === "string" && toolchain.node.length > 0
-    && typeof toolchain.pnpm === "string" && toolchain.pnpm.length > 0
-    && typeof toolchain.lockfileSha256 === "string" && /^[0-9a-f]{64}$/u.test(toolchain.lockfileSha256);
+  return isValidReceiptHostToolchainIdentity(value);
 }
 
 function validFiles(value: unknown): value is string[] {

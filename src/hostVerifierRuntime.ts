@@ -1,10 +1,9 @@
 import { execFileSync, spawn } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -36,6 +35,7 @@ import {
   type HostToolchainIdentity,
   type TrustedHostVerifierSummary,
 } from "./outerTestReceipt.ts";
+import { capturePackageManagerIdentity } from "./packageManagerIdentity.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { loadDepDirs } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
@@ -375,18 +375,7 @@ function cloneTrustedDependencies(layout: Layout, repoId: string, canonicalRepo:
 }
 
 function captureHostToolchain(sourceRoot: string): HostToolchainIdentity {
-  const lockfile = readFileSync(join(sourceRoot, "pnpm-lock.yaml"));
-  const pnpm = execFileSync("pnpm", ["--version"], {
-    cwd: sourceRoot,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
-  if (!pnpm) throw new Error("trusted pnpm version is empty");
-  return {
-    node: process.version,
-    pnpm,
-    lockfileSha256: createHash("sha256").update(lockfile).digest("hex"),
-  };
+  return capturePackageManagerIdentity(sourceRoot);
 }
 
 async function allocateLoopbackPort(productionPort: number): Promise<number> {

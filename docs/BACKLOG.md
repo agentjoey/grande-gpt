@@ -4,7 +4,7 @@
 >
 > 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md`、`docs/research/**`、PR/TaskBrief 和聊天结论只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
 
-最后整理：2026-08-23
+最后整理：2026-08-24
 
 ## 维护规范
 
@@ -188,6 +188,26 @@
 - **Evidence / Detail**: owner-reviewed lightweight architecture design；Phase 8 新增 flow wrapper 后更应先做最新 canonical evidence review，而不是直接抽象框架。
 - **Next**: 先做 code evidence review。只对仍存在且至少有两个真实使用者的重复 primitive 做收敛；禁止建设 workflow engine、通用 interceptor framework、第二状态系统或 capability marketplace。
 - **Done when**: ①逐项 evidence review 完成并删除已经不存在的 scope；②若 runner/verifier 确有重复，仅保留一套窄 process lifecycle primitive；③ receipt/job eligibility 有单一 fail-closed parser/validator；④ deployment 不通过公开 MCP handler 触发内部领域动作；⑤写工具 wrapper 顺序有集中测试且不依赖共享可变 ToolDef；⑥没有新增与轻量定位冲突的通用框架。
+
+### GG-BL-026 — npm repo 的 verification attestation 错误绑定 pnpm toolchain
+
+- **Priority**: P0
+- **Status**: OPEN
+- **Category**: verification integrity / package-manager compatibility
+- **Problem**: GrandeGPT onboarding 已支持 npm repo，但 verification attestation 与 trusted Host Verifier 的 toolchain capture 历史上硬编码读取 `pnpm-lock.yaml`、执行 `pnpm --version`，并把持久化 identity 写成 `{ node, pnpm, lockfileSha256 }`。npm repo 因此可能直接失败；若仓库残留 `pnpm-lock.yaml`，还可能把错误 lockfile identity 记录成可信验证证据。
+- **Evidence / Detail**: 2026-08-24 `task-npm-compat-20260824-001` 根因检查确认 `src/attestation.ts` 与 `src/hostVerifierRuntime.ts` 两处同源硬编码；RED regression 证明 npm modern identity 缺失、双 lockfile 未 fail closed，modern npm Host receipt 也被旧 parser 拒绝。设计见 [`docs/superpowers/specs/2026-08-24-npm-compatibility-defect-fixes-design.md`](superpowers/specs/2026-08-24-npm-compatibility-defect-fixes-design.md)。
+- **Current fix candidate**: 引入窄 `packageManagerIdentity` primitive；新 verification identity 显式记录 `packageManager / packageManagerVersion / lockfile / lockfileSha256`，支持 pnpm 与 npm；`packageManager` 声明优先，未声明时仅允许唯一 lockfile 推导，冲突/未知 fail closed；legacy pnpm attestation/receipt 保持只读兼容。ordinary attestation、trusted Host Verifier、V2 receipt 共用同一 identity 语义。
+- **Done when**: ① npm repo 真实记录 `package-lock.json + npm version`，pnpm 继续记录 `pnpm-lock.yaml + pnpm version`；② npm identity 不伪装成 `pnpm`；③双 lockfile 无明确声明、显式 manager 缺对应 lockfile、unsupported manager 均 fail closed；④ legacy pnpm attestation/receipt 仍可读取；⑤ exact candidate fresh `unit-selfhost + typecheck + independent CI + required Host gate` 全绿后 merge。
+
+### GG-BL-027 — npm `node_modules/.bin` symlink target 被 Seatbelt `process-exec` 拒绝
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: sandbox / package-manager compatibility
+- **Problem**: 当前 Seatbelt 策略历史上只放行 `worktree/node_modules/.bin/**` 的 `process-exec`。pnpm 已验证布局使用物理 `.bin` shim；npm 常把 `.bin/*` 做成 symlink，真实 executable target 位于 `node_modules/<pkg>/...`。macOS Seatbelt 在 `process-exec` 裁决前解析 symlink，因此真实 target 落到 `.bin` 外后被 `deny default` 拒绝，外部症状可表现为 shebang `/usr/bin/env` / `Operation not permitted`。
+- **Evidence / Detail**: 历史 `spike/findings/U2-seatbelt.md` 已明确记录这一 npm 未验证风险；2026-08-24 真实外部任务复现后进入 `task-npm-compat-20260824-001`。本任务 RED regression 先钉住 `.bin` symlink target discovery 缺失；trusted Host adapter 新增真实 sandbox 行为用例。
+- **Current fix candidate**: `runSandboxed()` 每次从当前 worktree 根部 `node_modules/.bin` 重新枚举 symlink，只接受 `realpath` 后仍位于本 worktree `node_modules` 内的普通文件，并把这些真实 target 作为 exact `literal process-exec` allow 交给 SBPL；`buildProfile()` 再做一次 containment 校验。不会放开整个 `node_modules`，更不会恢复整个 worktree `process-exec`。
+- **Done when**: ①真实 npm-style `.bin -> node_modules/<pkg>/...` CLI 在 trusted Host sandbox 中执行成功；② `.bin` symlink 指向 `node_modules` 外仍被拒；③ worktree 其他新 executable 仍被拒；④ pnpm/git/network/control-plane sandbox 回归保持绿色；⑤ reverse/load-bearing proof 证明移除 exact-target allow 会让 npm case 重新变红；⑥ exact candidate CI/Host gate 通过后 merge。
 
 ## Observations
 

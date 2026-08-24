@@ -97,6 +97,22 @@ describe("OuterTestReceipt V2", () => {
     expect(parseOuterTestReceipt(JSON.stringify({ ...r, hostToolchain: { node: "x" } }), "task-v2")).toBeNull();
   });
 
+  it("GG-BL-026：parses a modern npm HostToolchain identity without a legacy pnpm field", () => {
+    const npmToolchain = {
+      node: "v24.14.0",
+      packageManager: "npm",
+      packageManagerVersion: "11.0.0",
+      lockfile: "package-lock.json",
+      lockfileSha256: "c".repeat(64),
+    } as const;
+    const modern = { ...receipt(), hostToolchain: npmToolchain } as unknown as OuterTestReceiptV2;
+
+    const parsed = parseOuterTestReceipt(JSON.stringify(modern), "task-v2");
+
+    expect(parsed).toEqual(modern);
+    expect((parsed as any)?.hostToolchain).not.toHaveProperty("pnpm");
+  });
+
   it("keeps legacy V1 readable only as manual-transition compatibility", () => {
     const legacy = {
       taskId: "task-v2",

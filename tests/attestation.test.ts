@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -165,14 +166,50 @@ describe("Verification Attestation", () => {
     expect(git(worktree, "log", "-1", "--format=%B")).toContain("Grande-Attestation: none");
   });
 
-  it("AC-S2-8：hostToolchain 的 node、pnpm、lockfileSha256 都是真实非空值", async () => {
+  it("GG-BL-026：pnpm verification 写 modern package-manager identity", () => {
+    const toolchain = captureVerificationContext(layout, worktree).hostToolchain as any;
+    expect(toolchain).toMatchObject({
+      node: process.version,
+      packageManager: "pnpm",
+      lockfile: "pnpm-lock.yaml",
+    });
+    expect(toolchain.packageManagerVersion).toBeTruthy();
+    expect(toolchain.lockfileSha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("GG-BL-026：npm verification hash package-lock.json 且不伪装成 pnpm", () => {
+    rmSync(join(worktree, "pnpm-lock.yaml"));
+    const packageLock = JSON.stringify({ name: "demo", lockfileVersion: 3 }) + "\n";
+    writeFileSync(join(worktree, "package.json"), JSON.stringify({ name: "demo", packageManager: "npm@11.0.0" }) + "\n", "utf8");
+    writeFileSync(join(worktree, "package-lock.json"), packageLock, "utf8");
+
+    const toolchain = captureVerificationContext(layout, worktree).hostToolchain as any;
+
+    expect(toolchain).toMatchObject({
+      node: process.version,
+      packageManager: "npm",
+      lockfile: "package-lock.json",
+      lockfileSha256: createHash("sha256").update(packageLock).digest("hex"),
+    });
+    expect(toolchain.packageManagerVersion).toBeTruthy();
+    expect(toolchain).not.toHaveProperty("pnpm");
+  });
+
+  it("GG-BL-026：双 lockfile 且 packageManager 未声明时 fail closed，不按固定优先级猜", () => {
+    writeFileSync(join(worktree, "package-lock.json"), JSON.stringify({ lockfileVersion: 3 }) + "\n", "utf8");
+    writeFileSync(join(worktree, "package.json"), JSON.stringify({ name: "demo" }) + "\n", "utf8");
+
+    expect(() => captureVerificationContext(layout, worktree)).toThrow(/package manager|lockfile|冲突|ambiguous/i);
+  });
+
+  it("AC-S2-8：持久化 attestation 的 hostToolchain 都是真实非空值", async () => {
     writeFileSync(join(worktree, "toolchain.txt"), "x\n", "utf8");
     passedJob("typecheck");
     const result = await commit();
     expect(result.ok).toBe(true);
 
-    const toolchain = getAttestations(deps.db, "task_attest")[0]!.hostToolchain;
-    for (const value of [toolchain.node, toolchain.pnpm, toolchain.lockfileSha256]) {
+    const toolchain = getAttestations(deps.db, "task_attest")[0]!.hostToolchain as any;
+    for (const value of [toolchain.node, toolchain.packageManager, toolchain.packageManagerVersion, toolchain.lockfileSha256]) {
       expect(value).toBeTruthy();
       expect(value).not.toBe("unknown");
     }
