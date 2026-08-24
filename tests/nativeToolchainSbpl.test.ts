@@ -24,7 +24,7 @@ describe("GG-BL-029 macOS native toolchain closure", () => {
     expect(profileRules).toContain('(allow file-read* (subpath "/private/var/select"))');
   });
 
-  it("approved toolchain closure adds exact read roots/files and exact exec targets without broadening /var, Preferences, or Developer exec subtree", () => {
+  it("approved full-Xcode closure adds selector + Contents + exact license/exec without broadening /var, Preferences, or Developer exec subtree", () => {
     const contents = "/Applications/Xcode.app/Contents";
     const developer = `${contents}/Developer`;
     const clang = `${developer}/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang`;
@@ -32,14 +32,14 @@ describe("GG-BL-029 macOS native toolchain closure", () => {
     const license = "/Library/Preferences/com.apple.dt.Xcode.plist";
     const profileRules = rules(buildProfile({
       ...paths,
-      toolchainReadRoots: ["/var/select", contents, developer],
+      toolchainReadRoots: ["/var/select", contents],
       toolchainReadFiles: [license],
       toolchainExecTargets: [clang, ld],
     }));
 
     expect(profileRules).toContain('(allow file-read* (subpath "/var/select"))');
     expect(profileRules).toContain(`(allow file-read* (subpath "${contents}"))`);
-    expect(profileRules).toContain(`(allow file-read* (subpath "${developer}"))`);
+    expect(profileRules).not.toContain(`(allow file-read* (subpath "${developer}"))`);
     expect(profileRules).toContain(`(allow file-read* (literal "${license}"))`);
     expect(profileRules).toContain(`(allow process-exec (literal "${clang}"))`);
     expect(profileRules).toContain(`(allow process-exec (literal "${ld}"))`);
