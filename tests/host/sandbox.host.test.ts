@@ -2,3 +2,4 @@
 // until the Owner changes trusted control-plane profile configuration.
 import "../sandbox.test.ts";
 import "./npmSandboxCompatibility.case.ts";
+import "./nativeToolchainSandbox.case.ts";
