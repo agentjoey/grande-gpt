@@ -57,14 +57,16 @@ const XCODE_LICENSE_STATE_FILES = [
  * 返回 active toolchain 的最小只读根、固定 Xcode license-state 文件，以及编译一个
  * C 可执行文件实际需要的 clang/ld 精确 executable。
  *
- * 完整 Xcode 安装下，`<Xcode.app>/Contents` 已经覆盖 Developer Directory、Info.plist
- * 与 SharedFrameworks，因此不要再重复放行 `Contents/Developer`。2026-08-24 Host
- * reverse proof 还证明，在完整 Xcode closure 下移除 `/var/select` 后编译仍成功，
- * 所以 full-Xcode 分支不再保留这条冗余权限。
+ * `/var/select` 是 `/usr/bin/clang` / xcode-select 的 selector dependency。最初的
+ * synthetic Host fixture 曾显示完整 Xcode closure 下移除它仍可编译，但 2026-08-24
+ * 在 production activation 后原样重跑 grande-obsidian-mcp Phase 3 P3-0 probe，仍稳定
+ * 复现 `/var/select/developer_dir` EPERM。真实外部 probe 优先于合成 fixture，因此两种
+ * Darwin clang 布局都保留这个 selector 目录；仍只放到 `/var/select`，不扩大 `/var`。
  *
- * CommandLineTools 没有 `<Xcode.app>/Contents` 父根可用，因此兼容分支仍显式放行
- * `/var/select` 与 active Developer Directory；这保持了 selector-based toolchain 解析，
- * 同时不会把 `/Library/Developer` 整棵开放。
+ * 完整 Xcode 安装下，`<Xcode.app>/Contents` 已经覆盖 Developer Directory、Info.plist
+ * 与 SharedFrameworks，因此不要再重复放行 `Contents/Developer`。CommandLineTools 没有
+ * `<Xcode.app>/Contents` 父根可用，因此兼容分支显式放行 active Developer Directory；
+ * 这仍不会把 `/Library/Developer` 整棵开放。
  *
  * Xcode license acceptance 是宿主机状态，不属于 repo。只允许固定、已知且实际存在的
  * plist 作为 exact literal read，绝不放开整个 `/Library/Preferences`。
@@ -98,7 +100,7 @@ export function resolveNativeToolchainClosure(toolchain: NativeToolchain): Nativ
 
   const xcodeContents = xcodeContentsRoot(developerDir);
   return {
-    readRoots: xcodeContents ? [xcodeContents] : ["/var/select", developerDir],
+    readRoots: xcodeContents ? ["/var/select", xcodeContents] : ["/var/select", developerDir],
     readFiles: XCODE_LICENSE_STATE_FILES.filter((path) => existsSync(path)),
     execTargets: [...new Set([clang, ld])],
   };
