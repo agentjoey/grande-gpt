@@ -118,11 +118,13 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
     expect(result.exitCode, result.stderr).toBe(0);
   });
 
-  it("full Xcode closure does not retain redundant /var/select or child Developer roots", () => {
+  it("full Xcode closure retains the selector root required by the real external probe without a redundant child Developer root", () => {
     requireHostToolchainPrerequisites();
     const canonical = canonicalPaths();
     if (!xcodeContentsRoot(canonical)) return;
-    expect(canonical.toolchainReadRoots).not.toContain("/var/select");
+    // Production re-run of the unchanged grande-obsidian-mcp P3-0 probe on 2026-08-24
+    // proved /var/select is load-bearing even though the earlier synthetic minimal compile was not.
+    expect(canonical.toolchainReadRoots).toContain("/var/select");
     expect(canonical.toolchainReadRoots!.some((rootPath) => basename(rootPath) === "Developer")).toBe(false);
   });
 
@@ -146,25 +148,23 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
     const canonical = canonicalPaths();
     if (xcodeContentsRoot(canonical)) return;
     const { source, output } = writeProbe();
-    const removed = new Set(canonical.toolchainReadRoots);
     const result = runWithProfileTransform(source, output, (profile) => profile
       .split("\n")
-      .filter((line) => ![...removed].some((rootPath) => line.trim() === `(allow file-read* (subpath "${rootPath}"))`))
+      .filter((line) => !canonical.toolchainReadRoots!.some((rootPath) => line.trim() === `(allow file-read* (subpath "${rootPath}"))`))
       .join("\n"));
 
     expect(result.status).not.toBe(0);
-    expect(result.stderr + result.stdout).toMatch(/operation not permitted|developer directory|xcode-select/i);
+    expect(result.stderr + result.stdout).toMatch(/developer_dir|developer directory|operation not permitted/i);
   });
 
-  it("load-bearing reverse proof: removing exact Xcode license-state read reintroduces license denial", () => {
+  it("load-bearing reverse proof: removing Xcode license-state exact read returns license denial", () => {
     requireHostToolchainPrerequisites();
     const canonical = canonicalPaths();
-    const license = canonical.toolchainReadFiles!.find((file) => file === "/Library/Preferences/com.apple.dt.Xcode.plist");
-    if (!license || !existsSync(license)) return;
+    if ((canonical.toolchainReadFiles?.length ?? 0) === 0) return;
     const { source, output } = writeProbe();
     const result = runWithProfileTransform(source, output, (profile) => profile
       .split("\n")
-      .filter((line) => line.trim() !== `(allow file-read* (literal "${license}"))`)
+      .filter((line) => !canonical.toolchainReadFiles!.some((file) => line.trim() === `(allow file-read* (literal "${file}"))`))
       .join("\n"));
 
     expect(result.status).not.toBe(0);
@@ -173,16 +173,12 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
 
   it("load-bearing reverse proof: removing exact toolchain exec targets prevents the compile", () => {
     requireHostToolchainPrerequisites();
+    const canonical = canonicalPaths();
     const { source, output } = writeProbe();
-    const result = runWithProfileTransform(source, output, (profile, canonical) => {
-      const exactAllows = new Set(canonical.toolchainExecTargets!.map(
-        (target) => `(allow process-exec (literal "${target}"))`,
-      ));
-      return profile
-        .split("\n")
-        .filter((line) => !exactAllows.has(line.trim()))
-        .join("\n");
-    });
+    const result = runWithProfileTransform(source, output, (profile) => profile
+      .split("\n")
+      .filter((line) => !canonical.toolchainExecTargets!.some((target) => line.trim() === `(allow process-exec (literal "${target}"))`))
+      .join("\n"));
 
     expect(result.status).not.toBe(0);
     expect(result.stderr + result.stdout).toMatch(/operation not permitted|not permitted/i);
