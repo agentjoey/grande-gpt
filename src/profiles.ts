@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 import { parse } from "yaml";
 import type { Layout } from "./layout.ts";
 import type { NativeToolchain } from "./nativeToolchain.ts";
@@ -21,6 +21,11 @@ export interface RunProfile {
   maxRssMb: number;
   /** Trusted control-plane opt-in. Repo content/model input cannot provide host toolchain paths. */
   toolchain?: NativeToolchain;
+  /**
+   * Trusted control-plane exact repo-relative native outputs that may be execve'd by this profile.
+   * Paths are declarations, not discovered from repo content, and are only valid with darwin-clang.
+   */
+  nativeExecTargets?: readonly string[];
 }
 
 /** 墙钟超时是唯一可靠的资源兜底（规格 §6.5），上限防止一个笔误挂住 job 一整天 */
@@ -28,6 +33,37 @@ const MAX_TIMEOUT_SECONDS = 3600;
 const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
 /** RSS 轮询兜底的默认上限（「已接受的风险」：轮询不是 cgroup，这只是尽力而为的兜底） */
 const DEFAULT_MAX_RSS_MB = 4096;
+
+function hasGlobSyntax(value: string): boolean {
+  return ["*", "?", "[", "]", "{", "}"].some((ch) => value.includes(ch));
+}
+
+function parseNativeExecTargets(value: unknown, toolchain: unknown, where: string): readonly string[] | undefined {
+  if (value === undefined) return undefined;
+  if (toolchain !== "darwin-clang") {
+    throw new ProfileError("BAD_CONFIG", `${where} 的 nativeExecTargets 只有 toolchain: darwin-clang profile 才能声明。`);
+  }
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw new ProfileError("BAD_CONFIG", `${where} 的 nativeExecTargets 必须是 repo-relative 字符串数组。`);
+  }
+
+  const out = new Set<string>();
+  for (const target of value as string[]) {
+    const normalized = normalize(target);
+    if (
+      target.length === 0 || target.includes("\0") || isAbsolute(target) ||
+      normalized === "." || normalized === ".." || normalized.startsWith("../") ||
+      normalized !== target || hasGlobSyntax(target)
+    ) {
+      throw new ProfileError(
+        "BAD_CONFIG",
+        `${where} 的 nativeExecTargets 只能包含固定 repo-relative exact path，收到：${JSON.stringify(target)}`,
+      );
+    }
+    out.add(target);
+  }
+  return [...out].sort();
+}
 
 /**
  * 加载某仓库的 run profile。
@@ -68,7 +104,7 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
       throw new ProfileError("BAD_CONFIG", `${where} 必须是映射`);
     }
-    const { argv, timeoutSeconds, maxOutputBytes, maxRssMb, toolchain } = raw as Record<string, unknown>;
+    const { argv, timeoutSeconds, maxOutputBytes, maxRssMb, toolchain, nativeExecTargets } = raw as Record<string, unknown>;
 
     if (!Array.isArray(argv)) {
       throw new ProfileError(
@@ -102,6 +138,7 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
         `${where} 的 toolchain 只允许固定枚举 darwin-clang；不接受任意 executable/path。`,
       );
     }
+    const approvedNativeExecTargets = parseNativeExecTargets(nativeExecTargets, toolchain, where);
 
     out.set(name, {
       name,
@@ -110,6 +147,7 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
       maxOutputBytes: (maxOutputBytes as number | undefined) ?? DEFAULT_MAX_OUTPUT_BYTES,
       maxRssMb: (maxRssMb as number | undefined) ?? DEFAULT_MAX_RSS_MB,
       toolchain: toolchain as NativeToolchain | undefined,
+      nativeExecTargets: approvedNativeExecTargets,
     });
   }
   return out;
@@ -139,7 +177,7 @@ export function getProfile(layout: Layout, repoId: string, name: string): RunPro
  *
  * **为什么这个函数存在**（I-6）：`git worktree add` 产出的是一份干净 checkout，
  * 不含 `node_modules`；S0 全离线（Global Constraints），新 worktree 里 `pnpm install`
- * 跑不通——`pnpm test` 这个最现实的 profile 会在每一个 worktree 里失败。跑不了
+ * 跑不通——`pnpm test` 这个最现实的 profile 会在**每一个** worktree 里失败。跑不了
  * 自己项目测试套件的 runner 不能算交付，因此 Task 4 的 `openWorktree` 会用这里
  * 返回的列表逐个把 canonical 里已经存在的目录克隆进新 worktree
  * （见 Task 4 `cloneDepDirs`）。

@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
+import { buildNativeExecSbplRules, resolveNativeExecTargets } from "./nativeExecTargets.ts";
 import { resolveNativeToolchainClosure, type NativeToolchain } from "./nativeToolchain.ts";
 import { buildProfile, type SandboxPaths } from "../src/sbpl.ts";
 
@@ -26,6 +27,8 @@ export interface RunOptions {
   maxOutputBytes: number;
   /** Only a trusted control-plane profile may opt in; the resolver accepts no caller paths/argv. */
   toolchain?: NativeToolchain;
+  /** Trusted profile declarations; resolved only against the current task worktree to exact literals. */
+  nativeExecTargets?: readonly string[];
   /** 进程组总 RSS 上限（MB）。省略则不做内存兜底 */
   maxRssMb?: number;
   /** 在子进程 spawn 后同步回调，传入 pgid —— 调用方不需要 await 就能拿到 pgid */
@@ -207,6 +210,10 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   // 系统打交道的层。
   const profilePath = join(o.paths.jobTmp, "profile.sb");
   const canonicalWorktree = realpathSync(o.paths.worktree);
+  if ((o.nativeExecTargets?.length ?? 0) > 0 && o.toolchain !== "darwin-clang") {
+    throw new SandboxError("INVALID_INPUT", "nativeExecTargets 只能与 toolchain: darwin-clang 一起使用。");
+  }
+  const nativeExecTargets = resolveNativeExecTargets(canonicalWorktree, o.nativeExecTargets);
   const toolchain = o.toolchain ? resolveNativeToolchainClosure(o.toolchain) : undefined;
   const canonicalPaths: SandboxPaths = {
     worktree: canonicalWorktree,
@@ -237,7 +244,10 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   canonicalPaths.toolchainReadFiles?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadFiles[${i}]`, r));
   canonicalPaths.toolchainExecTargets?.forEach((r, i) => assertOnDiskSpelling(`toolchainExecTargets[${i}]`, r));
 
-  writeFileSync(profilePath, buildProfile(canonicalPaths), "utf8");
+  // nativeExecTargets 可能由同一个 job 内的 clang 稍后创建，因此这里绝不能 realpath/exists。
+  // 权限增量由独立 helper 生成，且只能是当前 worktree 内的 exact process-exec literal。
+  const profile = buildProfile(canonicalPaths) + buildNativeExecSbplRules(canonicalWorktree, nativeExecTargets);
+  writeFileSync(profilePath, profile, "utf8");
 
   // 环境清洗：只传必需的四个。宿主的 *_TOKEN / *_API_KEY / DYLD_* 一律不进沙箱。
   //
