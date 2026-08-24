@@ -5,6 +5,7 @@ import { ensureLayout, loadLayout } from "./layout.ts";
 import { startGateway } from "./server.ts";
 import { loadAccessConfig, AccessConfigError, type AccessConfig } from "./accessGate.ts";
 import { loadConsoleAccessConfig } from "./consoleAuth.ts";
+import { awaitAllDeploymentHostJobsSettled } from "./deploymentHostRunner.ts";
 import { awaitAllJobsSettled } from "./runner.ts";
 import { planGc, applyGcWithRepoWriteLocks } from "./worktreeGc.ts";
 
@@ -76,7 +77,8 @@ async function main(): Promise<void> {
 
   // 优雅关停：先停止接受新连接，**再等在途的后台 job 收尾写完 artifact**，最后才
   // 关库退出。硬杀会让 runner 的 .then 链在 db.close() 之后落地——那正是 S0-C 修过的
-  // unhandled rejection 形态。
+  // unhandled rejection 形态。deployment-host 也是 detached async job，因此必须和普通
+  // sandbox job 一起等待，不能因为它“可信”就假装数据库生命周期也可信。
   //
   // 这段此前只有注释没有实现：`gw.close()` 之后直接 `db.close(); process.exit(0)`，
   // 从不调用为此存在的 awaitAllJobsSettled。实测后果（本机 job 表里留下的证据）：
@@ -91,7 +93,11 @@ async function main(): Promise<void> {
       console.log(`\n[gateway] 收到 ${sig}，正在关停…`);
       void (async () => {
         await gw.close();
-        const n = await awaitAllJobsSettled(30_000);
+        const [sandboxJobs, deploymentHostJobs] = await Promise.all([
+          awaitAllJobsSettled(30_000),
+          awaitAllDeploymentHostJobsSettled(30_000),
+        ]);
+        const n = sandboxJobs + deploymentHostJobs;
         if (n > 0) console.log(`[gateway] 已等待 ${n} 个在途 job 收尾`);
         db.close();
         process.exit(0);

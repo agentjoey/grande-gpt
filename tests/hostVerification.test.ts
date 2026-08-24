@@ -23,6 +23,7 @@ describe("host verification classifier", () => {
       "src/sandbox.ts",
       "src/sbpl.ts",
       "src/runner.ts",
+      "src/deploymentHostRunner.ts",
       "src/jobs.ts",
       "src/gitExec.ts",
       "src/githubAuth.ts",
@@ -40,6 +41,7 @@ describe("host verification classifier", () => {
       "src/prMergeD2.ts",
       "src/mergeReconcile.ts",
       "src/profiles.ts",
+      "tests/host/deployment-host-runner.host.test.ts",
       "tests/host/verifier-sandbox.host.test.ts",
       "tests/host/verifier-runtime.host.test.ts",
       "tests/host/verifier-recovery.host.test.ts",
@@ -88,6 +90,7 @@ describe("host verification classifier", () => {
       "src/sandbox.ts",
       "src/sbpl.ts",
       "src/runner.ts",
+      "src/deploymentHostRunner.ts",
       "src/jobs.ts",
       "src/hostVerification.ts",
       "src/hostVerificationConfig.ts",
@@ -99,6 +102,7 @@ describe("host verification classifier", () => {
       "src/hostVerifierSandbox.ts",
       "src/tools.ts",
       "tests/host/sandbox.host.test.ts",
+      "tests/host/deployment-host-runner.host.test.ts",
       "tests/host/verifier-sandbox.host.test.ts",
       "tests/host/verifier-runtime.host.test.ts",
       "tests/host/verifier-recovery.host.test.ts",
@@ -108,9 +112,13 @@ describe("host verification classifier", () => {
       expect(plan.manualOnlyRequired, file).toBe(true);
       expect(plan.manualOnlyFiles.length, file).toBeGreaterThan(0);
       expect(plan.autoFiles, file).not.toContain("tests/host/sandbox.host.test.ts");
+      expect(plan.autoFiles, file).not.toContain("tests/host/deployment-host-runner.host.test.ts");
       expect(plan.autoFiles, file).not.toContain("tests/host/verifier-runtime.host.test.ts");
       expect(plan.autoFiles, file).not.toContain("tests/host/verifier-recovery.host.test.ts");
     }
+    expect(planHostVerification(["src/deploymentHostRunner.ts"]).manualOnlyFiles).toContain(
+      "tests/host/deployment-host-runner.host.test.ts",
+    );
   });
 });
 
@@ -132,6 +140,7 @@ describe("trusted host manifest", () => {
     for (const file of [
       "tests/host/sandbox.host.test.ts",
       "tests/host/runner.host.test.ts",
+      "tests/host/deployment-host-runner.host.test.ts",
       "tests/host/server.host.test.ts",
       "tests/host/tools.host.test.ts",
       "tests/host/e2e.host.test.ts",
@@ -166,12 +175,14 @@ describe("trusted host manifest", () => {
     expect(auto).toContain("tests/host/git-hook.host.test.ts");
     expect(auto).not.toContain("tests/host/server.host.test.ts");
     expect(auto).not.toContain("tests/host/sandbox.host.test.ts");
+    expect(auto).not.toContain("tests/host/deployment-host-runner.host.test.ts");
     expect(auto).not.toContain("tests/host/verifier-sandbox.host.test.ts");
     expect(auto).not.toContain("tests/host/verifier-runtime.host.test.ts");
     expect(auto).not.toContain("tests/host/verifier-recovery.host.test.ts");
     expect(manualOnly).toContain("tests/host/server.host.test.ts");
     expect(manualOnly).toContain("tests/host/sandbox.host.test.ts");
     expect(manualOnly).toContain("tests/host/runner.host.test.ts");
+    expect(manualOnly).toContain("tests/host/deployment-host-runner.host.test.ts");
     expect(manualOnly).toContain("tests/host/verifier-sandbox.host.test.ts");
     expect(manualOnly).toContain("tests/host/verifier-runtime.host.test.ts");
     expect(manualOnly).toContain("tests/host/verifier-recovery.host.test.ts");

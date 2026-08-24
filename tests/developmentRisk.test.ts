@@ -16,6 +16,7 @@ describe("Phase 8 development risk classifier", () => {
   it("classifies security/runtime boundaries as L3", () => {
     for (const file of [
       "src/runner.ts",
+      "src/deploymentHostRunner.ts",
       "src/prLifecycle.ts",
       "src/hostVerification.ts",
       "tests/host/server.host.test.ts",
@@ -36,6 +37,7 @@ describe("Phase 8 development risk classifier", () => {
       { files: ["docs/phase8.md"], risk: "L1", host: "none" },
       { files: ["src/envelope.ts", "tests/envelope.test.ts"], risk: "L2", host: "smoke" },
       { files: ["src/tools.ts"], risk: "L3", host: "full" },
+      { files: ["src/deploymentHostRunner.ts"], risk: "L3", host: "full" },
       { files: ["scripts/unknown-release-file"], risk: "L3", host: "full" },
     ] as const;
 

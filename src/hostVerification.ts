@@ -38,6 +38,12 @@ export const TRUSTED_HOST_MANIFEST: readonly HostManifestEntry[] = [
     execution: "manualOnly",
   },
   {
+    file: "tests/host/deployment-host-runner.host.test.ts",
+    reason: "Exercises the deployment-only trusted host runner against a disposable canonical repo without an inherited task Seatbelt boundary.",
+    levels: ["full"],
+    execution: "manualOnly",
+  },
+  {
     file: "tests/host/server.host.test.ts",
     reason: "Retains the complete legacy Gateway host regression suite; some cases are not safe inside a second verifier boundary.",
     levels: ["full"],
@@ -91,6 +97,7 @@ const FULL_SOURCE_BASENAMES = new Set([
   "sandbox.ts",
   "sbpl.ts",
   "runner.ts",
+  "deploymentHostRunner.ts",
   "jobs.ts",
   "gitExec.ts",
   "githubAuth.ts",
@@ -125,6 +132,7 @@ const MANUAL_ONLY_SOURCE_BASENAMES = new Set([
   "sandbox.ts",
   "sbpl.ts",
   "runner.ts",
+  "deploymentHostRunner.ts",
   "jobs.ts",
   "hostVerification.ts",
   "hostVerificationConfig.ts",

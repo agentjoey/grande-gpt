@@ -19,6 +19,11 @@ export interface RunProfile {
   timeoutSeconds: number;
   maxOutputBytes: number;
   maxRssMb: number;
+  /**
+   * Trusted control-plane opt-in for deployment-only host execution.
+   * Undefined means the ordinary task sandbox. This value is never read from repo content.
+   */
+  execution?: "deployment-host";
   /** Trusted control-plane opt-in. Repo content/model input cannot provide host toolchain paths. */
   toolchain?: NativeToolchain;
   /**
@@ -104,7 +109,7 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
       throw new ProfileError("BAD_CONFIG", `${where} 必须是映射`);
     }
-    const { argv, timeoutSeconds, maxOutputBytes, maxRssMb, toolchain, nativeExecTargets } = raw as Record<string, unknown>;
+    const { argv, timeoutSeconds, maxOutputBytes, maxRssMb, execution, toolchain, nativeExecTargets } = raw as Record<string, unknown>;
 
     if (!Array.isArray(argv)) {
       throw new ProfileError(
@@ -132,10 +137,22 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
     if (maxRssMb !== undefined && (typeof maxRssMb !== "number" || maxRssMb <= 0)) {
       throw new ProfileError("BAD_CONFIG", `${where} 的 maxRssMb 必须是正数`);
     }
+    if (execution !== undefined && execution !== "deployment-host") {
+      throw new ProfileError(
+        "BAD_CONFIG",
+        `${where} 的 execution 只允许固定枚举 deployment-host；省略表示普通 task sandbox。`,
+      );
+    }
     if (toolchain !== undefined && toolchain !== "darwin-clang") {
       throw new ProfileError(
         "BAD_CONFIG",
         `${where} 的 toolchain 只允许固定枚举 darwin-clang；不接受任意 executable/path。`,
+      );
+    }
+    if (execution === "deployment-host" && (toolchain !== undefined || nativeExecTargets !== undefined)) {
+      throw new ProfileError(
+        "BAD_CONFIG",
+        `${where} 的 deployment-host profile 不能再叠加 sandbox toolchain/nativeExecTargets 权限。`,
       );
     }
     const approvedNativeExecTargets = parseNativeExecTargets(nativeExecTargets, toolchain, where);
@@ -146,6 +163,7 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
       timeoutSeconds,
       maxOutputBytes: (maxOutputBytes as number | undefined) ?? DEFAULT_MAX_OUTPUT_BYTES,
       maxRssMb: (maxRssMb as number | undefined) ?? DEFAULT_MAX_RSS_MB,
+      execution: execution as "deployment-host" | undefined,
       toolchain: toolchain as NativeToolchain | undefined,
       nativeExecTargets: approvedNativeExecTargets,
     });
@@ -153,8 +171,7 @@ export function loadProfiles(layout: Layout, repoId: string): Map<string, RunPro
   return out;
 }
 
-/** 取一个 profile；不存在时的错误信息列出可选项 —— 干巴巴报错对模型没用 */
-export function getProfile(layout: Layout, repoId: string, name: string): RunProfile {
+function profileOrThrow(layout: Layout, repoId: string, name: string): RunProfile {
   const all = loadProfiles(layout, repoId);
   const p = all.get(name);
   if (p) return p;
@@ -165,6 +182,29 @@ export function getProfile(layout: Layout, repoId: string, name: string): RunPro
       ? `仓库 ${repoId} 没有注册任何 run profile。请在 ${join(layout.configDir, "profiles.yaml")} 中注册。`
       : `仓库 ${repoId} 没有名为 ${name} 的 profile。可用：${available.join("、")}`,
   );
+}
+
+/**
+ * 取普通 task-sandbox profile。deployment-host 在这里 fail closed，因此所有复用 getProfile
+ * 的普通 runner 调用（包括 grande_run）都无法触达 trusted host execution。
+ */
+export function getProfile(layout: Layout, repoId: string, name: string): RunProfile {
+  const profile = profileOrThrow(layout, repoId, name);
+  if (profile.execution === "deployment-host") {
+    throw new ProfileError(
+      "POLICY_DENIED",
+      `profile ${repoId}/${name} 仅授权给 grande_deploy / grande_deploy_verify，不能通过普通 grande_run 执行。`,
+    );
+  }
+  return profile;
+}
+
+/**
+ * 仅供 deployment control path 使用。授权仍来自控制面的 profiles.yaml；repo 只能在
+ * .grande/deploy.yaml 中引用 profile 名，不能提供 execution/argv。
+ */
+export function getDeploymentProfile(layout: Layout, repoId: string, name: string): RunProfile {
+  return profileOrThrow(layout, repoId, name);
 }
 
 /**

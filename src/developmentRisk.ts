@@ -4,6 +4,7 @@ const L3_SOURCE_BASENAMES = new Set([
   "sandbox.ts",
   "sbpl.ts",
   "runner.ts",
+  "deploymentHostRunner.ts",
   "jobs.ts",
   "gitExec.ts",
   "githubAuth.ts",
