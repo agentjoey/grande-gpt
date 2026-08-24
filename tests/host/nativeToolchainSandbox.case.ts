@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -71,6 +71,7 @@ function canonicalPaths(): SandboxPaths {
     worktreesRoot: realpathSync(paths.worktreesRoot),
     execRoots: paths.execRoots.map((value) => realpathSync(value)),
     toolchainReadRoots: [...closure.readRoots],
+    toolchainReadFiles: [...closure.readFiles],
     toolchainExecTargets: [...closure.execTargets],
   };
 }
@@ -171,6 +172,21 @@ describe("GG-BL-029 controlled macOS native toolchain execution", () => {
     } else {
       expect(result.status).toBe(0);
     }
+  });
+
+  it("load-bearing reverse proof: removing exact Xcode license-state read reintroduces license denial", () => {
+    requireHostToolchainPrerequisites();
+    const canonical = canonicalPaths();
+    const license = canonical.toolchainReadFiles!.find((file) => file === "/Library/Preferences/com.apple.dt.Xcode.plist");
+    if (!license || !existsSync(license)) return;
+    const { source, output } = writeProbe();
+    const result = runWithProfileTransform(source, output, (profile) => profile
+      .split("\n")
+      .filter((line) => line.trim() !== `(allow file-read* (literal "${license}"))`)
+      .join("\n"));
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr + result.stdout).toMatch(/Xcode license agreements|xcodebuild -license/i);
   });
 
   it("load-bearing reverse proof: removing exact toolchain exec targets prevents the compile", () => {

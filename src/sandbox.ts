@@ -220,8 +220,9 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     // 不接受调用方传入的额外 worktree exec allow；每次都从当前 `.bin` 实际 symlink
     // 重新推导 exact target，避免 stale/untrusted path 扩大 process-exec。
     worktreeExecTargets: resolveWorktreeBinExecTargets(canonicalWorktree),
-    // 同样不接受 caller-supplied native-toolchain roots/targets。只有 fixed enum 解析器能产生。
+    // 同样不接受 caller-supplied native-toolchain roots/files/targets。只有 fixed enum 解析器能产生。
     toolchainReadRoots: toolchain ? [...toolchain.readRoots] : [],
+    toolchainReadFiles: toolchain ? [...toolchain.readFiles] : [],
     toolchainExecTargets: toolchain ? [...toolchain.execTargets] : [],
   };
 
@@ -233,6 +234,7 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   canonicalPaths.execRoots.forEach((r, i) => assertOnDiskSpelling(`execRoots[${i}]`, r));
   canonicalPaths.worktreeExecTargets?.forEach((r, i) => assertOnDiskSpelling(`worktreeExecTargets[${i}]`, r));
   canonicalPaths.toolchainReadRoots?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadRoots[${i}]`, r));
+  canonicalPaths.toolchainReadFiles?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadFiles[${i}]`, r));
   canonicalPaths.toolchainExecTargets?.forEach((r, i) => assertOnDiskSpelling(`toolchainExecTargets[${i}]`, r));
 
   writeFileSync(profilePath, buildProfile(canonicalPaths), "utf8");

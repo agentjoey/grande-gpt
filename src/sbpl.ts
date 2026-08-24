@@ -67,6 +67,8 @@ export interface SandboxPaths {
    * `runSandboxed()` 会根据 control-plane profile 的固定 toolchain enum 重新推导。
    */
   toolchainReadRoots?: string[];
+  /** 精确宿主状态文件，只允许 literal read；例如 Xcode license acceptance plist。 */
+  toolchainReadFiles?: string[];
   toolchainExecTargets?: string[];
 }
 
@@ -136,8 +138,9 @@ function validateWorktreeExecTargets(p: SandboxPaths): string[] {
   return [...new Set(targets)].sort();
 }
 
-function validateToolchainClosure(p: SandboxPaths): { readRoots: string[]; execTargets: string[] } {
+function validateToolchainClosure(p: SandboxPaths): { readRoots: string[]; readFiles: string[]; execTargets: string[] } {
   const readRoots = [...new Set(p.toolchainReadRoots ?? [])].sort();
+  const readFiles = [...new Set(p.toolchainReadFiles ?? [])].sort();
   const execTargets = [...new Set(p.toolchainExecTargets ?? [])].sort();
   const sensitive = [p.worktree, p.canonicalGit, p.jobTmp, p.controlRoot, p.worktreesRoot];
 
@@ -147,6 +150,14 @@ function validateToolchainClosure(p: SandboxPaths): { readRoots: string[]; execT
     }
     if (sensitive.some((value) => overlaps(value, root))) {
       throw new SbplError("INVALID_INPUT", `toolchainReadRoots 不得与任务/控制平面敏感根重叠：${root}`);
+    }
+  }
+  for (const file of readFiles) {
+    if (!isAbsolute(file)) {
+      throw new SbplError("INVALID_INPUT", `toolchainReadFiles 必须是绝对路径，收到：${file}`);
+    }
+    if (sensitive.some((value) => isUnder(value, file))) {
+      throw new SbplError("INVALID_INPUT", `toolchainReadFiles 不得位于任务/控制平面敏感根：${file}`);
     }
   }
   for (const target of execTargets) {
@@ -163,7 +174,7 @@ function validateToolchainClosure(p: SandboxPaths): { readRoots: string[]; execT
       );
     }
   }
-  return { readRoots, execTargets };
+  return { readRoots, readFiles, execTargets };
 }
 
 /**
@@ -201,6 +212,7 @@ export function buildProfile(p: SandboxPaths): string {
     // `Module._findPath`）。**不要因为生产上碰巧不复现就省掉这条。**
     ...p.execRoots.flatMap((r) => pathAncestors(r)),
     ...toolchain.readRoots.flatMap((r) => pathAncestors(r)),
+    ...toolchain.readFiles.flatMap((r) => pathAncestors(r)),
   ];
   // macOS 把 /var、/tmp、/etc 做成指向 /private/... 的符号链接。调用方传进来的路径
   // 已经 realpath 过（见 sandbox.ts 的 canonicalPaths），于是这里拿到的一律是
@@ -260,6 +272,8 @@ export function buildProfile(p: SandboxPaths): string {
     ";; Optional native-toolchain read closure is derived only from a trusted control-plane enum.",
     ";; It may include /var/select plus the active Developer Directory, never caller-provided paths.",
     ...toolchain.readRoots.map((root) => `(allow file-read* (subpath "${q(root)}"))`),
+    ";; Exact host-state files stay literal-only; do not widen to their parent preference directories.",
+    ...toolchain.readFiles.map((file) => `(allow file-read* (literal "${q(file)}"))`),
     ";; 根目录条目本身：动态链接器与多数工具启动时会 readdir \"/\"。这里必须是",
     ";; file-read*（含 file-read-data，对目录即 readdir），file-read-metadata 不够",
     ";; ——实测只给 metadata 时 /bin/echo 都起不来。放行的内容仅仅是「根下有哪些",
