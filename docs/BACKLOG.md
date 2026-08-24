@@ -189,6 +189,29 @@
 - **Next**: 先做 code evidence review。只对仍存在且至少有两个真实使用者的重复 primitive 做收敛；禁止建设 workflow engine、通用 interceptor framework、第二状态系统或 capability marketplace。
 - **Done when**: ①逐项 evidence review 完成并删除已经不存在的 scope；②若 runner/verifier 确有重复，仅保留一套窄 process lifecycle primitive；③ receipt/job eligibility 有单一 fail-closed parser/validator；④ deployment 不通过公开 MCP handler 触发内部领域动作；⑤写工具 wrapper 顺序有集中测试且不依赖共享可变 ToolDef；⑥没有新增与轻量定位冲突的通用框架。
 
+### GG-BL-028 — 同一 Tool Epoch 内 `toolsDigest` 历史漂移未解释
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: verification integrity / tool contract identity
+- **Problem**: `toolsDigest` 按当前 contract 只应覆盖稳定排序后的 tool `name + input schema + annotations`；在 `toolsetEpoch=2`、`toolsCount=25` 未变化的历史窗口中却先后观察到 `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`、`sha256:2da4e496ea23ed65a7b1248cc7b360e90f3a94fccdbee4c5402a0b1c53db877c` 与 `sha256:ce3a7107fd8861f5816b94bda803dd9bdae5059d25cf14627ae8fbde49b31227`。若不存在正式 Tool Epoch 变更，这会削弱 release identity、activation receipt 与 `GG-BL-010` frozen-contract gate 的可信度。
+- **Evidence / Detail**: 诊断 task `task-gg-toolset-digest-drift-20260823-001` 已创建，原始 brief 记录同一 build `3c46d1c52ba2b686c86a413f603a4a98d2d13a1d` 下 live digest 与 activation receipt digest 曾不一致；异常在 alljobs canonical registration 后被发现，但没有证据证明注册动作是原因。2026-08-24 当前 production 已恢复一致：build `b2da29a954f9453622f7455387da2bb3c7bd2de2` 的 live / activation receipt 均为 `ce3a7107...`，因此当前不是持续 outage，而是历史 identity drift 根因未解释。
+- **Related**: `GG-BL-010`、`GG-BL-024`。
+- **Next**: 先做 forensic review：追踪三个 digest 的真实输入、digest 计算入口、activation receipt 写入入口与 `task_status` live readback；比较同一 production state 下是否存在 runtime-dependent schema/annotation/provider state、stale receipt 或真实未 bump epoch 的 contract change。没有根因证据前，不 bump epoch、不改 digest 算法、不做猜测性 production 修复。
+- **Done when**: ①明确 `7f9d... → 2da4... → ce3a...` 每次变化的输入差异来源；②将问题分类为真实 tool-contract drift、非确定性 digest 或 stale receipt，并有可重复证据；③若属于实现缺陷，增加回归证明相同 contract/state 的 digest 确定稳定，真实 contract change 必然改变 digest 并遵守 epoch 规则；④当前 production live identity 与 durable activation receipt 持续一致；⑤不通过刷新 App、随意 bump epoch 或扩大 contract 来掩盖根因。
+
+### GG-BL-029 — GrandeGPT sandbox 无法支持受控 macOS native build：`/usr/bin/clang` 经 `xcode-select` 访问 `/var/select/developer_dir` 被拒绝
+
+- **Priority**: P1
+- **Status**: OPEN
+- **Category**: sandbox / macOS native toolchain
+- **Problem**: GrandeGPT sandbox 已能启动固定 `/usr/bin/clang`，但 clang 初始化所需的 macOS Developer Tools resolution dependency chain 不完整。`xcode-select` 读取 `/var/select/developer_dir` 时得到 `Operation not permitted`，导致受控 native helper 在编译器初始化阶段失败，尚未进入 helper 源码或 `renameatx_np` 行为验证。
+- **Evidence / Detail**: `grande-obsidian-mcp` Phase 3 / Safe Move & Rename Core 的 P3-0 feasibility probe，task `task-gomcp-phase3-spec-20260824-001`、失败测试 `test/exclusiveRename.test.ts`、最近复现 job `job_1fc4adeb-834e-4b67-b56c-b619ba964ac8`，`exitCode=1`。测试以 no-shell `spawnSync("/usr/bin/clang", ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "native/rename-excl.c", "-o", "<repo-owned-output>"])` 编译 repo-owned helper；核心错误链为 `clang → xcode-select → read /var/select/developer_dir → EPERM`。在 npm attestation 与 npm `.bin` sandbox 修复已 activation 的 Gateway build `b2da29a954f9453622f7455387da2bb3c7bd2de2` 下原样复现，确认是独立缺陷。
+- **Required use case**: Phase 3 需要一个窄 Darwin helper 调用 `renameatx_np(..., RENAME_EXCL | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH)`，因为 Node 公共 `fs` API 无法表达 approved no-overwrite 语义；普通 `rename()` 存在 target-overwrite race。若 sandbox 无法可靠编译/执行，必须 fail closed，不能降级为普通 `rename()` 或 copy-delete。
+- **Security boundary**: 修复不得开放 generic shell、generic host exec、任意 executable、任意 compiler argv/flags/output、任意绝对路径读写或 repo 普遍 host filesystem 权限；不得绕过 task/worktree isolation。目标路径仍应是 repo-declared approved profile → fixed executable allowlist → fixed/validated argv → repo-owned source/output → 必要 system dependency 的最小只读 closure → no shell → auditable receipt。
+- **Next**: 在 Host 上枚举 `/usr/bin/clang` 实际 Developer Tools/SDK resolution dependency chain，区分 executable dependency 与 read-only filesystem dependency；仅为 approved native-build profile 增加最小、确定、可测试的 dependency closure，并为越界 executable/path/argv 增加负向回归。不要通过放开 `/var`、整个 Xcode tree 或通用 host execution 解决。
+- **Done when**: ① GrandeGPT sandbox 中固定 `/usr/bin/clang` 能正常解析 Developer Tools，不再因 `/var/select/developer_dir` EPERM 失败；②原样重跑 `test/exclusiveRename.test.ts` 能进入 native helper 的实际编译与运行阶段；③helper 尚未实现时，RED 是正常源码/实现级失败而非 sandbox/toolchain denial；④helper 完成后可真实验证 `RENAME_EXCL / RENAME_NOFOLLOW_ANY / RENAME_RESOLVE_BENEATH` 行为；⑤新增负向测试证明 generic shell、generic host exec、越界 executable、任意 compiler flags/output/path 仍被拒绝；⑥不扩大 public MCP tool surface。
+
 ## Observations
 
 ### GG-BL-011 — `grande_repo_search` 的 truncated 信号曾被忽略
