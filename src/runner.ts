@@ -177,6 +177,7 @@ export function startJob(
         controlRoot: layout.controlRoot, worktreesRoot, execRoots: defaultExecRoots(),
       },
       toolchain: profile.toolchain,
+      nativeExecTargets: profile.nativeExecTargets,
       timeoutMs: profile.timeoutSeconds * 1000,
       maxOutputBytes: profile.maxOutputBytes,
       maxRssMb: profile.maxRssMb,
@@ -186,7 +187,7 @@ export function startJob(
     const artifactPath = join(artifactDir, "output.log");
 
     // C3：rejection handler 必须在 createJob 之前接上 run。createJob 可能同步抛出
-    // （例如未知 taskId 撞上 job.taskId 的外键约束——ERR_SQLITE_ERROR），若此刻
+    // （例如未知 taskId 撞外键约束——ERR_SQLITE_ERROR），若此刻
     // run 还没有 `.catch`、之后又在某个微任务里 reject，Node 24 默认
     // `--unhandled-rejections=throw` 会直接杀掉整个 Gateway 进程。这正是
     // inFlight/safeFinish 那一轮已经在 `.then` 链*内部*修好的失败模式，在链被

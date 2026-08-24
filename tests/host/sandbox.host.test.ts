@@ -3,3 +3,4 @@
 import "../sandbox.test.ts";
 import "./npmSandboxCompatibility.case.ts";
 import "./nativeToolchainSandbox.case.ts";
+import "./nativeExecTargets.case.ts";
