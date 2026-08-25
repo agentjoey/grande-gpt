@@ -4,7 +4,7 @@
 >
 > 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md`、`docs/research/**`、PR/TaskBrief 和聊天结论只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
 
-最后整理：2026-08-24
+最后整理：2026-08-25
 
 ## 维护规范
 
@@ -211,6 +211,21 @@
 - **Security boundary**: 修复不得开放 generic shell、generic host exec、任意 executable、任意 compiler argv/flags/output、任意绝对路径读写或 repo 普遍 host filesystem 权限；不得绕过 task/worktree isolation。目标路径仍应是 repo-declared approved profile → fixed executable allowlist → fixed/validated argv → repo-owned source/output → 必要 system dependency 的最小只读 closure → no shell → auditable receipt。
 - **Next**: 在 Host 上枚举 `/usr/bin/clang` 实际 Developer Tools/SDK resolution dependency chain，区分 executable dependency 与 read-only filesystem dependency；仅为 approved native-build profile 增加最小、确定、可测试的 dependency closure，并为越界 executable/path/argv 增加负向回归。不要通过放开 `/var`、整个 Xcode tree 或通用 host execution 解决。
 - **Done when**: ① GrandeGPT sandbox 中固定 `/usr/bin/clang` 能正常解析 Developer Tools，不再因 `/var/select/developer_dir` EPERM 失败；②原样重跑 `test/exclusiveRename.test.ts` 能进入 native helper 的实际编译与运行阶段；③helper 尚未实现时，RED 是正常源码/实现级失败而非 sandbox/toolchain denial；④helper 完成后可真实验证 `RENAME_EXCL / RENAME_NOFOLLOW_ANY / RENAME_RESOLVE_BENEATH` 行为；⑤新增负向测试证明 generic shell、generic host exec、越界 executable、任意 compiler flags/output/path 仍被拒绝；⑥不扩大 public MCP tool surface。
+
+### GG-BL-030 — post-merge release closeout 缺少受控 canonical docs 回写路径
+
+- **Priority**: P1
+- **Status**: BLOCKED
+- **Category**: developer workflow / repository write / release closeout
+- **Problem**: GrandeGPT 已能完成 task worktree 开发、commit、push、PR、merge、deploy 与 verify，但 release 验收后对 `docs/BACKLOG.md`、verification/release evidence、`README.md` 等 canonical truth source 的收尾没有一条明确的一次性 closeout 路径。当前 `grande_repo_edit` 只写 task worktree；若调用方转而依赖 ChatGPT GitHub integration 的 Contents API / merge 权限，则可能因 integration scope 返回 `403 Resource not accessible by integration`，最终退化为 Human Owner 本机 `gh` / shell。虽然可以另开 docs-only task 再走一遍 PR 流程，但这不是 first-class release closeout，且会持续制造额外任务/PR ceremony 与人工误用外部 GitHub integration 的机会。
+- **Evidence / Detail**: 2026-08-25 `grande-console` Pleurat redesign release closeout：implementation、tests、PR、merge、production activation 与 live smoke 已完成，最后仍需要同步 BACKLOG / verification / README；ChatGPT GitHub integration 的写/merge 路径出现 `403 Resource not accessible by integration`，Human Owner 使用本机 `gh` 完成 merge，docs-only closeout 仍暴露同类人工 fallback。当前 GrandeGPT contract 也明确 `grande_repo_edit` 只能写 task worktree，不接受 canonical target。
+- **Design direction**: 优先实现一个窄的 **canonical docs closeout domain primitive / workflow**，而不是把 `grande_repo_edit` 泛化为 `target=canonical`，更不开放 generic host shell。外部可表现为一次 closeout 调用，但内部优先复用现有受控链路：registered repo + per-repo write lock + expected canonical HEAD CAS → 独立 closeout worktree/branch → 原子多文件 edit → commit → GrandeGPT 自有 credential push → 现有 PR/merge gate → canonical ff-only refresh → read-back receipt。只有后续证据证明 PR-under-the-hood 无法满足 closeout，才评估更高风险的 direct default-branch commit；不得先默认开放 `git push main`。
+- **Path policy**: “docs-only”必须由 **路径分类 + 明确 denylist** 决定，不能只按 `.md/.yaml/.json` 扩展名放行。至少允许 repo 明确的 `README.md`、`docs/**` 中 closeout/evidence/backlog 文档与经注册的额外路径；必须拒绝 repo 外路径，以及 `.github/workflows/**`、package manifests/lockfiles、`.grande/**`、auth/secrets/control-plane、可执行脚本和其他会改变 build/runtime/permission 语义的配置。未知路径 fail closed；源码修改继续走正常 task/PR development。
+- **Security / integrity**: 必须验证 registered repo、允许的 base branch、clean canonical、`expectedHead` CAS、每个已有目标文件的 expected blob/content hash；canonical HEAD 漂移、dirty tree、unauthorized path/repo、partial edit、non-fast-forward/merge rejection 均 fail closed。不允许 force push、reset-hard、branch deletion、repo 外写入或任意 host command。一次 closeout 的多个文件必须形成单一 atomic commit/merge outcome。
+- **Audit receipt**: 每次 closeout 至少记录 repo、branch、before HEAD、after HEAD、changed files、每个文件 before/after digest、actor/task/reason、closeout branch/PR（若使用）、commit/merge SHA、push/merge result 与 canonical read-back 结果；失败不得留下“部分已更新但状态显示 DONE”的 receipt。
+- **Related**: `GG-BL-001`（canonical refresh，已 DONE）、`GG-BL-008`（GrandeGPT GitHub credential least-privilege）、`GG-BL-017`（per-repo write lock，已 DONE）、`GG-BL-010`（当前 public tool-contract release gate）、`GG-BL-024`（下一次 Tool Epoch surface convergence）。
+- **Blocked by / sequencing**: production 25-tool contract 在 `GG-BL-010` §7.3 observation 完成前冻结，因此不得为了本项单独修改 public `tools/list` 或 `grande_repo_edit` schema。可以先设计/实现不暴露的新 internal primitive 与测试；用户可调用的 public surface 应与 `GG-BL-024` 下一次正式 Tool Epoch 一并评审和发布，避免额外 tool snapshot/digest churn。
+- **Done when**: ① 已注册 repo 的 canonical main 可通过 GrandeGPT 一次 closeout 请求完成一组允许的 docs/evidence/backlog 修改，并最终在 canonical main read-back；②不依赖 ChatGPT GitHub integration Contents API 写权限；③支持 expected HEAD CAS 与已有文件 expected digest；④dirty canonical、stale HEAD、unauthorized repo/path、non-fast-forward/merge rejection、partial edit failure 全部 fail closed；⑤一次多文件 closeout 只产生一个原子 commit/merge outcome；⑥完整 audit receipt 可读回 before/after HEAD、commit/merge SHA、changed files 与 push/merge/read-back 结果；⑦无 repo 外写、force push、generic host shell 或 source-code hotfix bypass；⑧自动化覆盖 happy path、stale HEAD、dirty repo、unauthorized repo/path、push/merge rejection、partial edit failure；⑨以 `grande-console` 真实 release closeout 做 E2E：更新 `README.md`、verification evidence、将 `GC-BL-013` 移入 Archive/DONE，完成 commit/push/merge 后从 canonical main 读回验证。
 
 ## Observations
 
