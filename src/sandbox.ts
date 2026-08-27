@@ -116,21 +116,6 @@ function resolveBinaryDirs(name: string): string[] {
   }
 }
 
-function resolveBootstrapInterpreterTargets(argv0: string, execRoots: readonly string[]): string[] {
-  if (argv0 !== "npm" && argv0 !== "pnpm") return [];
-  for (const root of execRoots) {
-    const candidate = join(root, argv0);
-    if (!existsSync(candidate)) continue;
-    const target = realpathSync(candidate);
-    const allowed = execRoots.some((trustedRoot) => {
-      const rel = relative(trustedRoot, target);
-      return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-    });
-    if (allowed) return [target];
-  }
-  return [];
-}
-
 /**
  * 返回本机实际需要放行的 process-exec 根目录：标准系统路径 + 当前 node 解释器
  * 所在目录 + 包管理器二进制的符号链接目录与解析后目录（见 resolveBinaryDirs）。
@@ -244,7 +229,6 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     // 同样的道理适用于 execRoots：调用方即便已经用 defaultExecRoots() 解析过，
     // 这里仍统一再 realpathSync 一遍——不依赖调用方自律，跟上面五个字段一致。
     execRoots: o.paths.execRoots.map((r) => realpathSync(r)),
-    bootstrapInterpreterTargets: [],
     // 不接受调用方传入的额外 worktree exec allow；每次都从当前 `.bin` 实际 symlink
     // 重新推导 exact target，避免 stale/untrusted path 扩大 process-exec。
     worktreeExecTargets: resolveWorktreeBinExecTargets(canonicalWorktree),
@@ -253,22 +237,12 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     toolchainReadFiles: toolchain ? [...toolchain.readFiles] : [],
     toolchainExecTargets: toolchain ? [...toolchain.execTargets] : [],
   };
-  if (o.networkPolicy === "package-manager-bootstrap") {
-    canonicalPaths.bootstrapInterpreterTargets = resolveBootstrapInterpreterTargets(
-      o.argv[0]!,
-      canonicalPaths.execRoots,
-    );
-  }
-
   for (const [label, value] of [
     ["worktree", canonicalPaths.worktree], ["canonicalGit", canonicalPaths.canonicalGit],
     ["jobTmp", canonicalPaths.jobTmp], ["controlRoot", canonicalPaths.controlRoot],
     ["worktreesRoot", canonicalPaths.worktreesRoot],
   ] as const) assertOnDiskSpelling(label, value);
   canonicalPaths.execRoots.forEach((r, i) => assertOnDiskSpelling(`execRoots[${i}]`, r));
-  canonicalPaths.bootstrapInterpreterTargets?.forEach(
-    (r, i) => assertOnDiskSpelling(`bootstrapInterpreterTargets[${i}]`, r),
-  );
   canonicalPaths.worktreeExecTargets?.forEach((r, i) => assertOnDiskSpelling(`worktreeExecTargets[${i}]`, r));
   canonicalPaths.toolchainReadRoots?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadRoots[${i}]`, r));
   canonicalPaths.toolchainReadFiles?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadFiles[${i}]`, r));
