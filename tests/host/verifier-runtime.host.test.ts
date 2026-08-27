@@ -4,6 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDb } from "../../src/db.ts";
+import {
+  captureDependencyBootstrapIdentity,
+  publishPreparedDependencies,
+} from "../../src/dependencyBootstrap.ts";
 import { buildHostVerifierStaticPlan, type HostVerifierRequest, type HostVerifierStaticPlan } from "../../src/hostVerifier.ts";
 import { createDefaultHostVerifierRuntimeAdapter, createHostVerifierLauncher } from "../../src/hostVerifierRuntime.ts";
 import { getJob, type JobRow } from "../../src/jobs.ts";
@@ -91,8 +95,11 @@ function resourceFixture(kind: "timeout" | "rss"): Fixture {
   git(canonical, "init", "-q", "-b", "main");
   git(canonical, "config", "user.name", "Verifier Runtime Probe");
   git(canonical, "config", "user.email", "verifier@example.invalid");
-  writeFileSync(join(canonical, "package.json"), '{"type":"module"}\n', "utf8");
-  writeFileSync(join(canonical, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n", "utf8");
+  // Keep the dependency identity honest: this fixture exercises verifier resource limits, so it
+  // reuses the real project's exact manifest/lockfile and a trusted prepared cache instead of
+  // declaring an empty dependency graph while smuggling Vitest through canonical node_modules.
+  writeFileSync(join(canonical, "package.json"), readFileSync(join(process.cwd(), "package.json"), "utf8"), "utf8");
+  writeFileSync(join(canonical, "pnpm-lock.yaml"), readFileSync(join(process.cwd(), "pnpm-lock.yaml"), "utf8"), "utf8");
   writeFileSync(
     join(canonical, "tests", "host", "server-auto.host.test.ts"),
     [
@@ -113,7 +120,13 @@ function resourceFixture(kind: "timeout" | "rss"): Fixture {
   execFileSync("/bin/cp", ["-Rc", currentDeps, join(canonical, "node_modules")], {
     stdio: ["ignore", "pipe", "pipe"],
   });
-  return configureFixture(root, canonical, `task-runtime-${kind}`, commit);
+  const fixture = configureFixture(root, canonical, `task-runtime-${kind}`, commit);
+  publishPreparedDependencies(
+    fixture.layout,
+    captureDependencyBootstrapIdentity("grande-gpt", canonical),
+    canonical,
+  );
+  return fixture;
 }
 
 function request(fixture: Fixture): HostVerifierRequest {
