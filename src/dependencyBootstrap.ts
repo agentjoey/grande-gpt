@@ -242,7 +242,10 @@ export function materializePreparedDependencies(
 }
 
 export function repoRequiresDependencyBootstrap(layout: Layout, repoId: string): boolean {
-  return loadDepDirs(layout, repoId).includes("node_modules");
+  if (loadDepDirs(layout, repoId).includes("node_modules")) return true;
+  const repoRoot = resolveRepoPath(layout, repoId, registeredIds(layout));
+  if (!existsSync(join(repoRoot, "package.json"))) return false;
+  return existsSync(join(repoRoot, "pnpm-lock.yaml")) || existsSync(join(repoRoot, "package-lock.json"));
 }
 
 function assertStableDependencyIdentity(

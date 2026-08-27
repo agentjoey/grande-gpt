@@ -25,43 +25,43 @@ function layoutAt(base: string): Layout {
   };
 }
 
-function writeNpmIdentityFiles(dir: string): void {
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "demo", version: "1.0.0" }) + "\n", "utf8");
-  writeFileSync(
-    join(dir, "package-lock.json"),
-    JSON.stringify({
-      name: "demo",
-      version: "1.0.0",
-      lockfileVersion: 3,
-      requires: true,
-      packages: { "": { name: "demo", version: "1.0.0" } },
-    }, null, 2) + "\n",
-    "utf8",
-  );
+function writeRegisteredRepo(layout: Layout, withLockfile: boolean): string {
+  const repo = join(layout.workspaceRoot, "demo");
+  mkdirSync(repo, { recursive: true });
+  mkdirSync(layout.configDir, { recursive: true });
+  writeFileSync(layout.reposConfig, "repos:\n  - repoId: demo\n    registered: true\n", "utf8");
+  writeFileSync(join(layout.configDir, "profiles.yaml"), "repos: {}\n", "utf8");
+  writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "demo", version: "1.0.0" }) + "\n", "utf8");
+  if (withLockfile) {
+    writeFileSync(
+      join(repo, "package-lock.json"),
+      JSON.stringify({
+        name: "demo",
+        version: "1.0.0",
+        lockfileVersion: 3,
+        requires: true,
+        packages: { "": { name: "demo", version: "1.0.0" } },
+      }, null, 2) + "\n",
+      "utf8",
+    );
+  }
+  return repo;
 }
 
 describe("GG-BL-031 bootstrap trigger", () => {
   it("requires dependency bootstrap for a supported lockfile even without depDirs opt-in", () => {
     root = mkdtempSync(join(tmpdir(), "dependency-trigger-"));
     const layout = layoutAt(root);
-    const repo = join(root, "repo");
-    writeNpmIdentityFiles(repo);
-    mkdirSync(layout.configDir, { recursive: true });
-    writeFileSync(join(layout.configDir, "profiles.yaml"), "repos: {}\n", "utf8");
+    writeRegisteredRepo(layout, true);
 
-    expect(repoRequiresDependencyBootstrap(layout, "demo", repo)).toBe(true);
+    expect(repoRequiresDependencyBootstrap(layout, "demo")).toBe(true);
   });
 
   it("does not broaden bootstrap to repositories without a supported lockfile", () => {
     root = mkdtempSync(join(tmpdir(), "dependency-trigger-none-"));
     const layout = layoutAt(root);
-    const repo = join(root, "repo");
-    mkdirSync(repo, { recursive: true });
-    writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "demo", version: "1.0.0" }) + "\n", "utf8");
-    mkdirSync(layout.configDir, { recursive: true });
-    writeFileSync(join(layout.configDir, "profiles.yaml"), "repos: {}\n", "utf8");
+    writeRegisteredRepo(layout, false);
 
-    expect(repoRequiresDependencyBootstrap(layout, "demo", repo)).toBe(false);
+    expect(repoRequiresDependencyBootstrap(layout, "demo")).toBe(false);
   });
 });
