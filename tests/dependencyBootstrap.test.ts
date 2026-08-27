@@ -208,6 +208,41 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(result.stdout).toContain("dns-ok");
   }, 15_000);
 
+  it("marks only package-manager bootstrap runs as non-interactive CI", async () => {
+    if (process.platform !== "darwin") return;
+    root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-ci-env-"));
+    const paths: SandboxPaths = {
+      worktree: join(root, "worktree"),
+      canonicalGit: join(root, "canonical", ".git"),
+      jobTmp: join(root, "jobtmp"),
+      controlRoot: join(root, "control"),
+      worktreesRoot: join(root, "worktrees"),
+      execRoots: defaultExecRoots(),
+    };
+    for (const dir of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    const bootstrap = await runSandboxed({
+      argv: [process.execPath, "-e", "console.log(process.env.CI ?? 'unset')"],
+      cwd: paths.worktree,
+      paths,
+      networkPolicy: "package-manager-bootstrap",
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    const ordinary = await runSandboxed({
+      argv: [process.execPath, "-e", "console.log(process.env.CI ?? 'unset')"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+
+    expect(bootstrap.stdout.trim()).toBe("true");
+    expect(ordinary.stdout.trim()).toBe("unset");
+  });
+
   it("does not broaden install argv when package-manager identity is pnpm", () => {
     const identity = buildDependencyBootstrapIdentity("alpha", pnpmToolchain, { platform: "darwin", arch: "arm64" });
     expect(identity.packageManager).toBe("pnpm");

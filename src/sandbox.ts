@@ -255,7 +255,8 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   }) + buildNativeExecSbplRules(canonicalWorktree, nativeExecTargets);
   writeFileSync(profilePath, profile, "utf8");
 
-  // 环境清洗：只传必需的四个。宿主的 *_TOKEN / *_API_KEY / DYLD_* 一律不进沙箱。
+  // 环境清洗：普通 job 只传必需的四个；bootstrap 额外固定 CI=true，避免 npm/pnpm
+  // 在无 TTY 的受控 job 中尝试交互确认。宿主的 *_TOKEN / *_API_KEY / DYLD_* 一律不进沙箱。
   // HOME/TMPDIR 都在 per-job root，bootstrap 因而也看不到宿主 ~/.npmrc、~/.pnpm-store
   // 或其它用户级凭据。package-manager 网络模式只改变 Seatbelt network rule，不改变 env。
   //
@@ -269,6 +270,7 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     HOME: home,
     LANG: "en_US.UTF-8",
     TMPDIR: o.paths.jobTmp,
+    ...(o.networkPolicy === "package-manager-bootstrap" ? { CI: "true" } : {}),
   };
 
   const started = Date.now();
