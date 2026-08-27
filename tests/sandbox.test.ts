@@ -381,15 +381,12 @@ describe("pnpm 向上遍历目录树时不再撞上 EPERM lstat(worktreesRoot)�
 });
 
 describe("PATH 与 execRoots 同源（回归：修复前二者是两处独立硬编码）", () => {
-  it("将当前 Node 所在目录排在通用系统根之前，避免 runner 工具链被 shadow", () => {
+  it("将当前 Node 所在目录置于 PATH 首位，避免 runner 工具链被 shadow", () => {
     const roots = defaultExecRoots();
     const nodeRoot = dirname(realpathSync(process.execPath));
-    const genericSystemRoots = ["/usr/bin", "/bin", "/usr/sbin"]
-      .map((root) => realpathSync(root))
-      .filter((root) => root !== nodeRoot);
 
     expect(roots.indexOf(nodeRoot)).toBeGreaterThan(-1);
-    expect(roots.indexOf(nodeRoot)).toBeLessThan(Math.min(...genericSystemRoots.map((root) => roots.indexOf(root))));
+    expect(roots[0]).toBe(nodeRoot);
   });
 
   /**
