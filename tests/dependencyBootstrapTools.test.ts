@@ -6,6 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import {
   captureDependencyBootstrapIdentity,
+  DependencyBootstrapFailure,
+  DependencyBootstrapIdentityDrift,
   prepareDependenciesInWorktree,
   publishPreparedDependencies,
 } from "../src/dependencyBootstrap.ts";
@@ -33,6 +35,15 @@ async function waitTerminal(jobId: string): Promise<void> {
     if (Date.now() > deadline) throw new Error(`job ${jobId} did not settle`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+}
+
+function bootstrapFailureContext(jobId: string): string {
+  const job = getJob(deps!.db, jobId);
+  if (!job) return `missing bootstrap job ${jobId}`;
+  const artifact = job.artifactPath && existsSync(job.artifactPath)
+    ? readFileSync(job.artifactPath, "utf8")
+    : "<no bootstrap artifact>";
+  return `bootstrap job ${jobId}: ${JSON.stringify(job, null, 2)}\n${artifact}`;
 }
 
 async function callRun(profile = "ok"): Promise<any> {
@@ -131,7 +142,7 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     expect(bootstrapJob.argv).toEqual(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 
     await waitTerminal(first.data.jobId);
-    expect(getJob(deps!.db, first.data.jobId)).toMatchObject({
+    expect(getJob(deps!.db, first.data.jobId), bootstrapFailureContext(first.data.jobId)).toMatchObject({
       state: "passed",
       summary: {
         kind: "dependency-bootstrap",
@@ -191,7 +202,7 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     if (!TERMINAL.has(getJob(deps!.db, started.data.jobId)!.state)) await waitTerminal(started.data.jobId);
 
     expect(waited).toBeGreaterThanOrEqual(1);
-    expect(getJob(deps!.db, started.data.jobId)?.state).toBe("passed");
+    expect(getJob(deps!.db, started.data.jobId)?.state, bootstrapFailureContext(started.data.jobId)).toBe("passed");
   }, 30_000);
 
   it("settles successfully when the optional bootstrap artifact cannot be written", async () => {
@@ -202,7 +213,7 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     expect(started.ok).toBe(true);
     expect(await awaitAllJobsSettled(10_000)).toBeGreaterThanOrEqual(1);
 
-    expect(getJob(deps!.db, started.data.jobId)).toMatchObject({
+    expect(getJob(deps!.db, started.data.jobId), bootstrapFailureContext(started.data.jobId)).toMatchObject({
       state: "passed",
       artifactPath: null,
       summary: { kind: "dependency-bootstrap", phase: "ready" },
@@ -270,15 +281,24 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     const lockfile = join(worktree, "package-lock.json");
     const original = JSON.parse(readFileSync(lockfile, "utf8"));
 
-    await expect(prepareDependenciesInWorktree({
-      layout,
-      repoId: "demo",
-      worktreePath: worktree,
-      jobTmp: join(root, "identity-drift-job"),
-      onSpawn: () => {
-        writeFileSync(lockfile, JSON.stringify({ ...original, drift: true }, null, 2) + "\n", "utf8");
-      },
-    })).rejects.toThrow(/identity.*drift|identity.*changed/i);
+    let failure: unknown;
+    try {
+      await prepareDependenciesInWorktree({
+        layout,
+        repoId: "demo",
+        worktreePath: worktree,
+        jobTmp: join(root, "identity-drift-job"),
+        onSpawn: () => {
+          writeFileSync(lockfile, JSON.stringify({ ...original, drift: true }, null, 2) + "\n", "utf8");
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    const failureContext = failure instanceof DependencyBootstrapFailure
+      ? JSON.stringify(failure.result, null, 2)
+      : String(failure);
+    expect(failure, failureContext).toBeInstanceOf(DependencyBootstrapIdentityDrift);
 
     expect(existsSync(join(worktree, "node_modules"))).toBe(false);
     expect(existsSync(join(layout.derivedRoot, "dependency-cache"))).toBe(false);
