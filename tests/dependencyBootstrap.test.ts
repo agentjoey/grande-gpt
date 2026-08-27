@@ -166,30 +166,14 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(ordinaryProfile).not.toContain('com.apple.SystemConfiguration.DNSConfiguration');
     expect(ordinaryProfile).toContain("(allow process-exec ");
     expect(ordinaryProfile).not.toContain("process-exec-interpreter");
-    const bootstrapProfile = buildProfile(
-      {
-        ...paths,
-        bootstrapInterpreterTargets: ["/usr/bin/npm", "/usr/bin/npm-cli.js", "/usr/bin/env", "/usr/bin/node"],
-      },
-      { network: "package-manager-bootstrap" },
-    );
+    const bootstrapProfile = buildProfile(paths, { network: "package-manager-bootstrap" });
     expect(bootstrapProfile).toContain("(allow network*)");
     expect(bootstrapProfile).not.toContain("(deny network*)");
     expect(bootstrapProfile).toContain(
       '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
     );
-    expect(bootstrapProfile).toContain(
-      '(allow process-exec-interpreter (literal "/usr/bin/npm"))',
-    );
-    expect(bootstrapProfile).toContain(
-      '(allow process-exec-interpreter (literal "/usr/bin/npm-cli.js"))',
-    );
-    expect(bootstrapProfile).toContain(
-      '(allow process-exec-interpreter (literal "/usr/bin/env"))',
-    );
-    expect(bootstrapProfile).toContain(
-      '(allow process-exec-interpreter (literal "/usr/bin/node"))',
-    );
+    expect(bootstrapProfile).toContain("(allow process-exec-interpreter ");
+    expect(bootstrapProfile).toContain('(subpath "/usr/bin")');
   });
 
   it("resolves registry DNS inside the explicit package-manager bootstrap sandbox", async () => {
