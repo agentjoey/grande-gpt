@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -381,6 +381,17 @@ describe("pnpm 向上遍历目录树时不再撞上 EPERM lstat(worktreesRoot)�
 });
 
 describe("PATH 与 execRoots 同源（回归：修复前二者是两处独立硬编码）", () => {
+  it("将当前 Node 所在目录排在通用系统根之前，避免 runner 工具链被 shadow", () => {
+    const roots = defaultExecRoots();
+    const nodeRoot = dirname(realpathSync(process.execPath));
+    const genericSystemRoots = ["/usr/bin", "/bin", "/usr/sbin"]
+      .map((root) => realpathSync(root))
+      .filter((root) => root !== nodeRoot);
+
+    expect(roots.indexOf(nodeRoot)).toBeGreaterThan(-1);
+    expect(roots.indexOf(nodeRoot)).toBeLessThan(Math.min(...genericSystemRoots.map((root) => roots.indexOf(root))));
+  });
+
   /**
    * 用 `env node` 而不是 shebang 脚本来测——两者走的是同一条 PATH 查找，
    * 但 shebang 脚本必须放在 worktree 里，而 worktree 不在 execRoots，
