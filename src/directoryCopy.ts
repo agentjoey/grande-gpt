@@ -13,5 +13,10 @@ export function copyDirectory(source: string, destination: string): void {
   // On macOS, fs.cpSync can terminate the process when it encounters an unreadable nested
   // directory. Enumerating first converts that case into a regular filesystem error.
   assertReadableDirectoryTree(source);
-  cpSync(source, destination, { recursive: true, mode: constants.COPYFILE_FICLONE });
+  cpSync(source, destination, {
+    recursive: true,
+    dereference: false,
+    verbatimSymlinks: true,
+    mode: constants.COPYFILE_FICLONE,
+  });
 }

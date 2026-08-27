@@ -134,7 +134,7 @@ export function defaultExecRoots(): string[] {
   const roots = new Set<string>(STANDARD_EXEC_ROOTS.map((r) => realpathSync(r)));
   const nodeRoot = dirname(realpathSync(process.execPath));
   for (const bin of PACKAGE_MANAGER_BINARIES) {
-    if (bin === "git") continue; // 已单独解析，放在最前面确保 PATH 优先级
+    if (bin === "git") continue; // 已单独解析，排在通用系统根之前确保 PATH 优先级
     for (const dir of resolveBinaryDirs(bin)) roots.add(dir);
   }
   // 当前 Node 必须在 PATH 首位：CI runner 的 Git/Xcode 或 /usr/bin 根都可能有另一份

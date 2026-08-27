@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -24,6 +24,7 @@ describe("copyDirectory", () => {
 
     expect(readFileSync(join(destination, "nested", "package.json"), "utf8")).toBe('{"name":"fixture"}\n');
     expect(lstatSync(join(destination, "manifest-link")).isSymbolicLink()).toBe(true);
+    expect(readlinkSync(join(destination, "manifest-link"))).toBe("nested/package.json");
     expect(existsSync(join(destination, "manifest-link"))).toBe(true);
   });
 });
