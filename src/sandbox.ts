@@ -118,12 +118,17 @@ function resolveBinaryDirs(name: string): string[] {
 
 function resolveBootstrapInterpreterTargets(argv0: string, execRoots: readonly string[]): string[] {
   if (argv0 !== "npm" && argv0 !== "pnpm") return [];
-  const env = "/usr/bin/env";
-  const allowed = execRoots.some((root) => {
-    const rel = relative(root, env);
-    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-  });
-  return existsSync(env) && allowed ? [env] : [];
+  for (const root of execRoots) {
+    const candidate = join(root, argv0);
+    if (!existsSync(candidate)) continue;
+    const target = realpathSync(candidate);
+    const allowed = execRoots.some((trustedRoot) => {
+      const rel = relative(trustedRoot, target);
+      return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+    });
+    if (allowed) return [target];
+  }
+  return [];
 }
 
 /**
