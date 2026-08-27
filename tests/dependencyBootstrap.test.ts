@@ -172,8 +172,8 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(bootstrapProfile).toContain(
       '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
     );
-    expect(bootstrapProfile).toContain("(allow process-exec-interpreter ");
-    expect(bootstrapProfile).toContain('(subpath "/usr/bin")');
+    expect(bootstrapProfile).toContain("(allow process-exec-interpreter)");
+    expect(bootstrapProfile).not.toContain("(allow process-exec-interpreter ");
   });
 
   it("resolves registry DNS inside the explicit package-manager bootstrap sandbox", async () => {

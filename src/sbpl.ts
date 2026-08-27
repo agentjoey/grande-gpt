@@ -355,9 +355,7 @@ export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {
     "",
     ";; 执行：根目录列表由调用方传入（见 SandboxPaths.execRoots），不是硬编码常量",
     `(allow process-exec ${p.execRoots.map((root) => `(subpath "${q(root)}")`).join(" ")})`,
-    ...(network === "package-manager-bootstrap"
-      ? [`(allow process-exec-interpreter ${p.execRoots.map((root) => `(subpath "${q(root)}")`).join(" ")})`]
-      : []),
+    ...(network === "package-manager-bootstrap" ? ["(allow process-exec-interpreter)"] : []),
     ";; worktree 内也要放行 exec，但只到 node_modules/.bin——U2 实测：pnpm/npm 把包的可执行",
     ";; 入口（如 node_modules/.bin/vitest）生成为物理落在 worktree 内的 POSIX shell shim（不是",
     ";; 符号链接出去），`pnpm test` 经由该 shim 的 shebang 调起，因此 shim 自身必须可 exec。",
