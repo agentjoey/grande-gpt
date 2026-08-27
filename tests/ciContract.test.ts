@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -20,8 +20,8 @@ function pkg(): PackageJson {
   return JSON.parse(readFileSync(join(process.cwd(), "package.json"), "utf8")) as PackageJson;
 }
 
-function workflow(): string {
-  return readFileSync(join(process.cwd(), ".github", "workflows", "ci.yml"), "utf8");
+function workflow(name = "ci.yml"): string {
+  return readFileSync(join(process.cwd(), ".github", "workflows", name), "utf8");
 }
 
 describe("GG-BL-018 minimal independent CI contract", () => {
@@ -53,11 +53,41 @@ describe("GG-BL-018 minimal independent CI contract", () => {
     expect(scripts["ci:verify"]).not.toMatch(/outer-test|hostVerifier|tests\/host|sandbox-exec|launchctl/);
   });
 
-  it("pins ordinary CI to macOS without moving trusted host suites into GitHub Actions", () => {
+  it("runs ordinary CI on Ubuntu for pull requests and main pushes without host suites", () => {
     const value = workflow();
-    expect(value).toContain("runs-on: macos-15");
-    expect(value).not.toMatch(/runs-on:\s*ubuntu/i);
+    expect(value).toContain("pull_request:");
+    expect(value).toContain("push:\n    branches: [main]");
+    expect(value).toContain("runs-on: ubuntu-latest");
+    expect(value).not.toMatch(/runs-on:\s*macos/i);
     expect(value).toContain("run: pnpm ci:verify");
     expect(value).not.toMatch(/outer-test|hostVerifier|tests\/host|sandbox-exec|launchctl/);
+  });
+
+  it("keeps the real macOS Seatbelt and DNS tests in their own path-filtered workflow", () => {
+    const path = join(process.cwd(), ".github", "workflows", "macos-seatbelt.yml");
+    expect(existsSync(path)).toBe(true);
+    if (!existsSync(path)) return;
+
+    const value = workflow("macos-seatbelt.yml");
+    expect(value).toContain("runs-on: macos-15");
+    expect(value).toContain("paths:");
+    expect(value).toContain("src/sandbox.ts");
+    expect(value).toContain("src/dependencyBootstrap.ts");
+    expect(value).toContain("tests/sandbox.test.ts");
+    expect(value).toContain("tests/dependencyBootstrap.test.ts");
+    expect(value).toContain("pnpm exec vitest run tests/sandbox.test.ts tests/dependencyBootstrap.test.ts");
+    expect(value).not.toContain("pnpm ci:verify");
+  });
+
+  it("cancels superseded runs independently in both CI workflows", () => {
+    for (const name of ["ci.yml", "macos-seatbelt.yml"]) {
+      const path = join(process.cwd(), ".github", "workflows", name);
+      expect(existsSync(path)).toBe(true);
+      if (!existsSync(path)) continue;
+      const value = workflow(name);
+      expect(value).toContain("concurrency:");
+      expect(value).toContain("group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}");
+      expect(value).toContain("cancel-in-progress: true");
+    }
   });
 });
