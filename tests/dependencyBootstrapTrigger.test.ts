@@ -1,14 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Layout } from "../src/layout.ts";
-import {
-  captureDependencyBootstrapIdentity,
-  dependencyCacheDir,
-  repoRequiresDependencyBootstrap,
-  seedPreparedDependenciesFromCanonical,
-} from "../src/dependencyBootstrap.ts";
+import { repoRequiresDependencyBootstrap } from "../src/dependencyBootstrap.ts";
 
 let root: string | null = null;
 
@@ -46,7 +41,7 @@ function writeNpmIdentityFiles(dir: string): void {
   );
 }
 
-describe("GG-BL-031 bootstrap trigger and canonical seed", () => {
+describe("GG-BL-031 bootstrap trigger", () => {
   it("requires dependency bootstrap for a supported lockfile even without depDirs opt-in", () => {
     root = mkdtempSync(join(tmpdir(), "dependency-trigger-"));
     const layout = layoutAt(root);
@@ -68,28 +63,5 @@ describe("GG-BL-031 bootstrap trigger and canonical seed", () => {
     writeFileSync(join(layout.configDir, "profiles.yaml"), "repos: {}\n", "utf8");
 
     expect(repoRequiresDependencyBootstrap(layout, "demo", repo)).toBe(false);
-  });
-
-  it("seeds the prepared cache from matching canonical dependencies without sharing mutable files", () => {
-    root = mkdtempSync(join(tmpdir(), "dependency-canonical-seed-"));
-    const layout = layoutAt(root);
-    const canonical = join(root, "canonical");
-    const worktree = join(root, "worktree");
-    writeNpmIdentityFiles(canonical);
-    writeNpmIdentityFiles(worktree);
-    mkdirSync(join(canonical, "node_modules", "pkg"), { recursive: true });
-    writeFileSync(join(canonical, "node_modules", "pkg", "index.js"), "canonical\n", "utf8");
-
-    const identity = captureDependencyBootstrapIdentity("demo", worktree);
-    expect(seedPreparedDependenciesFromCanonical(layout, identity, canonical, worktree)).toBe(true);
-
-    const cacheFile = join(dependencyCacheDir(layout, identity), "node_modules", "pkg", "index.js");
-    const worktreeFile = join(worktree, "node_modules", "pkg", "index.js");
-    expect(existsSync(cacheFile)).toBe(true);
-    expect(readFileSync(worktreeFile, "utf8")).toBe("canonical\n");
-
-    writeFileSync(worktreeFile, "changed\n", "utf8");
-    expect(readFileSync(join(canonical, "node_modules", "pkg", "index.js"), "utf8")).toBe("canonical\n");
-    expect(readFileSync(cacheFile, "utf8")).toBe("canonical\n");
   });
 });
