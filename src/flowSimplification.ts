@@ -42,8 +42,18 @@ function wrapRun(deps: ToolDeps, tools: ToolDef[]): void {
   const run = tools.find((tool) => tool.name === "grande_run");
   if (!run) return;
 
+  const originalRunPrefix = "在沙箱中异步执行一个 profile 命令，立即返回 jobId 供后续查询。";
+  const profileDiscovery = run.description.startsWith(originalRunPrefix)
+    ? run.description.slice(originalRunPrefix.length)
+    : run.description;
   run.description = "在沙箱中执行一个 profile。短 job 会在固定 bounded wait 内直接返回终态；" +
-    "超过预算则返回稳定 jobId，后续通过 grande_run_result 恢复/查询。";
+    "超过预算则返回稳定 jobId，后续通过 grande_run_result 恢复/查询。" +
+    profileDiscovery;
+
+  const profileProperty = run.inputSchema.properties.profile;
+  if (profileProperty && typeof profileProperty === "object" && !Array.isArray(profileProperty)) {
+    (profileProperty as { description?: string }).description = "要执行的 profile 名称";
+  }
 
   const inner = run.handler;
   run.handler = async (args) => {
@@ -125,8 +135,9 @@ function wrapTaskStatus(deps: ToolDeps, tools: ToolDef[]): void {
 }
 
 /**
- * Phase 8 response-layer simplification. It intentionally changes no tool name, input schema,
- * annotation, lifecycle table, runner ownership, or merge authority.
+ * Phase 8 response-layer simplification. It changes no tool name, validation shape,
+ * annotation, lifecycle table, runner ownership, or merge authority. Runtime-only
+ * profile discovery stays in the top-level description rather than the hashed schema.
  */
 export function addFlowSimplification(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
   wrapRun(deps, tools);
