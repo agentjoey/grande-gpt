@@ -8,7 +8,7 @@ import { createJob, finishJob, getJob, TERMINAL, type JobState } from "./jobs.ts
 import { assertTaskId, resolveRepoPath } from "./paths.ts";
 import { getProfile } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
-import { defaultExecRoots, runSandboxed } from "./sandbox.ts";
+import { defaultExecRoots, runSandboxed, type RunOptions, type RunResult } from "./sandbox.ts";
 import type { AuditHandle } from "./audit.ts";
 import type { ToolError } from "./errors.ts";
 
@@ -24,6 +24,8 @@ export class RunnerError extends Error {
 export interface RunnerDeps {
   db: DatabaseSync;
   layout: Layout;
+  /** Internal deterministic seam for job lifecycle tests; production uses runSandboxed. */
+  jobSandboxRunner?: (options: RunOptions) => Promise<RunResult>;
 }
 
 export interface StartedJob {
@@ -187,7 +189,7 @@ export function startJob(
     // runSandboxed 的前半段（realpath、写 profile、spawn）是同步的，onSpawn 在返回
     // promise 之前就已经触发，所以 createJob 拿得到真实 pgid（C-5）。实测整段 6 ms。
     let pgid: number | null = null;
-    const run = runSandboxed({
+    const run = (deps.jobSandboxRunner ?? runSandboxed)({
       argv: [...profile.argv],
       cwd: worktree,
       onSpawn: (p) => { pgid = p; },

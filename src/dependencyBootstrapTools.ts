@@ -12,7 +12,8 @@ import {
   prepareDependenciesInWorktree,
   preparedDependenciesPresent,
   preparedDependencyCachePresent,
-  repoRequiresDependencyBootstrap,
+  profileRequiresDependencyBootstrap,
+  type DependencyBootstrapSandboxRunner,
   type DependencyBootstrapIdentity,
 } from "./dependencyBootstrap.ts";
 import { StateError } from "./errors.ts";
@@ -25,6 +26,7 @@ import {
   TERMINAL,
 } from "./jobs.ts";
 import type { Layout } from "./layout.ts";
+import { getProfile } from "./profiles.ts";
 import { trackJobSettlement } from "./runner.ts";
 import type { TaskRow } from "./tasks.ts";
 
@@ -34,6 +36,7 @@ const BOOTSTRAP_POLL_SECONDS = 20;
 interface DependencyBootstrapDeps {
   db: DatabaseSync;
   layout: Layout;
+  dependencyBootstrapSandboxRunner?: DependencyBootstrapSandboxRunner;
 }
 
 function identitySummary(identity: DependencyBootstrapIdentity): Record<string, unknown> {
@@ -168,6 +171,7 @@ function launchBootstrap(
     repoId: task.repoId,
     worktreePath: task.worktreePath,
     jobTmp,
+    sandboxRunner: deps.dependencyBootstrapSandboxRunner,
     onSpawn: (pgid) => {
       try { setRunningJobPgid(deps.db, jobId, pgid); } catch { /* terminal reconciliation already won */ }
     },
@@ -265,7 +269,8 @@ export function prepareDependencyPrerequisite(
   task: TaskRow,
   requestedProfile: string,
 ): DependencyPrerequisite | null {
-  if (!repoRequiresDependencyBootstrap(deps.layout, task.repoId)) return null;
+  const profile = getProfile(deps.layout, task.repoId, requestedProfile);
+  if (!profileRequiresDependencyBootstrap(deps.layout, task.repoId, task.worktreePath, profile.argv)) return null;
 
   const identity = captureDependencyBootstrapIdentity(task.repoId, task.worktreePath);
   const existing = runningBootstrap(deps, task, identity);

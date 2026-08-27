@@ -6,9 +6,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db.ts";
 import {
   captureDependencyBootstrapIdentity,
+  DependencyBootstrapFailure,
+  DependencyBootstrapIdentityDrift,
   prepareDependenciesInWorktree,
   publishPreparedDependencies,
 } from "../src/dependencyBootstrap.ts";
+import type { RunResult } from "../src/sandbox.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createJob, finishJob, getJob, listJobs, setRunningJobSummary, TERMINAL } from "../src/jobs.ts";
 import { createTask } from "../src/tasks.ts";
@@ -22,6 +25,21 @@ let deps: ToolDeps | undefined;
 let worktree: string;
 let savedWorkspace: string | undefined;
 let savedControl: string | undefined;
+let sandboxRunnerCalls: number;
+
+function sandboxResult(overrides: Partial<RunResult> = {}): RunResult {
+  return {
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    truncated: false,
+    killedBy: null,
+    killSignalSkipped: false,
+    durationMs: 1,
+    peakRssMb: 0,
+    ...overrides,
+  };
+}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -33,6 +51,15 @@ async function waitTerminal(jobId: string): Promise<void> {
     if (Date.now() > deadline) throw new Error(`job ${jobId} did not settle`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+}
+
+function bootstrapFailureContext(jobId: string): string {
+  const job = getJob(deps!.db, jobId);
+  if (!job) return `missing bootstrap job ${jobId}`;
+  const artifact = job.artifactPath && existsSync(job.artifactPath)
+    ? readFileSync(job.artifactPath, "utf8")
+    : "<no bootstrap artifact>";
+  return `bootstrap job ${jobId}: ${JSON.stringify(job, null, 2)}\n${artifact}`;
 }
 
 async function callRun(profile = "ok"): Promise<any> {
@@ -54,6 +81,7 @@ async function callCoreRun(profile = "ok"): Promise<any> {
 }
 
 beforeEach(() => {
+  sandboxRunnerCalls = 0;
   savedWorkspace = process.env.GRANDE_WORKSPACE;
   savedControl = process.env.GRANDE_CONTROL;
   root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-tools-"));
@@ -108,7 +136,19 @@ beforeEach(() => {
     worktreePath: worktree,
     state: "READY",
   });
-  deps = { db, layout };
+  deps = {
+    db,
+    layout,
+    dependencyBootstrapSandboxRunner: async (options) => {
+      sandboxRunnerCalls += 1;
+      options.onSpawn?.(12_345);
+      return sandboxResult();
+    },
+    jobSandboxRunner: async (options) => {
+      options.onSpawn?.(23_456);
+      return sandboxResult({ stdout: "product-profile\n" });
+    },
+  };
 });
 
 afterEach(() => {
@@ -131,7 +171,8 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     expect(bootstrapJob.argv).toEqual(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 
     await waitTerminal(first.data.jobId);
-    expect(getJob(deps!.db, first.data.jobId)).toMatchObject({
+    expect(sandboxRunnerCalls).toBe(1);
+    expect(getJob(deps!.db, first.data.jobId), bootstrapFailureContext(first.data.jobId)).toMatchObject({
       state: "passed",
       summary: {
         kind: "dependency-bootstrap",
@@ -164,6 +205,10 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
       JSON.stringify({ name: "demo", version: "1.0.0", dependencies: { missing: "1.0.0" } }) + "\n",
       "utf8",
     );
+    deps!.dependencyBootstrapSandboxRunner = async (options) => {
+      options.onSpawn?.(12_345);
+      return sandboxResult({ exitCode: 1, stderr: "fixture install failure" });
+    };
 
     const started = await callCoreRun();
     expect(started.ok).toBe(true);
@@ -191,7 +236,7 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     if (!TERMINAL.has(getJob(deps!.db, started.data.jobId)!.state)) await waitTerminal(started.data.jobId);
 
     expect(waited).toBeGreaterThanOrEqual(1);
-    expect(getJob(deps!.db, started.data.jobId)?.state).toBe("passed");
+    expect(getJob(deps!.db, started.data.jobId)?.state, bootstrapFailureContext(started.data.jobId)).toBe("passed");
   }, 30_000);
 
   it("settles successfully when the optional bootstrap artifact cannot be written", async () => {
@@ -202,7 +247,7 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     expect(started.ok).toBe(true);
     expect(await awaitAllJobsSettled(10_000)).toBeGreaterThanOrEqual(1);
 
-    expect(getJob(deps!.db, started.data.jobId)).toMatchObject({
+    expect(getJob(deps!.db, started.data.jobId), bootstrapFailureContext(started.data.jobId)).toMatchObject({
       state: "passed",
       artifactPath: null,
       summary: { kind: "dependency-bootstrap", phase: "ready" },
@@ -270,15 +315,28 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     const lockfile = join(worktree, "package-lock.json");
     const original = JSON.parse(readFileSync(lockfile, "utf8"));
 
-    await expect(prepareDependenciesInWorktree({
-      layout,
-      repoId: "demo",
-      worktreePath: worktree,
-      jobTmp: join(root, "identity-drift-job"),
-      onSpawn: () => {
-        writeFileSync(lockfile, JSON.stringify({ ...original, drift: true }, null, 2) + "\n", "utf8");
-      },
-    })).rejects.toThrow(/identity.*drift|identity.*changed/i);
+    let failure: unknown;
+    try {
+      await prepareDependenciesInWorktree({
+        layout,
+        repoId: "demo",
+        worktreePath: worktree,
+        jobTmp: join(root, "identity-drift-job"),
+        onSpawn: () => {
+          writeFileSync(lockfile, JSON.stringify({ ...original, drift: true }, null, 2) + "\n", "utf8");
+        },
+        sandboxRunner: async (options) => {
+          options.onSpawn?.(12_345);
+          return sandboxResult();
+        },
+      });
+    } catch (error) {
+      failure = error;
+    }
+    const failureContext = failure instanceof DependencyBootstrapFailure
+      ? JSON.stringify(failure.result, null, 2)
+      : String(failure);
+    expect(failure, failureContext).toBeInstanceOf(DependencyBootstrapIdentityDrift);
 
     expect(existsSync(join(worktree, "node_modules"))).toBe(false);
     expect(existsSync(join(layout.derivedRoot, "dependency-cache"))).toBe(false);

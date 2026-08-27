@@ -1,6 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Layout } from "../src/layout.ts";
 import type { ModernHostToolchainIdentity } from "../src/packageManagerIdentity.ts";
@@ -12,9 +12,19 @@ import {
   materializePreparedDependencies,
   publishPreparedDependencies,
 } from "../src/dependencyBootstrap.ts";
+import { defaultExecRoots, runSandboxed } from "../src/sandbox.ts";
 import { buildProfile, type SandboxPaths } from "../src/sbpl.ts";
 
 let root: string | null = null;
+
+function canLaunchNestedSandbox(): boolean {
+  try {
+    readdirSync(dirname(tmpdir()));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
@@ -160,10 +170,92 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
       worktreesRoot: "/tmp/grande/worktrees",
       execRoots: ["/usr/bin", "/bin"],
     };
-    expect(buildProfile(paths)).toContain("(deny network*)");
+    const ordinaryProfile = buildProfile(paths);
+    expect(ordinaryProfile).toContain("(deny network*)");
+    expect(ordinaryProfile).not.toContain('com.apple.SystemConfiguration.DNSConfiguration');
+    expect(ordinaryProfile).not.toContain('com.apple.system.opendirectoryd.libinfo');
+    expect(ordinaryProfile).not.toContain('/Library/Preferences/com.apple.networkd.plist');
+    expect(ordinaryProfile).not.toContain('(allow file-read-metadata (literal "/var"))');
+    expect(ordinaryProfile).toContain("(allow process-exec ");
+    expect(ordinaryProfile).not.toContain("process-exec-interpreter");
     const bootstrapProfile = buildProfile(paths, { network: "package-manager-bootstrap" });
     expect(bootstrapProfile).toContain("(allow network*)");
     expect(bootstrapProfile).not.toContain("(deny network*)");
+    expect(bootstrapProfile).toContain(
+      '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
+    );
+    expect(bootstrapProfile).not.toContain('com.apple.system.opendirectoryd.libinfo');
+    expect(bootstrapProfile).not.toContain('/Library/Preferences/com.apple.networkd.plist');
+    expect(bootstrapProfile).toContain('(allow file-read-metadata (literal "/var"))');
+    expect(bootstrapProfile).not.toContain("process-exec-interpreter");
+  });
+
+  it.skipIf(!canLaunchNestedSandbox())("resolves registry DNS inside the explicit package-manager bootstrap sandbox", async () => {
+    if (process.platform !== "darwin") return;
+    root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-dns-"));
+    const paths: SandboxPaths = {
+      worktree: join(root, "worktree"),
+      canonicalGit: join(root, "canonical", ".git"),
+      jobTmp: join(root, "jobtmp"),
+      controlRoot: join(root, "control"),
+      worktreesRoot: join(root, "worktrees"),
+      execRoots: defaultExecRoots(),
+    };
+    for (const dir of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    const result = await runSandboxed({
+      argv: [
+        process.execPath,
+        "--input-type=module",
+        "-e",
+        "import { lookup } from 'node:dns'; lookup('registry.npmjs.org', (error) => { if (error) { console.error(error.code ?? error.message); process.exitCode = 1; return; } console.log('dns-ok'); });",
+      ],
+      cwd: paths.worktree,
+      paths,
+      networkPolicy: "package-manager-bootstrap",
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("dns-ok");
+  }, 15_000);
+
+  it.skipIf(!canLaunchNestedSandbox())("marks only package-manager bootstrap runs as non-interactive CI", async () => {
+    if (process.platform !== "darwin") return;
+    root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-ci-env-"));
+    const paths: SandboxPaths = {
+      worktree: join(root, "worktree"),
+      canonicalGit: join(root, "canonical", ".git"),
+      jobTmp: join(root, "jobtmp"),
+      controlRoot: join(root, "control"),
+      worktreesRoot: join(root, "worktrees"),
+      execRoots: defaultExecRoots(),
+    };
+    for (const dir of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    const bootstrap = await runSandboxed({
+      argv: [process.execPath, "-e", "console.log(process.env.CI ?? 'unset')"],
+      cwd: paths.worktree,
+      paths,
+      networkPolicy: "package-manager-bootstrap",
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+    const ordinary = await runSandboxed({
+      argv: [process.execPath, "-e", "console.log(process.env.CI ?? 'unset')"],
+      cwd: paths.worktree,
+      paths,
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+
+    expect(bootstrap.stdout.trim()).toBe("true");
+    expect(ordinary.stdout.trim()).toBe("unset");
   });
 
   it("does not broaden install argv when package-manager identity is pnpm", () => {

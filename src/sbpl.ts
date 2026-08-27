@@ -246,6 +246,15 @@ export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {
     "(version 1)",
     "(deny default)",
     network === "package-manager-bootstrap" ? "(allow network*)" : "(deny network*)",
+    ...(network === "package-manager-bootstrap"
+      ? [
+          ";; macOS 26 resolver bootstrap: production sandboxd showed getaddrinfo failing immediately after",
+          ";; this exact SystemConfiguration lookup was denied. Keep it scoped to fixed npm/pnpm bootstrap.",
+          '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
+          ";; Resolve the /var symlink ancestor without exposing directory contents or descendants.",
+          '(allow file-read-metadata (literal "/var"))',
+        ]
+      : []),
     "",
     ";; /dev/null —— git 打开它抑制信息输出（例如 `git status --short` 的重定向），",
     ";; 且 git 内部以 O_RDWR 打开（例：pipeline 的 dup2）。",
