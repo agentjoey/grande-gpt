@@ -133,7 +133,14 @@ function resolveBootstrapExecTargets(argv0: string, execRoots: readonly string[]
     if (!existsSync(candidate)) continue;
     const target = realpathSync(candidate);
     if (!isWithinAnyRoot(candidate, execRoots) || !isWithinAnyRoot(target, execRoots)) continue;
-    return [...new Set([candidate, target])];
+    // npm/pnpm entrypoints are commonly `#!/usr/bin/env node` scripts. macOS 15 Seatbelt may
+    // authorize the script literal yet reject its shebang interpreter before any JS runs.
+    const env = "/usr/bin/env";
+    return [...new Set([
+      candidate,
+      target,
+      ...(existsSync(env) && isWithinAnyRoot(env, execRoots) ? [env] : []),
+    ])];
   }
   return [];
 }
