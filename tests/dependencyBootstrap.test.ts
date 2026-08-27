@@ -167,7 +167,7 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(ordinaryProfile).toContain("(allow process-exec ");
     expect(ordinaryProfile).not.toContain("process-exec-interpreter");
     const bootstrapProfile = buildProfile(
-      { ...paths, bootstrapInterpreterTargets: ["/usr/bin/npm", "/usr/bin/npm-cli.js"] },
+      { ...paths, bootstrapInterpreterTargets: ["/usr/bin/npm", "/usr/bin/npm-cli.js", "/usr/bin/env"] },
       { network: "package-manager-bootstrap" },
     );
     expect(bootstrapProfile).toContain("(allow network*)");
@@ -180,6 +180,9 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     );
     expect(bootstrapProfile).toContain(
       '(allow process-exec-interpreter (literal "/usr/bin/npm-cli.js"))',
+    );
+    expect(bootstrapProfile).toContain(
+      '(allow process-exec-interpreter (literal "/usr/bin/env"))',
     );
   });
 

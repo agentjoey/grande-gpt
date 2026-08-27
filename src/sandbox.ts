@@ -126,7 +126,14 @@ function resolveBootstrapInterpreterTargets(argv0: string, execRoots: readonly s
       const rel = relative(trustedRoot, target);
       return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
     });
-    if (targetAllowed) return [...new Set([candidate, target])];
+    if (targetAllowed) {
+      const env = "/usr/bin/env";
+      const envAllowed = existsSync(env) && execRoots.some((trustedRoot) => {
+        const rel = relative(trustedRoot, env);
+        return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+      });
+      return [...new Set([candidate, target, ...(envAllowed ? [env] : [])])];
+    }
   }
   return [];
 }
