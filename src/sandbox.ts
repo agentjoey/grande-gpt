@@ -390,6 +390,12 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
   clearTimeout(timer);
   clearInterval(poller);
 
+  if (o.networkPolicy === "package-manager-bootstrap" && exitCode === 71) {
+    stderr += `\n[dependency-bootstrap exec diagnostic] argv0=${JSON.stringify(o.argv[0])}` +
+      ` PATH=${JSON.stringify(env.PATH)}` +
+      ` exact=${JSON.stringify(canonicalPaths.bootstrapExecTargets ?? [])}\n`;
+  }
+
   return {
     exitCode,
     stdout,
