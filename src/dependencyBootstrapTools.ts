@@ -13,6 +13,7 @@ import {
   preparedDependenciesPresent,
   preparedDependencyCachePresent,
   profileRequiresDependencyBootstrap,
+  type DependencyBootstrapSandboxRunner,
   type DependencyBootstrapIdentity,
 } from "./dependencyBootstrap.ts";
 import { StateError } from "./errors.ts";
@@ -35,6 +36,7 @@ const BOOTSTRAP_POLL_SECONDS = 20;
 interface DependencyBootstrapDeps {
   db: DatabaseSync;
   layout: Layout;
+  dependencyBootstrapSandboxRunner?: DependencyBootstrapSandboxRunner;
 }
 
 function identitySummary(identity: DependencyBootstrapIdentity): Record<string, unknown> {
@@ -169,6 +171,7 @@ function launchBootstrap(
     repoId: task.repoId,
     worktreePath: task.worktreePath,
     jobTmp,
+    sandboxRunner: deps.dependencyBootstrapSandboxRunner,
     onSpawn: (pgid) => {
       try { setRunningJobPgid(deps.db, jobId, pgid); } catch { /* terminal reconciliation already won */ }
     },

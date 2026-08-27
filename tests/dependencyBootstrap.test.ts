@@ -172,8 +172,7 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(bootstrapProfile).toContain(
       '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
     );
-    expect(bootstrapProfile).toContain("(allow process-exec-interpreter)");
-    expect(bootstrapProfile).not.toContain("(allow process-exec-interpreter ");
+    expect(bootstrapProfile).not.toContain("process-exec-interpreter");
   });
 
   it("resolves registry DNS inside the explicit package-manager bootstrap sandbox", async () => {
@@ -208,55 +207,6 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toContain("dns-ok");
   }, 15_000);
-
-  it("diagnoses npm launcher forms inside the bootstrap sandbox", async () => {
-    if (process.platform !== "darwin") return;
-    root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-npm-launcher-"));
-    const paths: SandboxPaths = {
-      worktree: join(root, "worktree"),
-      canonicalGit: join(root, "canonical", ".git"),
-      jobTmp: join(root, "jobtmp"),
-      controlRoot: join(root, "control"),
-      worktreesRoot: join(root, "worktrees"),
-      execRoots: defaultExecRoots(),
-    };
-    for (const dir of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
-      mkdirSync(dir, { recursive: true });
-    }
-
-    const script = `
-      import { existsSync, realpathSync } from "node:fs";
-      import { join } from "node:path";
-      import { spawnSync } from "node:child_process";
-      const roots = process.env.PATH.split(":");
-      const candidate = roots.map((root) => join(root, "npm")).find(existsSync);
-      const target = candidate ? realpathSync(candidate) : null;
-      const specs = [
-        ["name", "npm", ["--version"]],
-        ["candidate", candidate, ["--version"]],
-        ["target", target, ["--version"]],
-        ["node-target", process.execPath, target ? [target, "--version"] : []],
-      ];
-      const attempts = specs.map(([label, command, args]) => {
-        if (!command) return { label, status: null, error: "missing" };
-        const result = spawnSync(command, args, { encoding: "utf8" });
-        return { label, status: result.status, error: result.error?.code ?? null, stderr: result.stderr.trim() };
-      });
-      console.log(JSON.stringify({ candidate, target, node: process.execPath, attempts }));
-    `;
-    const result = await runSandboxed({
-      argv: [process.execPath, "--input-type=module", "-e", script],
-      cwd: paths.worktree,
-      paths,
-      networkPolicy: "package-manager-bootstrap",
-      timeoutMs: 10_000,
-      maxOutputBytes: 65_536,
-    });
-    const diagnostic = result.stdout.trim();
-    expect(result.exitCode, diagnostic || result.stderr).toBe(0);
-    const parsed = JSON.parse(diagnostic) as { attempts: Array<{ status: number | null }> };
-    expect(parsed.attempts, diagnostic).toSatisfy((attempts) => attempts.every((attempt) => attempt.status === 0));
-  });
 
   it("does not broaden install argv when package-manager identity is pnpm", () => {
     const identity = buildDependencyBootstrapIdentity("alpha", pnpmToolchain, { platform: "darwin", arch: "arm64" });

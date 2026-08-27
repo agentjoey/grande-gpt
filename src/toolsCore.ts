@@ -9,6 +9,7 @@ import { getJob, listJobs, TERMINAL } from "./jobs.ts";
 import { JOB_RESULT_WAIT_MS, waitForTerminalJob } from "./jobWait.ts";
 import { jobReport, jobStateToError, preflightJob, startJob } from "./runner.ts";
 import { prepareDependencyPrerequisite } from "./dependencyBootstrapTools.ts";
+import type { DependencyBootstrapSandboxRunner } from "./dependencyBootstrap.ts";
 import { DEFAULT_REPO_READ_BYTES, repoEdit, repoRead, type EditOp } from "./repoFile.ts";
 import { repoSearch } from "./repoSearch.ts";
 import { repoMap } from "./repoMap.ts";
@@ -29,6 +30,8 @@ export interface ToolDef {
 export interface ToolDeps {
   db: DatabaseSync;
   layout: Layout;
+  /** Internal deterministic seam for dependency-bootstrap lifecycle tests. */
+  dependencyBootstrapSandboxRunner?: DependencyBootstrapSandboxRunner;
   /**
    * D18：单一端点之后，工具不再固定绑在一个 repo 上——写/跑路径从 `taskId`
    * 逐次推导（见 `resolveWriteRepo` 的调用点），只读工具在没有 `taskId` 时

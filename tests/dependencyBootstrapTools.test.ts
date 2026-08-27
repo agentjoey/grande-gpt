@@ -11,6 +11,7 @@ import {
   prepareDependenciesInWorktree,
   publishPreparedDependencies,
 } from "../src/dependencyBootstrap.ts";
+import type { RunResult } from "../src/sandbox.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createJob, finishJob, getJob, listJobs, setRunningJobSummary, TERMINAL } from "../src/jobs.ts";
 import { createTask } from "../src/tasks.ts";
@@ -24,6 +25,20 @@ let deps: ToolDeps | undefined;
 let worktree: string;
 let savedWorkspace: string | undefined;
 let savedControl: string | undefined;
+
+function sandboxResult(overrides: Partial<RunResult> = {}): RunResult {
+  return {
+    exitCode: 0,
+    stdout: "",
+    stderr: "",
+    truncated: false,
+    killedBy: null,
+    killSignalSkipped: false,
+    durationMs: 1,
+    peakRssMb: 0,
+    ...overrides,
+  };
+}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -119,7 +134,14 @@ beforeEach(() => {
     worktreePath: worktree,
     state: "READY",
   });
-  deps = { db, layout };
+  deps = {
+    db,
+    layout,
+    dependencyBootstrapSandboxRunner: async (options) => {
+      options.onSpawn?.(12_345);
+      return sandboxResult();
+    },
+  };
 });
 
 afterEach(() => {
@@ -175,6 +197,10 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
       JSON.stringify({ name: "demo", version: "1.0.0", dependencies: { missing: "1.0.0" } }) + "\n",
       "utf8",
     );
+    deps!.dependencyBootstrapSandboxRunner = async (options) => {
+      options.onSpawn?.(12_345);
+      return sandboxResult({ exitCode: 1, stderr: "fixture install failure" });
+    };
 
     const started = await callCoreRun();
     expect(started.ok).toBe(true);
@@ -290,6 +316,10 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
         jobTmp: join(root, "identity-drift-job"),
         onSpawn: () => {
           writeFileSync(lockfile, JSON.stringify({ ...original, drift: true }, null, 2) + "\n", "utf8");
+        },
+        sandboxRunner: async (options) => {
+          options.onSpawn?.(12_345);
+          return sandboxResult();
         },
       });
     } catch (error) {

@@ -45,6 +45,8 @@ export interface PreparedDependencyResult {
   runResult?: RunResult;
 }
 
+export type DependencyBootstrapSandboxRunner = typeof runSandboxed;
+
 export class DependencyBootstrapFailure extends Error {
   readonly identity: DependencyBootstrapIdentity;
   readonly result: RunResult;
@@ -275,6 +277,7 @@ export async function prepareDependenciesInWorktree(input: {
   worktreePath: string;
   jobTmp: string;
   onSpawn?: (pgid: number) => void;
+  sandboxRunner?: DependencyBootstrapSandboxRunner;
 }): Promise<PreparedDependencyResult> {
   const { layout, repoId } = input;
   const worktree = realpathSync(input.worktreePath);
@@ -292,7 +295,7 @@ export async function prepareDependenciesInWorktree(input: {
 
   const canonicalRepo = resolveRepoPath(layout, repoId, registeredIds(layout));
   mkdirSync(input.jobTmp, { recursive: true });
-  const result = await runSandboxed({
+  const result = await (input.sandboxRunner ?? runSandboxed)({
     argv: dependencyInstallArgv(identity.packageManager),
     cwd: worktree,
     paths: {
