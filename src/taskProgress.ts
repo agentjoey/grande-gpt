@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { getAttestations } from "./attestation.ts";
 import { listAudit } from "./audit.ts";
 import { safeGit } from "./gitExec.ts";
+import { isHostVerificationApplicable } from "./hostVerificationApplicability.ts";
 import type { HostVerifierFailureClass } from "./hostVerifierFailure.ts";
 import type { HostVerificationLevel } from "./hostVerification.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
@@ -277,6 +278,19 @@ export function projectHostVerificationProgress(
   };
 }
 
+function notRequiredHostVerification(): HostVerificationProgress {
+  return {
+    requiredLevel: "none",
+    manualOnlyRequired: false,
+    receiptEligible: true,
+    state: "not-required",
+    failureClass: null,
+    failureReason: null,
+    retryCount: 0,
+    jobId: null,
+  };
+}
+
 function unknownHostVerification(): HostVerificationProgress {
   return {
     requiredLevel: null,
@@ -371,8 +385,9 @@ export function projectTaskProgress(
     && latestMergeAudit?.state === "FAILED"
     && /^merged-but-local-stale:/u.test(latestMergeAudit.reason ?? "");
 
-  let hostVerification = unknownHostVerification();
-  if (head.length > 0) {
+  const hostVerificationApplicable = isHostVerificationApplicable(task.repoId);
+  let hostVerification = hostVerificationApplicable ? unknownHostVerification() : notRequiredHostVerification();
+  if (hostVerificationApplicable && head.length > 0) {
     try {
       const inspect = options.inspectHostVerification ?? inspectCurrentHostVerification;
       hostVerification = projectHostVerificationProgress(
