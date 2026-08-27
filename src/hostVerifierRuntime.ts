@@ -12,6 +12,7 @@ import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
+import { prepareDependenciesInWorktree } from "./dependencyBootstrap.ts";
 import {
   assertDisposableVerifierRoot,
   buildTrustedVitestConfig,
@@ -356,15 +357,33 @@ function assertTrustedDepPath(relative: string): void {
   }
 }
 
-function cloneTrustedDependencies(layout: Layout, repoId: string, canonicalRepo: string, sourceRoot: string): string[] {
+async function prepareTrustedDependencies(
+  layout: Layout,
+  repoId: string,
+  canonicalRepo: string,
+  sourceRoot: string,
+  jobTmp: string,
+): Promise<string[]> {
   const depDirs = [...loadDepDirs(layout, repoId)];
   if (depDirs.length === 0) throw new Error(`host verifier has no trusted dependency roots for ${repoId}`);
   const roots: string[] = [];
   for (const relative of depDirs) {
     assertTrustedDepPath(relative);
+    const destination = join(sourceRoot, relative);
+    if (relative === "node_modules") {
+      await prepareDependenciesInWorktree({
+        layout,
+        repoId,
+        worktreePath: sourceRoot,
+        jobTmp: join(jobTmp, "dependency-bootstrap"),
+      });
+      if (!existsSync(destination)) throw new Error("dependency bootstrap completed without node_modules");
+      roots.push(realpathSync(destination));
+      continue;
+    }
+
     const source = join(canonicalRepo, relative);
     if (!existsSync(source)) throw new Error(`trusted dependency root is missing: ${relative}`);
-    const destination = join(sourceRoot, relative);
     mkdirSync(dirname(destination), { recursive: true });
     execFileSync("/bin/cp", ["-Rc", source, destination], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -542,11 +561,17 @@ export function createDefaultHostVerifierRuntimeAdapter(
         const checkedOut = safeGit.local(sourceRoot, ["rev-parse", "HEAD"]).trim();
         if (checkedOut !== request.commit) throw new Error("disposable verifier worktree HEAD mismatch");
 
-        const dependencyRoots = cloneTrustedDependencies(deps.layout, request.repoId, canonicalRepo, sourceRoot);
         const jobTmp = join(root, "job");
         for (const dir of [jobTmp, join(jobTmp, "home"), join(jobTmp, "tmp"), join(jobTmp, "cache")]) {
           mkdirSync(dir, { recursive: true });
         }
+        const dependencyRoots = await prepareTrustedDependencies(
+          deps.layout,
+          request.repoId,
+          canonicalRepo,
+          sourceRoot,
+          jobTmp,
+        );
         const canonicalSource = realpathSync(sourceRoot);
         const canonicalJobTmp = realpathSync(jobTmp);
         const productionPort = Number(process.env.PORT ?? "8787");

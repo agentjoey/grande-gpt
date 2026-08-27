@@ -360,7 +360,10 @@ describe("jobReport()", () => {
 import type { JobReport } from "../src/runner.ts";
 
 const BASE_REPORT: JobReport = {
-  truncated: false, state: "passed", exitCode: 0, outputTruncated: false,
+  truncated: false, state: "passed", profile: "unit", kind: null,
+  failureClass: null, reason: null, requestedProfile: null,
+  dependencyIdentityKey: null, packageManager: null,
+  exitCode: 0, outputTruncated: false,
   killedBy: null, durationMs: 100, peakRssMb: 50, artifactPath: null,
   summary: "ok", networkDenied: false,
 };

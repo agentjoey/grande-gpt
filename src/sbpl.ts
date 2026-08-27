@@ -72,6 +72,14 @@ export interface SandboxPaths {
   toolchainExecTargets?: string[];
 }
 
+export interface SandboxProfileOptions {
+  /**
+   * Ordinary jobs are always offline. The sole broader mode is selected by trusted parent code
+   * for fixed npm/pnpm dependency bootstrap argv; it is never sourced from a run profile or repo.
+   */
+  network?: "deny" | "package-manager-bootstrap";
+}
+
 /** SBPL 字符串字面量里只需转义反斜杠与双引号 */
 function q(path: string): string {
   if (!isAbsolute(path)) {
@@ -186,14 +194,20 @@ function validateToolchainClosure(p: SandboxPaths): { readRoots: string[]; readF
  * 无需在每次 job 启动时枚举其他任务。
  *
  * 读权限整体放宽（除控制平面根与他人 worktree 外），因为 node/npm/tsc 会读大量
- * 意想不到的系统路径，逐目录白名单会陷入无穷调试；而全禁网意味着读到的东西出不去。
+ * 意想不到的系统路径，逐目录白名单会陷入无穷调试；而普通 job 全禁网意味着读到的
+ * 东西出不去。GG-BL-031 唯一例外是 fixed npm/pnpm bootstrap：它仍使用同一套文件系统
+ * 与 process-exec 边界，只把 network 从 deny 切到 allow，且该选项不来自 profile/repo。
  */
-export function buildProfile(p: SandboxPaths): string {
+export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {}): string {
   if (p.execRoots.length === 0) {
     throw new SbplError(
       "INVALID_INPUT",
       "execRoots 不能为空：空数组会让 (allow process-exec) 退化成不带过滤条件的规则，等于放行一切可执行文件",
     );
+  }
+  const network = options.network ?? "deny";
+  if (network !== "deny" && network !== "package-manager-bootstrap") {
+    throw new SbplError("BAD_CONFIG", `未知 sandbox network mode：${String(network)}`);
   }
   const worktreeExecTargets = validateWorktreeExecTargets(p);
   const toolchain = validateToolchainClosure(p);
@@ -231,7 +245,7 @@ export function buildProfile(p: SandboxPaths): string {
   return [
     "(version 1)",
     "(deny default)",
-    "(deny network*)",
+    network === "package-manager-bootstrap" ? "(allow network*)" : "(deny network*)",
     "",
     ";; /dev/null —— git 打开它抑制信息输出（例如 `git status --short` 的重定向），",
     ";; 且 git 内部以 O_RDWR 打开（例：pipeline 的 dup2）。",

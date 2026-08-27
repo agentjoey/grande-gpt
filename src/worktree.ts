@@ -2,6 +2,10 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { inspectCanonicalGitState, type CanonicalGitState } from "./canonicalGit.ts";
+import {
+  captureDependencyBootstrapIdentity,
+  materializePreparedDependencies,
+} from "./dependencyBootstrap.ts";
 import { GitExecError, safeGit, type SafeGitOptions } from "./gitExec.ts";
 import type { Layout } from "./layout.ts";
 import { assertTaskId, assertValidId, resolveRepoPath } from "./paths.ts";
@@ -156,6 +160,14 @@ export function openWorktree(
  */
 function cloneDepDirs(layout: Layout, repoId: string, repoRoot: string, worktreeDir: string): void {
   for (const rel of loadDepDirs(layout, repoId)) {
+    if (rel === "node_modules") {
+      // GG-BL-031: canonical node_modules is mutable and has no identity proof. A new task may
+      // consume only the prepared cache keyed by this exact checkout's manager/lockfile/runtime;
+      // a miss is left empty for the controlled grande_run prerequisite bootstrap.
+      const identity = captureDependencyBootstrapIdentity(repoId, worktreeDir);
+      materializePreparedDependencies(layout, identity, worktreeDir);
+      continue;
+    }
     const src = join(repoRoot, rel);
     if (!existsSync(src)) continue;
     const dest = join(worktreeDir, rel);

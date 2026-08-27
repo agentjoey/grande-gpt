@@ -7,7 +7,8 @@ import { getTask, listActiveTasks, createTask, updateTaskState } from "./tasks.t
 import { loadProfiles } from "./profiles.ts";
 import { getJob, listJobs, TERMINAL } from "./jobs.ts";
 import { JOB_RESULT_WAIT_MS, waitForTerminalJob } from "./jobWait.ts";
-import { jobReport, jobStateToError, startJob } from "./runner.ts";
+import { jobReport, jobStateToError, preflightJob, startJob } from "./runner.ts";
+import { prepareDependencyPrerequisite } from "./dependencyBootstrapTools.ts";
 import { DEFAULT_REPO_READ_BYTES, repoEdit, repoRead, type EditOp } from "./repoFile.ts";
 import { repoSearch } from "./repoSearch.ts";
 import { repoMap } from "./repoMap.ts";
@@ -500,14 +501,34 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             if (!t) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
             const rules = loadEffectiveDenyRules(layout, t.worktreePath);
             const changedFiles = listChangedFiles(t.worktreePath, t.baseCommit);
-            const h = beginAudit(db, { taskId, tool: "grande_run", input: { profile: profileName } });
-            h.allowed();
             try {
               assertPairedEditsSatisfied(changedFiles, rules);
             } catch (error) {
+              const h = beginAudit(db, { taskId, tool: "grande_run", input: { profile: profileName } });
+              h.allowed();
+              if (!h.executing()) {
+                throw new StateError("STALE_STATE", `任务 ${taskId} 的 run policy 审计无法推进到 EXECUTING。`);
+              }
               h.failed(error instanceof Error ? error.message : String(error));
               throw error;
             }
+            // All normal grande_run gates must pass before dependency preparation may write,
+            // publish a cache, or enable package-manager network access.
+            preflightJob(
+              { db, layout },
+              { taskId, repoId: t.repoId, worktreePath: t.worktreePath, profileName },
+            );
+            const prerequisite = prepareDependencyPrerequisite({ db, layout }, t, profileName);
+            if (prerequisite) {
+              return ok({
+                taskId,
+                data: prerequisite.data,
+                hint: prerequisite.hint,
+                taskContext: makeTaskContext(db, layout, taskId),
+              });
+            }
+            const h = beginAudit(db, { taskId, tool: "grande_run", input: { profile: profileName } });
+            h.allowed();
             const s = startJob(
               { db, layout },
               { taskId, repoId: t.repoId, worktreePath: t.worktreePath, profileName },

@@ -29,6 +29,11 @@ export interface RunOptions {
   toolchain?: NativeToolchain;
   /** Trusted profile declarations; resolved only against the current task worktree to exact literals. */
   nativeExecTargets?: readonly string[];
+  /**
+   * Internal-only GG-BL-031 capability. This field is never populated from RunProfile or MCP input;
+   * the dependency bootstrap helper selects it together with fixed npm/pnpm argv.
+   */
+  networkPolicy?: "package-manager-bootstrap";
   /** 进程组总 RSS 上限（MB）。省略则不做内存兜底 */
   maxRssMb?: number;
   /** 在子进程 spawn 后同步回调，传入 pgid —— 调用方不需要 await 就能拿到 pgid */
@@ -246,10 +251,14 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
 
   // nativeExecTargets 可能由同一个 job 内的 clang 稍后创建，因此这里绝不能 realpath/exists。
   // 权限增量由独立 helper 生成，且只能是当前 worktree 内的 exact process-exec literal。
-  const profile = buildProfile(canonicalPaths) + buildNativeExecSbplRules(canonicalWorktree, nativeExecTargets);
+  const profile = buildProfile(canonicalPaths, {
+    network: o.networkPolicy === "package-manager-bootstrap" ? "package-manager-bootstrap" : "deny",
+  }) + buildNativeExecSbplRules(canonicalWorktree, nativeExecTargets);
   writeFileSync(profilePath, profile, "utf8");
 
   // 环境清洗：只传必需的四个。宿主的 *_TOKEN / *_API_KEY / DYLD_* 一律不进沙箱。
+  // HOME/TMPDIR 都在 per-job root，bootstrap 因而也看不到宿主 ~/.npmrc、~/.pnpm-store
+  // 或其它用户级凭据。package-manager 网络模式只改变 Seatbelt network rule，不改变 env。
   //
   // PATH 从 execRoots 派生，不再单独硬编码。原先两者是两处独立的常量，
   // 于是修好了 profile 的放行清单、PATH 却仍指向 /opt/homebrew/bin——

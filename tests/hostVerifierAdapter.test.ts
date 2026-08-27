@@ -24,6 +24,7 @@ vi.mock("node:net", async (importOriginal) => {
 });
 
 import { openDb } from "../src/db.ts";
+import { captureDependencyBootstrapIdentity, publishPreparedDependencies } from "../src/dependencyBootstrap.ts";
 import { buildHostVerifierStaticPlan, type HostVerifierRequest } from "../src/hostVerifier.ts";
 import { createDefaultHostVerifierRuntimeAdapter } from "../src/hostVerifierRuntime.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
@@ -71,6 +72,11 @@ beforeEach(() => {
 
   mkdirSync(join(canonical, "node_modules", "vitest"), { recursive: true });
   writeFileSync(join(canonical, "node_modules", "vitest", "vitest.mjs"), "export {};\n", "utf8");
+  publishPreparedDependencies(
+    layout,
+    captureDependencyBootstrapIdentity("grande-gpt", canonical),
+    canonical,
+  );
   saveRegistry(layout, [{ repoId: "grande-gpt", path: canonical, registered: true }]);
   writeFileSync(
     join(layout.configDir, "profiles.yaml"),

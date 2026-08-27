@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { captureDependencyBootstrapIdentity, publishPreparedDependencies } from "../src/dependencyBootstrap.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import type { Layout } from "../src/layout.ts";
 import { listChangedFiles, openWorktree, removeWorktree, repoDiff } from "../src/worktree.ts";
@@ -177,23 +178,36 @@ describe("openWorktree()", () => {
     expect(() => openWorktree(layout, "demo", "s", "task_abcd")).not.toThrow();
   });
 
-  it("depDirs 声明的目录（如 node_modules）会从 canonical 克隆进新 worktree（I-6）", () => {
+  it("node_modules 只从 identity-matched prepared cache materialize，不信任 canonical 的可变目录", () => {
+    writeFileSync(join(repo, "package.json"), '{"name":"demo","version":"1.0.0"}\n', "utf8");
+    writeFileSync(join(repo, "package-lock.json"), '{"name":"demo","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"demo","version":"1.0.0"}}}\n', "utf8");
+    git(repo, "add", "package.json", "package-lock.json");
+    git(repo, "commit", "-q", "-m", "manifest");
     const nm = join(repo, "node_modules", "some-pkg");
     mkdirSync(nm, { recursive: true });
     writeFileSync(join(nm, "index.js"), "module.exports = 1;\n", "utf8");
+    publishPreparedDependencies(layout, captureDependencyBootstrapIdentity("demo", repo), repo);
+    writeFileSync(join(nm, "index.js"), "module.exports = 999; // untrusted canonical mutation\n", "utf8");
     writeFileSync(
       join(layout.configDir, "profiles.yaml"),
       'depDirs:\n  demo: ["node_modules"]\nrepos:\n  demo:\n    unit: { argv: ["a"], timeoutSeconds: 10 }\n',
       "utf8",
     );
     const info = openWorktree(layout, "demo", "s", "task_abcd");
-    expect(existsSync(join(info.worktreePath, "node_modules", "some-pkg", "index.js"))).toBe(true);
+    expect(readFileSync(join(info.worktreePath, "node_modules", "some-pkg", "index.js"), "utf8"))
+      .toBe("module.exports = 1;\n");
   });
 
-  it("clonefile 语义（BUG 3）：改写 worktree 里克隆出的文件，canonical 的原文件不受影响", () => {
+  it("cache materialization 保持 task 隔离：改写 task 依赖不影响 cache 或 canonical", () => {
+    writeFileSync(join(repo, "package.json"), '{"name":"demo","version":"1.0.0"}\n', "utf8");
+    writeFileSync(join(repo, "package-lock.json"), '{"name":"demo","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"demo","version":"1.0.0"}}}\n', "utf8");
+    git(repo, "add", "package.json", "package-lock.json");
+    git(repo, "commit", "-q", "-m", "manifest");
     const nm = join(repo, "node_modules", "some-pkg");
     mkdirSync(nm, { recursive: true });
     writeFileSync(join(nm, "index.js"), "module.exports = 1;\n", "utf8");
+    const identity = captureDependencyBootstrapIdentity("demo", repo);
+    const cache = publishPreparedDependencies(layout, identity, repo);
     writeFileSync(
       join(layout.configDir, "profiles.yaml"),
       'depDirs:\n  demo: ["node_modules"]\nrepos:\n  demo:\n    unit: { argv: ["a"], timeoutSeconds: 10 }\n',
@@ -203,21 +217,35 @@ describe("openWorktree()", () => {
     const clonedFile = join(info.worktreePath, "node_modules", "some-pkg", "index.js");
     expect(existsSync(clonedFile)).toBe(true);
 
-    // `cp -Rc` 是写时复制：两份 inode 不同但内容相同，改写克隆出来的那一份必须
-    // 不影响 canonical 的原始文件——如果这里失败（两者内容一起变），说明落地的
-    // 不是 clonefile 而是硬链接/引用同一份数据。
     writeFileSync(clonedFile, "module.exports = 999; // 被任务修改\n", "utf8");
     expect(readFileSync(join(nm, "index.js"), "utf8")).toBe("module.exports = 1;\n");
+    expect(readFileSync(join(cache, "node_modules", "some-pkg", "index.js"), "utf8")).toBe("module.exports = 1;\n");
     expect(readFileSync(clonedFile, "utf8")).toContain("999");
   });
 
-  it("canonical 里没有的 depDirs 目录被跳过，不报错（比如全新仓库还没 install）", () => {
+  it("没有 prepared cache 时不克隆 canonical node_modules，留给受控 bootstrap", () => {
+    writeFileSync(join(repo, "package.json"), '{"name":"demo","version":"1.0.0"}\n', "utf8");
+    writeFileSync(join(repo, "package-lock.json"), '{"name":"demo","version":"1.0.0","lockfileVersion":3,"requires":true,"packages":{"":{"name":"demo","version":"1.0.0"}}}\n', "utf8");
+    git(repo, "add", "package.json", "package-lock.json");
+    git(repo, "commit", "-q", "-m", "manifest");
+    mkdirSync(join(repo, "node_modules", "untrusted"), { recursive: true });
+    writeFileSync(join(repo, "node_modules", "untrusted", "index.js"), "do not clone\n", "utf8");
     writeFileSync(
       join(layout.configDir, "profiles.yaml"),
       'depDirs:\n  demo: ["node_modules"]\nrepos:\n  demo:\n    unit: { argv: ["a"], timeoutSeconds: 10 }\n',
       "utf8",
     );
-    expect(() => openWorktree(layout, "demo", "s", "task_abcd")).not.toThrow();
+    const info = openWorktree(layout, "demo", "s", "task_abcd");
+    expect(existsSync(join(info.worktreePath, "node_modules"))).toBe(false);
+  });
+
+  it("非 node_modules 的 trusted depDirs 仍从 canonical 隔离克隆", () => {
+    mkdirSync(join(repo, "vendor", "sdk"), { recursive: true });
+    writeFileSync(join(repo, "vendor", "sdk", "index.js"), "sdk\n", "utf8");
+    writeFileSync(join(layout.configDir, "profiles.yaml"), 'depDirs:\n  demo: ["vendor"]\n', "utf8");
+
+    const info = openWorktree(layout, "demo", "s", "task_abcd");
+    expect(readFileSync(join(info.worktreePath, "vendor", "sdk", "index.js"), "utf8")).toBe("sdk\n");
   });
 });
 

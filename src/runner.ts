@@ -32,6 +32,33 @@ export interface StartedJob {
   pollAfterSeconds: number;
 }
 
+export interface JobPreflight {
+  profile: ReturnType<typeof getProfile>;
+  canonicalGit: string;
+  worktree: string;
+  worktreesRoot: string;
+}
+
+/** Side-effect-free validation shared by grande_run prerequisites and the real job launcher. */
+export function preflightJob(
+  deps: RunnerDeps,
+  a: { taskId: string; repoId: string; worktreePath: string; profileName: string },
+): JobPreflight {
+  assertTaskId(a.taskId);
+  const profile = getProfile(deps.layout, a.repoId, a.profileName);
+  const canonicalGit = join(resolveRepoPath(deps.layout, a.repoId, registeredIds(deps.layout)), ".git");
+  const worktree = realpathSync(a.worktreePath);
+  const worktreesRoot = realpathSync(deps.layout.worktreesRoot);
+  if (!worktree.startsWith(worktreesRoot + sep)) {
+    throw new RunnerError(
+      "POLICY_DENIED",
+      `worktreePath 必须在 ${worktreesRoot} 之下，收到：${worktree}。` +
+        `这条路径会直接成为沙箱的可写根。`,
+    );
+  }
+  return { profile, canonicalGit, worktree, worktreesRoot };
+}
+
 /** 建议轮询间隔：取超时的 1/10，夹在 3–20 秒之间。给模型一个具体数字比让它自己猜好 */
 function pollHint(timeoutSeconds: number): number {
   return Math.min(20, Math.max(3, Math.round(timeoutSeconds / 10)));
@@ -42,6 +69,18 @@ function pollHint(timeoutSeconds: number): number {
  * < 1s 返回，等它跑完就不是异步 job 了。测试与优雅关停用 `awaitJobSettled` 等它落地。
  */
 const inFlight = new Map<string, Promise<void>>();
+
+/** Register non-runner asynchronous jobs with the same shutdown wait/rejection boundary. */
+export function trackJobSettlement(jobId: string, settlement: Promise<void>): void {
+  const tracked = settlement
+    .catch((error: unknown) => {
+      console.error(`[runner] ${jobId} 后台收尾发生未处理错误：${error instanceof Error ? error.message : String(error)}`);
+    })
+    .finally(() => {
+      if (inFlight.get(jobId) === tracked) inFlight.delete(jobId);
+    });
+  inFlight.set(jobId, tracked);
+}
 
 /** 等某个 job 的后台收尾跑完。未知或已收尾的 jobId 立即返回。 */
 export function awaitJobSettled(jobId: string): Promise<void> {
@@ -131,27 +170,7 @@ export function startJob(
     // 同一条校验，但这里（taskId 第二次被拼进文件系统路径的地方）从未补上，
     // 一个 `../../../../tmp/evil` 形状的 taskId 能把 job 的 stdout/stderr 写到
     // 控制平面之外的任意路径。
-    assertTaskId(a.taskId);
-    const profile = getProfile(layout, a.repoId, a.profileName);
-    // repoId 必须过注册与路径逃逸门禁：startJob 的 worktreePath 会变成
-    // `allow file-write*` 的 subpath，裸 join(workspaceRoot, repoId) 等于没有门禁（C-6）。
-    const canonicalGit = join(resolveRepoPath(layout, a.repoId, registeredIds(layout)), ".git");
-    const worktree = realpathSync(a.worktreePath);
-    const worktreesRoot = realpathSync(layout.worktreesRoot);
-    // C1：必须是【严格】包含——worktree === worktreesRoot 这个值本身也要被拒绝。
-    // 此前 `worktree !== worktreesRoot &&` 这个短路条件恰好放行了最危险的那个
-    // 输入：调用方传 worktreesRoot 自己作为 worktreePath，会让整个 worktrees 根
-    // （所有任务的 worktree 的共同父目录）变成沙箱的 `allow file-write*` 子路径，
-    // 一次调用即可读写任意其他任务的 worktree，AC-3 的跨任务隔离形同虚设。
-    // `startsWith(worktreesRoot + sep)` 单独就已经正确表达「严格子路径」：
-    // worktree === worktreesRoot 时它没有多出的分隔符可以匹配，天然为 false。
-    if (!worktree.startsWith(worktreesRoot + sep)) {
-      throw new RunnerError(
-        "POLICY_DENIED",
-        `worktreePath 必须在 ${worktreesRoot} 之下，收到：${worktree}。` +
-          `这条路径会直接成为沙箱的可写根。`,
-      );
-    }
+    const { profile, canonicalGit, worktree, worktreesRoot } = preflightJob(deps, a);
 
     // 推进审计句柄到 EXECUTING —— 必须在 spawn 之前成功
     if (!audit.executing()) {
@@ -266,6 +285,13 @@ export function startJob(
 export interface JobReport {
   truncated: boolean;
   state: JobState;
+  profile: string;
+  kind: string | null;
+  failureClass: string | null;
+  reason: string | null;
+  requestedProfile: string | null;
+  dependencyIdentityKey: string | null;
+  packageManager: string | null;
   exitCode: number | null;
   outputTruncated: boolean;
   killedBy: "timeout" | "rss" | null;
@@ -326,7 +352,14 @@ export function jobReport(db: DatabaseSync, jobId: string): JobReport {
   // 而不是这里诚实的 null。`state` 回填 j.state，不写死 "running"。
   if (!TERMINAL.has(j.state)) {
     return {
-      truncated: false, state: j.state, exitCode: null, outputTruncated: false,
+      truncated: false, state: j.state, profile: j.profile,
+      kind: (s?.kind as string | undefined) ?? null,
+      failureClass: (s?.failureClass as string | undefined) ?? null,
+      reason: (s?.reason as string | undefined) ?? null,
+      requestedProfile: (s?.requestedProfile as string | undefined) ?? null,
+      dependencyIdentityKey: (s?.dependencyIdentityKey as string | undefined) ?? null,
+      packageManager: (s?.packageManager as string | undefined) ?? null,
+      exitCode: null, outputTruncated: false,
       killedBy: null, durationMs: null, peakRssMb: null, artifactPath: null,
       summary: "仍在运行中。", networkDenied: false,
     };
@@ -347,6 +380,13 @@ export function jobReport(db: DatabaseSync, jobId: string): JobReport {
   return {
     truncated: capped.truncated,
     state: j.state,
+    profile: j.profile,
+    kind: (s?.kind as string | undefined) ?? null,
+    failureClass: (s?.failureClass as string | undefined) ?? null,
+    reason: (s?.reason as string | undefined) ?? null,
+    requestedProfile: (s?.requestedProfile as string | undefined) ?? null,
+    dependencyIdentityKey: (s?.dependencyIdentityKey as string | undefined) ?? null,
+    packageManager: (s?.packageManager as string | undefined) ?? null,
     exitCode: j.exitCode,
     outputTruncated: (s?.truncated as boolean | undefined) ?? false,
     killedBy: (s?.killedBy as JobReport["killedBy"] | undefined) ?? null,
