@@ -12,6 +12,7 @@ import {
   materializePreparedDependencies,
   publishPreparedDependencies,
 } from "../src/dependencyBootstrap.ts";
+import { defaultExecRoots, runSandboxed } from "../src/sandbox.ts";
 import { buildProfile, type SandboxPaths } from "../src/sbpl.ts";
 
 let root: string | null = null;
@@ -165,6 +166,39 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(bootstrapProfile).toContain("(allow network*)");
     expect(bootstrapProfile).not.toContain("(deny network*)");
   });
+
+  it("resolves registry DNS inside the explicit package-manager bootstrap sandbox", async () => {
+    if (process.platform !== "darwin") return;
+    root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-dns-"));
+    const paths: SandboxPaths = {
+      worktree: join(root, "worktree"),
+      canonicalGit: join(root, "canonical", ".git"),
+      jobTmp: join(root, "jobtmp"),
+      controlRoot: join(root, "control"),
+      worktreesRoot: join(root, "worktrees"),
+      execRoots: defaultExecRoots(),
+    };
+    for (const dir of [paths.worktree, paths.canonicalGit, paths.jobTmp, paths.controlRoot, paths.worktreesRoot]) {
+      mkdirSync(dir, { recursive: true });
+    }
+
+    const result = await runSandboxed({
+      argv: [
+        process.execPath,
+        "--input-type=module",
+        "-e",
+        "import { lookup } from 'node:dns'; lookup('registry.npmjs.org', (error) => { if (error) { console.error(error.code ?? error.message); process.exitCode = 1; return; } console.log('dns-ok'); });",
+      ],
+      cwd: paths.worktree,
+      paths,
+      networkPolicy: "package-manager-bootstrap",
+      timeoutMs: 10_000,
+      maxOutputBytes: 65_536,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("dns-ok");
+  }, 15_000);
 
   it("does not broaden install argv when package-manager identity is pnpm", () => {
     const identity = buildDependencyBootstrapIdentity("alpha", pnpmToolchain, { platform: "darwin", arch: "arm64" });
