@@ -4,7 +4,7 @@
 >
 > 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md`、`docs/research/**`、PR/TaskBrief 和聊天结论只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
 
-最后整理：2026-08-26
+最后整理：2026-08-27
 
 ## 维护规范
 
@@ -189,17 +189,6 @@
 - **Next**: 先做 code evidence review。只对仍存在且至少有两个真实使用者的重复 primitive 做收敛；禁止建设 workflow engine、通用 interceptor framework、第二状态系统或 capability marketplace。
 - **Done when**: ①逐项 evidence review 完成并删除已经不存在的 scope；②若 runner/verifier 确有重复，仅保留一套窄 process lifecycle primitive；③ receipt/job eligibility 有单一 fail-closed parser/validator；④ deployment 不通过公开 MCP handler 触发内部领域动作；⑤写工具 wrapper 顺序有集中测试且不依赖共享可变 ToolDef；⑥没有新增与轻量定位冲突的通用框架。
 
-### GG-BL-028 — 同一 Tool Epoch 内 `toolsDigest` 历史漂移未解释
-
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: verification integrity / tool contract identity
-- **Problem**: `toolsDigest` 按当前 contract 只应覆盖稳定排序后的 tool `name + input schema + annotations`；在 `toolsetEpoch=2`、`toolsCount=25` 未变化的历史窗口中却先后观察到 `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`、`sha256:2da4e496ea23ed65a7b1248cc7b360e90f3a94fccdbee4c5402a0b1c53db877c` 与 `sha256:ce3a7107fd8861f5816b94bda803dd9bdae5059d25cf14627ae8fbde49b31227`。若不存在正式 Tool Epoch 变更，这会削弱 release identity、activation receipt 与 `GG-BL-010` frozen-contract gate 的可信度。
-- **Evidence / Detail**: 诊断 task `task-gg-toolset-digest-drift-20260823-001` 已创建，原始 brief 记录同一 build `3c46d1c52ba2b686c86a413f603a4a98d2d13a1d` 下 live digest 与 activation receipt digest 曾不一致；异常在 alljobs canonical registration 后被发现，但没有证据证明注册动作是原因。2026-08-24 当前 production 已恢复一致：build `b2da29a954f9453622f7455387da2bb3c7bd2de2` 的 live / activation receipt 均为 `ce3a7107...`，因此当前不是持续 outage，而是历史 identity drift 根因未解释。
-- **Related**: `GG-BL-010`、`GG-BL-024`。
-- **Next**: 先做 forensic review：追踪三个 digest 的真实输入、digest 计算入口、activation receipt 写入入口与 `task_status` live readback；比较同一 production state 下是否存在 runtime-dependent schema/annotation/provider state、stale receipt 或真实未 bump epoch 的 contract change。没有根因证据前，不 bump epoch、不改 digest 算法、不做猜测性 production 修复。
-- **Done when**: ①明确 `7f9d... → 2da4... → ce3a...` 每次变化的输入差异来源；②将问题分类为真实 tool-contract drift、非确定性 digest 或 stale receipt，并有可重复证据；③若属于实现缺陷，增加回归证明相同 contract/state 的 digest 确定稳定，真实 contract change 必然改变 digest 并遵守 epoch 规则；④当前 production live identity 与 durable activation receipt 持续一致；⑤不通过刷新 App、随意 bump epoch 或扩大 contract 来掩盖根因。
-
 ### GG-BL-029 — GrandeGPT sandbox 无法支持受控 macOS native build：`/usr/bin/clang` 经 `xcode-select` 访问 `/var/select/developer_dir` 被拒绝
 
 - **Priority**: P1
@@ -284,6 +273,19 @@
 - research 文档中的旧 priority/status：只作为当时快照，当前状态以本文件为准。
 
 ## Archive
+
+### GG-BL-028 — mutable profile registry 污染 `toolsDigest`
+
+- **Priority**: P1
+- **Status**: DONE
+- **DONE date**: 2026-08-27
+- **Task / PR**: `task-gg-bl-028-digest-stability-20260827-002` / PR #47
+- **Root cause**: runtime registered repo/profile state 曾进入 `grande_run.inputSchema.properties.profile.description`，而 `inputSchema` 属于 `toolsDigest` hash contract，导致 same-build / same-epoch / same-count 下 registry mutation 可改变 digest。
+- **Fix**: `profile` schema description 固定为 `要执行的 profile 名称`；mutable profile discovery 保留在 top-level tool description；不修改 hash algorithm，不 bump `TOOLSET_EPOCH`。
+- **TDD evidence**: RED same-build registration mutation `sha256:4af6e790f0d4b50fc99b5dbfc3d120ccbd757f1a208ff515ed57b10079035907 → sha256:9b38932c3fb884860ff1d15a4f64360e7ecb8ceadb443f3461003785798e5a5c`；GREEN `unit-selfhost` **128 files / 935 tests PASS**、2 skipped、0 failed，`typecheck` PASS。
+- **Release evidence**: exact head `0956ea206bcb0bea69d051afb0ee74e3e554dfbe`；GitHub CI PASS；exact-SHA Host smoke PASS；merge SHA `e9e6a4da50da91004e82154b73837463bf611e08`。
+- **Production evidence**: build `git:e9e6a4da50da91004e82154b73837463bf611e08`；`toolsetEpoch=2`；`toolsCount=25`；`toolsDigest=sha256:7f2390e540b4311f9e3f70b890239460bf0c63e770e3c2e45f227dac41dcb7da`；activation receipt eligibility 已证明 runtime build/tool identity、LaunchAgent/endpoint readiness 与 trusted read probe HTTP 200 全部一致。
+- **Related**: `GG-BL-010`、`GG-BL-024`、`GG-BL-030`。
 
 ### GG-BL-026 — npm repo 的 verification attestation 错误绑定 pnpm toolchain
 
