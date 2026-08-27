@@ -247,12 +247,18 @@ describe("停在 INTENT/EXECUTING 的审计记录（崩溃或中断的痕迹）"
 });
 
 describe("grande doctor", () => {
-  it("检查 sandbox-exec、工作区、控制平面与注册表，逐项给出结论", () => {
-    expect(syncCli(["doctor"], out)).toBe(0);
+  it("在 macOS 健康退出；其他平台明确报告 Seatbelt 不可用并以非零退出", () => {
+    const code = syncCli(["doctor"], out);
     const t = text();
-    expect(t).toContain("sandbox-exec");
-    expect(t).toContain("GRANDE_WORKSPACE");
-    expect(t).toContain("demo");
+    if (process.platform === "darwin") {
+      expect(code).toBe(0);
+      expect(t).toContain("sandbox-exec");
+      expect(t).toContain("GRANDE_WORKSPACE");
+      expect(t).toContain("demo");
+    } else {
+      expect(code).not.toBe(0);
+      expect(t).toContain("Seatbelt 沙箱不可用");
+    }
   });
 
   it("注册了但目录不存在时报出问题并以非零码退出", () => {

@@ -23,9 +23,14 @@ describe("grande gateway", () => {
     }
   });
 
-  it("status 进入 LaunchAgent 管理路径，而不是落回未知命令", () => {
+  it("status 在 macOS 进入 LaunchAgent 路径；其他平台明确拒绝而不是未知命令", () => {
     const result = syncCli(["gateway", "status"]);
     expect(result.text).not.toContain("未知命令：gateway");
-    expect(result.text).toContain("Gateway LaunchAgent");
+    if (process.platform === "darwin") {
+      expect(result.text).toContain("Gateway LaunchAgent");
+    } else {
+      expect(result.code).not.toBe(0);
+      expect(result.text).toContain("仅支持 macOS launchd");
+    }
   });
 });
