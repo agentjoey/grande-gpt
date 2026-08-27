@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { inspectCanonicalGitState, type CanonicalGitState } from "./canonicalGit.ts";
@@ -11,6 +10,7 @@ import type { Layout } from "./layout.ts";
 import { assertTaskId, assertValidId, resolveRepoPath } from "./paths.ts";
 import { loadDepDirs } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
+import { copyDirectory } from "./directoryCopy.ts";
 
 export class GitError extends Error {
   readonly code: string;
@@ -149,7 +149,7 @@ export function openWorktree(
  * 是第一个被注册的 profile——会在**每一个** worktree 里失败，等于 runner 跑不了
  * 这个项目自己的测试套件。
  *
- * 用 APFS `cp -Rc`（clonefile）：写时复制、零额外磁盘、保留符号链接（本机 macOS
+ * 使用 Node 原生 clonefile copy：写时复制、零额外磁盘、保留符号链接（本机 macOS
  * 26.5.1 实测核对：dest 与 src 的同一文件 inode 不同但字节内容相同，符号链接原样
  * 保留，与 U2 spike 记录的 pnpm store 内部机制是同一种复制方式，见
  * `spike/findings/U2-seatbelt.md`「pnpm store」一节）。canonical 里不存在的目录
@@ -174,7 +174,7 @@ function cloneDepDirs(layout: Layout, repoId: string, repoRoot: string, worktree
     if (existsSync(dest)) continue;
     mkdirSync(dirname(dest), { recursive: true });
     try {
-      execFileSync("/bin/cp", ["-Rc", src, dest], { stdio: ["ignore", "pipe", "pipe"] });
+      copyDirectory(src, dest);
     } catch (e) {
       const err = e as { stderr?: Buffer | string; message: string };
       const detail = err.stderr ? String(err.stderr).trim() : err.message;

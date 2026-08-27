@@ -132,14 +132,15 @@ function resolveBinaryDirs(name: string): string[] {
 export function defaultExecRoots(): string[] {
   const gitDirs = resolveBinaryDirs("git");
   const roots = new Set<string>(STANDARD_EXEC_ROOTS.map((r) => realpathSync(r)));
-  roots.add(dirname(realpathSync(process.execPath)));
+  const nodeRoot = dirname(realpathSync(process.execPath));
   for (const bin of PACKAGE_MANAGER_BINARIES) {
-    if (bin === "git") continue; // 已单独解析，放在最前面确保 PATH 优先级
+    if (bin === "git") continue; // 已单独解析，排在通用系统根之前确保 PATH 优先级
     for (const dir of resolveBinaryDirs(bin)) roots.add(dir);
   }
-  // git 的真实二进制目录必须排在 /usr/bin 之前：macOS 上 /usr/bin/git 是 xcrun shim，
-  // 按 PATH 顺序最先被 execvp 找到——真实二进制目录排在前才能让 execvp 跳过 shim。
-  return [...new Set([...gitDirs, ...roots])];
+  // 当前 Node 必须在 PATH 首位：CI runner 的 Git/Xcode 或 /usr/bin 根都可能有另一份
+  // node，pnpm 的 /usr/bin/env node shebang 必须解析回运行 GrandeGPT 的同一运行时。
+  // git 的真实目录仍排在通用系统根之前，避开 macOS /usr/bin/git 的 xcrun shim。
+  return [...new Set([nodeRoot, ...gitDirs, ...roots])];
 }
 
 /**

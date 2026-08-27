@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -135,7 +135,7 @@ describe("default host verifier runtime adapter", () => {
     expect(profile).not.toContain("localhost:*");
     expect(profile).toContain(`localhost:${prepared.loopbackPorts[0]}`);
     expect(profile).toContain("git-hook-probe/repo/.git/hooks/pre-commit");
-    expect(profile).toContain('(allow process-exec (literal "/bin/bash"))');
+    expect(profile).toContain(`(allow process-exec (literal "${realpathSync("/bin/bash")}"))`);
     expect(profile).not.toContain('(allow process-exec (subpath "/bin"))');
     expect(profile).not.toContain(`(allow process-exec (subpath \"${prepared.jobTmp}`);
 

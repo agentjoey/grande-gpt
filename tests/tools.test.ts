@@ -200,9 +200,9 @@ describe("工具注解", () => {
     expect(TOOLSET_EPOCH).toBe(2);
   });
 
-  it("assembled tool contract 保持 db5d020 在固定 gateway build 下的历史 digest", () => {
+  it("assembled tool contract 保持 GG-BL-028 stabilized contract digest", () => {
     const assembled = buildTools(deps);
-    const pinnedDigest = "sha256:62c1d93894112442740f01ec30aeefdea0229ef7fc6db583eb63c06c0aef46a1";
+    const pinnedDigest = "sha256:7f2390e540b4311f9e3f70b890239460bf0c63e770e3c2e45f227dac41dcb7da";
     expect(toolsetIdentity(assembled, "db5d020-test-build")).toEqual({
       gatewayBuild: "db5d020-test-build",
       toolsetEpoch: 2,

@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   existsSync,
@@ -20,6 +19,7 @@ import { resolveRepoPath } from "./paths.ts";
 import { loadDepDirs } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
 import { defaultExecRoots, runSandboxed, type RunResult } from "./sandbox.ts";
+import { copyDirectory } from "./directoryCopy.ts";
 
 export const DEPENDENCY_BOOTSTRAP_TIMEOUT_MS = 15 * 60 * 1000;
 export const DEPENDENCY_BOOTSTRAP_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -136,9 +136,7 @@ function markerMatches(root: string, identity: DependencyBootstrapIdentity): boo
 }
 
 function cloneDirectory(source: string, destination: string): void {
-  execFileSync("/bin/cp", ["-Rc", source, destination], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  copyDirectory(source, destination);
 }
 
 export function preparedDependenciesPresent(root: string, identity: DependencyBootstrapIdentity): boolean {
