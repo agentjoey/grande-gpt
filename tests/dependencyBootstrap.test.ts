@@ -1,6 +1,6 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Layout } from "../src/layout.ts";
 import type { ModernHostToolchainIdentity } from "../src/packageManagerIdentity.ts";
@@ -16,6 +16,15 @@ import { defaultExecRoots, runSandboxed } from "../src/sandbox.ts";
 import { buildProfile, type SandboxPaths } from "../src/sbpl.ts";
 
 let root: string | null = null;
+
+function canLaunchNestedSandbox(): boolean {
+  try {
+    readdirSync(dirname(tmpdir()));
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
@@ -164,6 +173,9 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     const ordinaryProfile = buildProfile(paths);
     expect(ordinaryProfile).toContain("(deny network*)");
     expect(ordinaryProfile).not.toContain('com.apple.SystemConfiguration.DNSConfiguration');
+    expect(ordinaryProfile).not.toContain('com.apple.system.opendirectoryd.libinfo');
+    expect(ordinaryProfile).not.toContain('/Library/Preferences/com.apple.networkd.plist');
+    expect(ordinaryProfile).not.toContain('(allow file-read-metadata (literal "/var"))');
     expect(ordinaryProfile).toContain("(allow process-exec ");
     expect(ordinaryProfile).not.toContain("process-exec-interpreter");
     const bootstrapProfile = buildProfile(paths, { network: "package-manager-bootstrap" });
@@ -172,10 +184,13 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(bootstrapProfile).toContain(
       '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
     );
+    expect(bootstrapProfile).not.toContain('com.apple.system.opendirectoryd.libinfo');
+    expect(bootstrapProfile).not.toContain('/Library/Preferences/com.apple.networkd.plist');
+    expect(bootstrapProfile).toContain('(allow file-read-metadata (literal "/var"))');
     expect(bootstrapProfile).not.toContain("process-exec-interpreter");
   });
 
-  it("resolves registry DNS inside the explicit package-manager bootstrap sandbox", async () => {
+  it.skipIf(!canLaunchNestedSandbox())("resolves registry DNS inside the explicit package-manager bootstrap sandbox", async () => {
     if (process.platform !== "darwin") return;
     root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-dns-"));
     const paths: SandboxPaths = {
@@ -208,7 +223,7 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     expect(result.stdout).toContain("dns-ok");
   }, 15_000);
 
-  it("marks only package-manager bootstrap runs as non-interactive CI", async () => {
+  it.skipIf(!canLaunchNestedSandbox())("marks only package-manager bootstrap runs as non-interactive CI", async () => {
     if (process.platform !== "darwin") return;
     root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-ci-env-"));
     const paths: SandboxPaths = {

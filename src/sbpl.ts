@@ -251,6 +251,8 @@ export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {
           ";; macOS 26 resolver bootstrap: production sandboxd showed getaddrinfo failing immediately after",
           ";; this exact SystemConfiguration lookup was denied. Keep it scoped to fixed npm/pnpm bootstrap.",
           '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
+          ";; Resolve the /var symlink ancestor without exposing directory contents or descendants.",
+          '(allow file-read-metadata (literal "/var"))',
         ]
       : []),
     "",

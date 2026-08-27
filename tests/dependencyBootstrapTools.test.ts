@@ -25,6 +25,7 @@ let deps: ToolDeps | undefined;
 let worktree: string;
 let savedWorkspace: string | undefined;
 let savedControl: string | undefined;
+let sandboxRunnerCalls: number;
 
 function sandboxResult(overrides: Partial<RunResult> = {}): RunResult {
   return {
@@ -80,6 +81,7 @@ async function callCoreRun(profile = "ok"): Promise<any> {
 }
 
 beforeEach(() => {
+  sandboxRunnerCalls = 0;
   savedWorkspace = process.env.GRANDE_WORKSPACE;
   savedControl = process.env.GRANDE_CONTROL;
   root = mkdtempSync(join(tmpdir(), "dependency-bootstrap-tools-"));
@@ -138,8 +140,13 @@ beforeEach(() => {
     db,
     layout,
     dependencyBootstrapSandboxRunner: async (options) => {
+      sandboxRunnerCalls += 1;
       options.onSpawn?.(12_345);
       return sandboxResult();
+    },
+    jobSandboxRunner: async (options) => {
+      options.onSpawn?.(23_456);
+      return sandboxResult({ stdout: "product-profile\n" });
     },
   };
 });
@@ -164,6 +171,7 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
     expect(bootstrapJob.argv).toEqual(["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"]);
 
     await waitTerminal(first.data.jobId);
+    expect(sandboxRunnerCalls).toBe(1);
     expect(getJob(deps!.db, first.data.jobId), bootstrapFailureContext(first.data.jobId)).toMatchObject({
       state: "passed",
       summary: {
