@@ -57,6 +57,11 @@ export interface SandboxPaths {
    *  ——那里才是允许碰真实文件系统（realpathSync/which）的层。 */
   execRoots: string[];
   /**
+   * Exact initial npm/pnpm executable spellings derived by runSandboxed for dependency bootstrap.
+   * Callers cannot widen this list: runSandboxed replaces it from argv[0] + trusted execRoots.
+   */
+  bootstrapExecTargets?: string[];
+  /**
    * npm `.bin` symlink 在 Seatbelt 裁决前会被解析成 `.bin` 之外的真实 target。
    * 这里只允许 `runSandboxed()` 从当前 worktree 实际 `.bin` 重新推导出的 exact target；
    * buildProfile 仍会再次验证它们位于本 worktree `node_modules` 内。
@@ -146,6 +151,16 @@ function validateWorktreeExecTargets(p: SandboxPaths): string[] {
   return [...new Set(targets)].sort();
 }
 
+function validateBootstrapExecTargets(p: SandboxPaths): string[] {
+  const targets = [...new Set(p.bootstrapExecTargets ?? [])];
+  for (const target of targets) {
+    if (!isAbsolute(target) || !p.execRoots.some((root) => isUnder(root, target))) {
+      throw new SbplError("INVALID_INPUT", `bootstrap exec target 必须位于可信 execRoots 内：${target}`);
+    }
+  }
+  return targets;
+}
+
 function validateToolchainClosure(p: SandboxPaths): { readRoots: string[]; readFiles: string[]; execTargets: string[] } {
   const readRoots = [...new Set(p.toolchainReadRoots ?? [])].sort();
   const readFiles = [...new Set(p.toolchainReadFiles ?? [])].sort();
@@ -210,6 +225,7 @@ export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {
     throw new SbplError("BAD_CONFIG", `未知 sandbox network mode：${String(network)}`);
   }
   const worktreeExecTargets = validateWorktreeExecTargets(p);
+  const bootstrapExecTargets = validateBootstrapExecTargets(p);
   const toolchain = validateToolchainClosure(p);
   // worktreeAncestors 只覆盖 worktreesRoot **以下**那几级；白名单化读放行之后还要补
   // worktreesRoot 与 canonicalGit 各自往上直到 `/` 的每一级，否则 git 向上找仓库根时
@@ -246,6 +262,13 @@ export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {
     "(version 1)",
     "(deny default)",
     network === "package-manager-bootstrap" ? "(allow network*)" : "(deny network*)",
+    ...(network === "package-manager-bootstrap"
+      ? [
+          ";; macOS 26 resolver bootstrap: production sandboxd showed getaddrinfo failing immediately after",
+          ";; this exact SystemConfiguration lookup was denied. Keep it scoped to fixed npm/pnpm bootstrap.",
+          '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
+        ]
+      : []),
     "",
     ";; /dev/null —— git 打开它抑制信息输出（例如 `git status --short` 的重定向），",
     ";; 且 git 内部以 O_RDWR 打开（例：pipeline 的 dup2）。",
@@ -348,6 +371,7 @@ export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {
     "",
     ";; 执行：根目录列表由调用方传入（见 SandboxPaths.execRoots），不是硬编码常量",
     `(allow process-exec ${p.execRoots.map((root) => `(subpath "${q(root)}")`).join(" ")})`,
+    ...bootstrapExecTargets.map((target) => `(allow process-exec (literal "${q(target)}"))`),
     ";; worktree 内也要放行 exec，但只到 node_modules/.bin——U2 实测：pnpm/npm 把包的可执行",
     ";; 入口（如 node_modules/.bin/vitest）生成为物理落在 worktree 内的 POSIX shell shim（不是",
     ";; 符号链接出去），`pnpm test` 经由该 shim 的 shebang 调起，因此 shim 自身必须可 exec。",

@@ -161,10 +161,15 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
       worktreesRoot: "/tmp/grande/worktrees",
       execRoots: ["/usr/bin", "/bin"],
     };
-    expect(buildProfile(paths)).toContain("(deny network*)");
+    const ordinaryProfile = buildProfile(paths);
+    expect(ordinaryProfile).toContain("(deny network*)");
+    expect(ordinaryProfile).not.toContain('com.apple.SystemConfiguration.DNSConfiguration');
     const bootstrapProfile = buildProfile(paths, { network: "package-manager-bootstrap" });
     expect(bootstrapProfile).toContain("(allow network*)");
     expect(bootstrapProfile).not.toContain("(deny network*)");
+    expect(bootstrapProfile).toContain(
+      '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
+    );
   });
 
   it("resolves registry DNS inside the explicit package-manager bootstrap sandbox", async () => {
