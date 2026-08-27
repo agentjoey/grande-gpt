@@ -56,11 +56,8 @@ export interface SandboxPaths {
    *  报 `Operation not permitted`。本机的默认值见 sandbox.ts 的 defaultExecRoots()
    *  ——那里才是允许碰真实文件系统（realpathSync/which）的层。 */
   execRoots: string[];
-  /**
-   * Exact initial npm/pnpm executable spellings derived by runSandboxed for dependency bootstrap.
-   * Callers cannot widen this list: runSandboxed replaces it from argv[0] + trusted execRoots.
-   */
-  bootstrapExecTargets?: string[];
+  /** Exact shebang interpreters derived by runSandboxed only for fixed npm/pnpm bootstrap. */
+  bootstrapInterpreterTargets?: string[];
   /**
    * npm `.bin` symlink 在 Seatbelt 裁决前会被解析成 `.bin` 之外的真实 target。
    * 这里只允许 `runSandboxed()` 从当前 worktree 实际 `.bin` 重新推导出的 exact target；
@@ -151,11 +148,11 @@ function validateWorktreeExecTargets(p: SandboxPaths): string[] {
   return [...new Set(targets)].sort();
 }
 
-function validateBootstrapExecTargets(p: SandboxPaths): string[] {
-  const targets = [...new Set(p.bootstrapExecTargets ?? [])];
+function validateBootstrapInterpreterTargets(p: SandboxPaths): string[] {
+  const targets = [...new Set(p.bootstrapInterpreterTargets ?? [])];
   for (const target of targets) {
     if (!isAbsolute(target) || !p.execRoots.some((root) => isUnder(root, target))) {
-      throw new SbplError("INVALID_INPUT", `bootstrap exec target 必须位于可信 execRoots 内：${target}`);
+      throw new SbplError("INVALID_INPUT", `bootstrap interpreter 必须位于可信 execRoots 内：${target}`);
     }
   }
   return targets;
@@ -225,7 +222,7 @@ export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {
     throw new SbplError("BAD_CONFIG", `未知 sandbox network mode：${String(network)}`);
   }
   const worktreeExecTargets = validateWorktreeExecTargets(p);
-  const bootstrapExecTargets = validateBootstrapExecTargets(p);
+  const bootstrapInterpreterTargets = validateBootstrapInterpreterTargets(p);
   const toolchain = validateToolchainClosure(p);
   // worktreeAncestors 只覆盖 worktreesRoot **以下**那几级；白名单化读放行之后还要补
   // worktreesRoot 与 canonicalGit 各自往上直到 `/` 的每一级，否则 git 向上找仓库根时
@@ -371,7 +368,9 @@ export function buildProfile(p: SandboxPaths, options: SandboxProfileOptions = {
     "",
     ";; 执行：根目录列表由调用方传入（见 SandboxPaths.execRoots），不是硬编码常量",
     `(allow process-exec ${p.execRoots.map((root) => `(subpath "${q(root)}")`).join(" ")})`,
-    ...bootstrapExecTargets.map((target) => `(allow process-exec (literal "${q(target)}"))`),
+    ...bootstrapInterpreterTargets.map(
+      (target) => `(allow process-exec-interpreter (literal "${q(target)}"))`,
+    ),
     ";; worktree 内也要放行 exec，但只到 node_modules/.bin——U2 实测：pnpm/npm 把包的可执行",
     ";; 入口（如 node_modules/.bin/vitest）生成为物理落在 worktree 内的 POSIX shell shim（不是",
     ";; 符号链接出去），`pnpm test` 经由该 shim 的 shebang 调起，因此 shim 自身必须可 exec。",

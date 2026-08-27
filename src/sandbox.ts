@@ -116,33 +116,14 @@ function resolveBinaryDirs(name: string): string[] {
   }
 }
 
-function isWithinAnyRoot(path: string, roots: readonly string[]): boolean {
-  return roots.some((root) => {
-    const rel = relative(root, path);
-    return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
+function resolveBootstrapInterpreterTargets(argv0: string, execRoots: readonly string[]): string[] {
+  if (argv0 !== "npm" && argv0 !== "pnpm") return [];
+  const env = "/usr/bin/env";
+  const allowed = execRoots.some((root) => {
+    const rel = relative(root, env);
+    return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
   });
-}
-
-function resolveBootstrapExecTargets(argv0: string, execRoots: readonly string[]): string[] {
-  const candidates = isAbsolute(argv0)
-    ? [argv0]
-    : argv0.includes(sep)
-      ? []
-      : execRoots.map((root) => join(root, argv0));
-  for (const candidate of candidates) {
-    if (!existsSync(candidate)) continue;
-    const target = realpathSync(candidate);
-    if (!isWithinAnyRoot(candidate, execRoots) || !isWithinAnyRoot(target, execRoots)) continue;
-    // npm/pnpm entrypoints are commonly `#!/usr/bin/env node` scripts. macOS 15 Seatbelt may
-    // authorize the script literal yet reject its shebang interpreter before any JS runs.
-    const env = "/usr/bin/env";
-    return [...new Set([
-      candidate,
-      target,
-      ...(existsSync(env) && isWithinAnyRoot(env, execRoots) ? [env] : []),
-    ])];
-  }
-  return [];
+  return existsSync(env) && allowed ? [env] : [];
 }
 
 /**
@@ -258,7 +239,7 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     // 同样的道理适用于 execRoots：调用方即便已经用 defaultExecRoots() 解析过，
     // 这里仍统一再 realpathSync 一遍——不依赖调用方自律，跟上面五个字段一致。
     execRoots: o.paths.execRoots.map((r) => realpathSync(r)),
-    bootstrapExecTargets: [],
+    bootstrapInterpreterTargets: [],
     // 不接受调用方传入的额外 worktree exec allow；每次都从当前 `.bin` 实际 symlink
     // 重新推导 exact target，避免 stale/untrusted path 扩大 process-exec。
     worktreeExecTargets: resolveWorktreeBinExecTargets(canonicalWorktree),
@@ -268,7 +249,10 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     toolchainExecTargets: toolchain ? [...toolchain.execTargets] : [],
   };
   if (o.networkPolicy === "package-manager-bootstrap") {
-    canonicalPaths.bootstrapExecTargets = resolveBootstrapExecTargets(o.argv[0]!, canonicalPaths.execRoots);
+    canonicalPaths.bootstrapInterpreterTargets = resolveBootstrapInterpreterTargets(
+      o.argv[0]!,
+      canonicalPaths.execRoots,
+    );
   }
 
   for (const [label, value] of [
@@ -277,7 +261,9 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
     ["worktreesRoot", canonicalPaths.worktreesRoot],
   ] as const) assertOnDiskSpelling(label, value);
   canonicalPaths.execRoots.forEach((r, i) => assertOnDiskSpelling(`execRoots[${i}]`, r));
-  canonicalPaths.bootstrapExecTargets?.forEach((r, i) => assertOnDiskSpelling(`bootstrapExecTargets[${i}]`, r));
+  canonicalPaths.bootstrapInterpreterTargets?.forEach(
+    (r, i) => assertOnDiskSpelling(`bootstrapInterpreterTargets[${i}]`, r),
+  );
   canonicalPaths.worktreeExecTargets?.forEach((r, i) => assertOnDiskSpelling(`worktreeExecTargets[${i}]`, r));
   canonicalPaths.toolchainReadRoots?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadRoots[${i}]`, r));
   canonicalPaths.toolchainReadFiles?.forEach((r, i) => assertOnDiskSpelling(`toolchainReadFiles[${i}]`, r));
@@ -389,12 +375,6 @@ export async function runSandboxed(o: RunOptions): Promise<RunResult> {
 
   clearTimeout(timer);
   clearInterval(poller);
-
-  if (o.networkPolicy === "package-manager-bootstrap" && exitCode === 71) {
-    stderr += `\n[dependency-bootstrap exec diagnostic] argv0=${JSON.stringify(o.argv[0])}` +
-      ` PATH=${JSON.stringify(env.PATH)}` +
-      ` exact=${JSON.stringify(canonicalPaths.bootstrapExecTargets ?? [])}\n`;
-  }
 
   return {
     exitCode,

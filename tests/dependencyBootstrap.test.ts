@@ -164,11 +164,18 @@ describe("GG-BL-031 dependency bootstrap identity and cache", () => {
     const ordinaryProfile = buildProfile(paths);
     expect(ordinaryProfile).toContain("(deny network*)");
     expect(ordinaryProfile).not.toContain('com.apple.SystemConfiguration.DNSConfiguration');
-    const bootstrapProfile = buildProfile(paths, { network: "package-manager-bootstrap" });
+    expect(ordinaryProfile).not.toContain("process-exec-interpreter");
+    const bootstrapProfile = buildProfile(
+      { ...paths, bootstrapInterpreterTargets: ["/usr/bin/env"] },
+      { network: "package-manager-bootstrap" },
+    );
     expect(bootstrapProfile).toContain("(allow network*)");
     expect(bootstrapProfile).not.toContain("(deny network*)");
     expect(bootstrapProfile).toContain(
       '(allow mach-lookup (global-name "com.apple.SystemConfiguration.DNSConfiguration"))',
+    );
+    expect(bootstrapProfile).toContain(
+      '(allow process-exec-interpreter (literal "/usr/bin/env"))',
     );
   });
 
