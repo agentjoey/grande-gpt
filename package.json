@@ -16,7 +16,7 @@
     "test:selfhost-safe": "vitest run --exclude tests/sandbox.test.ts --exclude tests/runner.test.ts --exclude tests/server.test.ts --exclude tests/tools.test.ts --exclude tests/e2e.test.ts",
     "test:tool-contract": "vitest run tests/toolsetIdentity.test.ts tests/onboardingTools.test.ts",
     "typecheck": "tsc --noEmit",
-    "ci:verify": "vitest run tests/dependencyBootstrapTrigger.test.ts",
+    "ci:verify": "vitest run tests/dependencyBootstrap.test.ts -t \"resolves registry DNS inside the explicit package-manager bootstrap sandbox\"",
     "cli": "node --disable-warning=ExperimentalWarning src/cli.ts"
   },
   "dependencies": {
