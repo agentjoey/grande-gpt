@@ -12,7 +12,7 @@ import {
   prepareDependenciesInWorktree,
   preparedDependenciesPresent,
   preparedDependencyCachePresent,
-  repoRequiresDependencyBootstrap,
+  profileRequiresDependencyBootstrap,
   type DependencyBootstrapIdentity,
 } from "./dependencyBootstrap.ts";
 import { StateError } from "./errors.ts";
@@ -25,6 +25,7 @@ import {
   TERMINAL,
 } from "./jobs.ts";
 import type { Layout } from "./layout.ts";
+import { getProfile } from "./profiles.ts";
 import { trackJobSettlement } from "./runner.ts";
 import type { TaskRow } from "./tasks.ts";
 
@@ -265,7 +266,8 @@ export function prepareDependencyPrerequisite(
   task: TaskRow,
   requestedProfile: string,
 ): DependencyPrerequisite | null {
-  if (!repoRequiresDependencyBootstrap(deps.layout, task.repoId)) return null;
+  const profile = getProfile(deps.layout, task.repoId, requestedProfile);
+  if (!profileRequiresDependencyBootstrap(deps.layout, task.repoId, task.worktreePath, profile.argv)) return null;
 
   const identity = captureDependencyBootstrapIdentity(task.repoId, task.worktreePath);
   const existing = runningBootstrap(deps, task, identity);

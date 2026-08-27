@@ -245,6 +245,19 @@ export function repoRequiresDependencyBootstrap(layout: Layout, repoId: string):
   return loadDepDirs(layout, repoId).includes("node_modules");
 }
 
+export function profileRequiresDependencyBootstrap(
+  layout: Layout,
+  repoId: string,
+  worktreeRoot: string,
+  profileArgv: readonly string[],
+): boolean {
+  if (repoRequiresDependencyBootstrap(layout, repoId)) return true;
+  if (!existsSync(join(worktreeRoot, "package.json"))) return false;
+  if (profileArgv[0] === "npm") return existsSync(join(worktreeRoot, "package-lock.json"));
+  if (profileArgv[0] === "pnpm") return existsSync(join(worktreeRoot, "pnpm-lock.yaml"));
+  return false;
+}
+
 function assertStableDependencyIdentity(
   repoId: string,
   worktree: string,
