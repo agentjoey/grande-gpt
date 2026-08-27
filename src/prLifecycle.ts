@@ -13,6 +13,7 @@ import {
 } from "./githubApi.ts";
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
 import { GitExecError, safeGit } from "./gitExec.ts";
+import { isHostVerificationApplicable } from "./hostVerificationApplicability.ts";
 import type { HostVerifierCoordinator } from "./hostVerifier.ts";
 import type { Layout } from "./layout.ts";
 import { inspectCurrentHostVerification, manualOuterTestCommand } from "./prHostVerification.ts";
@@ -354,7 +355,7 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
           throw new StateError("STALE_STATE", `PR #${state.pr.number} CI 仍在 pending，不能合并。`);
         }
 
-        if (state.task.repoId === "grande-gpt") {
+        if (isHostVerificationApplicable(state.task.repoId)) {
           const current = inspectCurrentHostVerification(deps.db, state.task, state.pr.headSha);
           if (!current.receiptEligible && current.plan.level !== "none") {
             const level = current.plan.level;

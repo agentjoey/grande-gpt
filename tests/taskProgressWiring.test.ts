@@ -61,8 +61,9 @@ describe("grande_task_status S10/D3 progress wiring", () => {
       phase: "code",
       taskHead: null,
       hostVerification: {
-        requiredLevel: null,
-        state: "unknown",
+        requiredLevel: "none",
+        receiptEligible: true,
+        state: "not-required",
         retryCount: 0,
         jobId: null,
       },
@@ -98,7 +99,7 @@ describe("grande_task_status S10/D3 progress wiring", () => {
     expect(envelope.data?.activeTasks?.[0]?.progress).toMatchObject({
       phase: "code",
       taskHead: null,
-      hostVerification: { state: "unknown", retryCount: 0 },
+      hostVerification: { requiredLevel: "none", receiptEligible: true, state: "not-required", retryCount: 0 },
       cleanupRequired: false,
     });
     db.close();

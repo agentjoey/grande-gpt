@@ -113,7 +113,7 @@ function staleReconcile(db: ReturnType<typeof openDb>): void {
 
 function makeTask(db: ReturnType<typeof openDb>, state: "READY" | "CLOSED" = "READY") {
   return createTask(db, {
-    taskId: "task-d3", repoId: "demo", branch: "grande/d3-0001", baseCommit: "base", worktreePath: join(ws, "wt"), state,
+    taskId: "task-d3", repoId: "grande-gpt", branch: "grande/d3-0001", baseCommit: "base", worktreePath: join(ws, "wt"), state,
   });
 }
 
