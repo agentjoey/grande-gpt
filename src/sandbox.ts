@@ -132,7 +132,17 @@ function resolveBootstrapInterpreterTargets(argv0: string, execRoots: readonly s
         const rel = relative(trustedRoot, env);
         return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
       });
-      return [...new Set([candidate, target, ...(envAllowed ? [env] : [])])];
+      const node = realpathSync(process.execPath);
+      const nodeAllowed = execRoots.some((trustedRoot) => {
+        const rel = relative(trustedRoot, node);
+        return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+      });
+      return [...new Set([
+        candidate,
+        target,
+        ...(envAllowed ? [env] : []),
+        ...(nodeAllowed ? [node] : []),
+      ])];
     }
   }
   return [];
