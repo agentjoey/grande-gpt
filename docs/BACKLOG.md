@@ -1,20 +1,18 @@
 # GrandeGPT Backlog
 
-> **Canonical backlog / single source of truth**
+> **AllJobs canonical backlog / single source of truth**
 >
-> 本文件是 GrandeGPT 当前 backlog 的唯一权威索引。`CLAUDE.md`、`docs/research/**`、PR/TaskBrief 和聊天结论只能作为 evidence/detail，**不得单独维护当前状态**。任何新 backlog、优先级变化、关闭或去重都必须更新本文件。
+> 本文件遵循 AllJobs canonical backlog 格式（每个条目为 `## ID: Title` 小节 + `yaml alljobs` 元数据块），仍是 GrandeGPT 当前 backlog 的唯一权威索引。由原 bullet-style `docs/BACKLOG.md`（最后整理：2026-08-28）经 AllJobs `planning:convert` 转换生成。`CLAUDE.md`、`docs/research/**`、PR/TaskBrief 和聊天结论只能作为 evidence/detail，**不得单独维护当前状态**。
 
-最后整理：2026-08-27
+### 维护规范
 
-## 维护规范
-
-### ID
+#### ID
 
 - 格式：`GG-BL-NNN`，一经分配不复用、不改号。
 - 同一根因的重复复现更新原条目的 Evidence，不新开重复 ID。
 - 后来确认是另一根因时才拆新 ID，并在两边写 `Related`。
 
-### Priority
+#### Priority
 
 | Priority | 含义 |
 |---|---|
@@ -24,7 +22,7 @@
 | **P3** | 低优先级文档/兼容性清理。 |
 | **OBS** | 外部平台行为或证据不足的观察项；先收集复现，不默认承诺 GrandeGPT 代码修复。 |
 
-### Status
+#### Status
 
 | Status | 含义 |
 |---|---|
@@ -36,7 +34,7 @@
 
 `ACCEPTED` 不作为 backlog status。明确接受且不计划修的架构取舍放在 `CLAUDE.md` 的 **已接受的风险**。
 
-### 写入与关闭纪律
+#### 写入与关闭纪律
 
 - **先查重**：新发现先搜索 `GG-BL-*` 与标题关键词；重复复现追加 Evidence。
 - **证据与状态分离**：research 文档允许很长，但当前 priority/status 只在这里维护。
@@ -46,117 +44,130 @@
 - **外部平台**：用 `OBS / OBSERVATION`；不要为了适配平台偶发现象降低 Gateway policy、annotations 或绕过安全边界。
 - **详细文档不双写状态**：`docs/research/**` 只保存时间线、复现和设计背景；若其中旧状态与本文件冲突，以本文件为准。
 
-## Roadmap after Phase 6
+### Not backlog
 
-本区只维护 **Phase 顺序、范围与进入/退出条件**；每个 backlog 的实时 `Priority / Status` 仍以对应条目为唯一权威。
+以下内容**不要**重复创建 backlog：
 
-### Phase 7 — Reliability Foundation
+- `CLAUDE.md` 的 **已接受的风险**：明确取舍，不是待办；除非 Human Owner 重新打开决策。
+- `package.json` 的 `postinstall/prepare` 宿主执行风险：当前是已知且有意保留的安全/可用性取舍；若威胁模型变化再建立新 ID。
+- 已修复并有验证证据的历史事故（token epoch、loopback bind、schema arg validation、outer-test 等）：保留历史记录，不重新进入 Active。
+- research 文档中的旧 priority/status：只作为当时快照，当前状态以本文件为准。
 
-**Status**：DONE（2026-08-23）
+## GG-BL-006: `selfcheck` 对交互 shell 的 `GRANDE_ISSUER` 依赖易误判
 
-**范围**：`GG-BL-007`、`GG-BL-017`、`GG-BL-018`、`GG-BL-019`。
+```yaml alljobs
+id: GG-BL-006
+work_mode: implementation
+status: ready
+priority: P2
+phase: maintenance
+done_when: shell 缺 issuer 时输出能清楚区分“CLI 环境缺失”和“Gateway 不健康”，并保持 fail-closed。
+```
 
-**Closeout evidence**：implementation PR #22；exact head `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa`；local `unit-selfhost` 109 files / 859 tests PASS、`typecheck` PASS、GitHub Actions PASS、Host outer-test 10 files / 171 tests PASS；merge SHA `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`；production activation receipt 后续成功读回。公开 contract 保持 25 tools / epoch 2。
-
-### Phase 8 — Flow Simplification
-
-**Status**：DONE（2026-08-23）
-
-**范围**：`GG-BL-020`、`GG-BL-021`、`GG-BL-022`、`GG-BL-023`。
-
-目标是在 **不改变公开 `tools/list`** 的前提下减少正常开发轮次和无意义 Human Gate：内部 delivery-target projection、短 job bounded wait、PR/verifier continuation、L1/L2/L3 风险分级。
-
-**范围边界**：Phase 8 完成的是 no-tool-epoch 内部 primitive/projection。**公开 `TaskBrief.deliveryTarget` schema 不属于 Phase 8**，与 public tool-surface convergence 一并留给 Phase 9 / `GG-BL-024`。
-
-**退出条件已满足**：
-
-- internal `local / pr / deploy` projection 能屏蔽无关阶段，并维持单一 blocker + nextAction；
-- 短 `grande_run` 在固定 bounded-wait 预算内可直接返回 terminal result，长 job 保留稳定 jobId/recovery；
-- 正常 PR 可直接进入 merge gate，`pr_status` 按需诊断；同一 task authorization 下可在 verifier/Host gate 后重新进入 merge，且每次重新读取 exact-SHA gates；
-- L1/L2/L3 classifier 与 coding-agent policy 正式落地，未知路径 fail closed 到 L3；
-- production tool identity 仍为 25 tools / epoch 2 / 原 digest。
-
-**Closeout evidence**：implementation PR #25；exact head `e902877854e2513cfa1d6545ffb15b22cc8410f9`；`unit-selfhost` 112 files / 871 tests PASS、`typecheck` PASS、GitHub Actions PASS、manual-only Host outer-test 10 files / 172 tests PASS；merge SHA `217a2dadc2887046decdeb9ab3c2813060ae7d97`。production activation receipt 已由后续 `grande_task_status` 读回：`targetBuild = runtimeBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97`、`toolsetEpoch=2`、`toolsCount=25`、`toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`、LaunchAgent running、endpoint ready、trusted read probe HTTP 200。详细见 [`docs/research/2026-08-23-phase8-flow-simplification-closeout.md`](research/2026-08-23-phase8-flow-simplification-closeout.md)。
-
-### Phase 9 — Tool Surface Convergence
-
-**Status**：BLOCKED before public contract change（`GG-BL-010` release-ready gate）
-
-**范围**：`GG-BL-024`。
-
-目标是把 Phase 8 已验证的内部流程语义，在 **一次正式 Tool Epoch** 中收敛公开 MCP surface，而不是零散增删工具。
-
-**进入条件**：
-
-1. Phase 7、Phase 8 完成；**已满足**。
-2. `GG-BL-010` 达到 release-ready 稳定门槛：§7.2 `C-Web-1 + C-iOS + C-Web-2` 三次 same-conversation two-task formal runs 已于 2026-08-23 **3/3 PASS**；server tool identity 与 client/session binding snapshot 可区分，已有可靠 App refresh/new-session release procedure。当前仍需完成 §7.3 **7-day ordinary-use observation**：至少 5 个普通 conversation、每个至少 2 个真实任务、覆盖 Web 与当前实际 capability-supported 的 iOS，且无 unexplained disablement；**formal matrix 已满足，整体 release-ready gate 仍未满足**。
-3. 在条件 2 满足前，production **25-tool contract 冻结**，除阻断性安全/可靠性修复外不主动改变工具快照。
-
-**一次性变更目标**：
-
-- public `TaskBrief.deliveryTarget = local | pr | deploy` 正式进入 contract，并复用 Phase 8 已验证的内部 projection 语义；
-- `grande_repo_add_propose` + `grande_repo_add_apply` → 单一 `grande_repo_register`，继续保留 proposalDigest + Human Gate 两阶段语义；
-- `grande_capability_inspect` → `grande_capability_list` filter；
-- `grande_deploy_verify` → 可重入 `grande_deploy`；
-- 正常完成路径将 `grande_task_close` 移出公开 MCP，异常/放弃任务继续走 CLI/Console；
-- 不长期同时暴露新旧 alias，不为了整数目标合并风险不同的核心工具。
-
-**退出条件**：新 tool count/epoch/digest 稳定；Dev App 与 Production App 完成 refresh；所有当时实际 capability-supported 的目标 release clients 完成 fresh conversation 真实任务；失败时可直接回滚上一 Gateway build/tool epoch。
-
-### Phase 10 — Internal Convergence
-
-**Status**：NOT STARTED
-
-**范围**：`GG-BL-025`。
-
-目标是只根据最新代码的真实重复与耦合证据，收敛内部 process supervision、receipt eligibility、tool assembly 与 deployment/capability 调用路径。
-
-**进入条件**：Phase 9 新公开 contract 已稳定，或某个独立内部缺陷有足够证据证明必须提前处理。
-
-**退出条件**：只关闭仍真实存在的重复实现；没有为了“架构更漂亮”新增 workflow engine、通用 middleware framework、第二套状态系统、第二个 Gateway 或新的 provider graph。
-
-### Maintenance lane
-
-- `GG-BL-006`、`GG-BL-008`、`GG-BL-009` 保持独立 maintenance lane，不为凑 Phase 范围强行并入 Phase 7–10。
-- `GG-BL-010` 继续保持 P0 / MITIGATED，并作为 Phase 9 的 release gate；不得用改变 tool contract 的方式“试试看能不能修”。
-- `GG-BL-011`、`GG-BL-012` 继续保持 observation，不因 roadmap 自动升格工程项。
-
-## Active backlog
-
-### GG-BL-006 — `selfcheck` 对交互 shell 的 `GRANDE_ISSUER` 依赖易误判
-
-- **Priority**: P2
-- **Status**: OPEN
 - **Category**: operations UX
 - **Problem**: LaunchAgent/Gateway 已正常配置 production issuer 时，普通 shell 直接运行 `grande selfcheck` 仍会因 shell 未设置 `GRANDE_ISSUER` 而失败，容易被理解成 Gateway outage。
 - **Evidence / Detail**: [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md)。
 - **Next**: 不降低 issuer/audience 校验；优先改善诊断文本和 `gateway status` 的可信 issuer 展示。
-- **Done when**: shell 缺 issuer 时输出能清楚区分“CLI 环境缺失”和“Gateway 不健康”，并保持 fail-closed。
+- **Original status**: OPEN
 
-### GG-BL-008 — GitHub fine-grained PAT least-privilege 与生命周期
+### 维护规范
 
-- **Priority**: P2
-- **Status**: OPEN
+#### ID
+
+- 格式：`GG-BL-NNN`，一经分配不复用、不改号。
+- 同一根因的重复复现更新原条目的 Evidence，不新开重复 ID。
+- 后来确认是另一根因时才拆新 ID，并在两边写 `Related`。
+
+#### Priority
+
+| Priority | 含义 |
+|---|---|
+| **P0** | 破坏 Golden Path、可导致 production outage / 数据或安全边界风险、或已重复出现且会污染后续任务基线。优先于新功能。 |
+| **P1** | 重要可靠性/运维缺陷；有 workaround，但会持续制造人工介入、误判或闭环摩擦。 |
+| **P2** | 应修的可用性、韧性、least-privilege 或维护问题；不阻塞当前主流程。 |
+| **P3** | 低优先级文档/兼容性清理。 |
+| **OBS** | 外部平台行为或证据不足的观察项；先收集复现，不默认承诺 GrandeGPT 代码修复。 |
+
+#### Status
+
+| Status | 含义 |
+|---|---|
+| **OPEN** | 问题成立，尚未完成修复。 |
+| **MITIGATED** | 已有有效缓解，但根因/自动闭环仍未完成。 |
+| **OBSERVATION** | 仅观察；需要更多证据或属于外部平台。 |
+| **BLOCKED** | 修复方向明确，但依赖 Human/external platform。 |
+| **DONE** | 完成判据已被证据满足。DONE 条目保留 ID，移到 Archive，不删除。 |
+
+`ACCEPTED` 不作为 backlog status。明确接受且不计划修的架构取舍放在 `CLAUDE.md` 的 **已接受的风险**。
+
+#### 写入与关闭纪律
+
+- **先查重**：新发现先搜索 `GG-BL-*` 与标题关键词；重复复现追加 Evidence。
+- **证据与状态分离**：research 文档允许很长，但当前 priority/status 只在这里维护。
+- **修复不等于关闭**：代码 merge 后必须满足 `Done when`；涉及 production 的还要有 runtime/host 行为证据。
+- **关闭不删除**：改为 `DONE` 并移到 Archive，写明修复 PR/commit/验证证据。
+- **部分修复**：保留原 ID，状态改 `MITIGATED`，明确还剩什么。
+- **外部平台**：用 `OBS / OBSERVATION`；不要为了适配平台偶发现象降低 Gateway policy、annotations 或绕过安全边界。
+- **详细文档不双写状态**：`docs/research/**` 只保存时间线、复现和设计背景；若其中旧状态与本文件冲突，以本文件为准。
+
+### Not backlog
+
+以下内容**不要**重复创建 backlog：
+
+- `CLAUDE.md` 的 **已接受的风险**：明确取舍，不是待办；除非 Human Owner 重新打开决策。
+- `package.json` 的 `postinstall/prepare` 宿主执行风险：当前是已知且有意保留的安全/可用性取舍；若威胁模型变化再建立新 ID。
+- 已修复并有验证证据的历史事故（token epoch、loopback bind、schema arg validation、outer-test 等）：保留历史记录，不重新进入 Active。
+- research 文档中的旧 priority/status：只作为当时快照，当前状态以本文件为准。
+
+## GG-BL-008: GitHub fine-grained PAT least-privilege 与生命周期
+
+```yaml alljobs
+id: GG-BL-008
+work_mode: implementation
+status: ready
+priority: P2
+phase: maintenance
+done_when: production PAT 权限与 GrandeGPT 当前所需操作一一对应，过期/失效有明确预警或 runbook，且真实
+  push/PR/CI/merge 验证通过。
+```
+
 - **Category**: security / operations
 - **Problem**: 历史 PAT 配置包含当前切片用不到的部分写权限，并记录了到期时间；权限与有效期需要按当前真实 repo/功能重新核对。
 - **Evidence / Detail**: `CLAUDE.md` 历史 S0.5 遗留 #10；历史记录也指出 `GET /user/repos` 不能证明 fine-grained repository grant。
 - **Next**: 用当前 GitHub 功能矩阵重新做 least-privilege review，并在 credential health/doctor 中提供可操作诊断。
-- **Done when**: production PAT 权限与 GrandeGPT 当前所需操作一一对应，过期/失效有明确预警或 runbook，且真实 push/PR/CI/merge 验证通过。
+- **Original status**: OPEN
 
-### GG-BL-009 — 历史 S0 文档仍含过期 `repo_edit` 能力描述
+## GG-BL-009: 历史 S0 文档仍含过期 `repo_edit` 能力描述
 
-- **Priority**: P3
-- **Status**: OPEN
+```yaml alljobs
+id: GG-BL-009
+work_mode: implementation
+status: ready
+priority: P2
+phase: maintenance
+done_when: 当前权威入口不会把读者导向旧能力结论，历史文件保留但明确 superseded。
+```
+
 - **Category**: docs
 - **Problem**: 部分历史 S0 文档仍写 `repo_edit` 不支持 delete，与 S1+ 当前能力不同。
 - **Evidence / Detail**: `CLAUDE.md` 历史 S0.5 遗留 #8。
 - **Next**: 仅在容易被误当当前规格的入口加 historical/superseded 标记；不大规模重写历史记录。
-- **Done when**: 当前权威入口不会把读者导向旧能力结论，历史文件保留但明确 superseded。
+- **Original priority**: P3
+- **Original status**: OPEN
 
-### GG-BL-010 — 当前会话的 GrandeGPT direct tool execution channel 会被禁用
+## GG-BL-010: 当前会话的 GrandeGPT direct tool execution channel 会被禁用
 
-- **Priority**: P0
-- **Status**: MITIGATED
+```yaml alljobs
+id: GG-BL-010
+work_mode: implementation
+status: doing
+priority: P0
+phase: maintenance
+done_when: "**跨客户端两任务** formal matrix 三次全绿，随后 7 天 / ≥5 ordinary conversations 无
+  unexplained disablement，或获得可控根因并证明长期稳定后再转 DONE。formal matrix 已满足；当前仍保持
+  MITIGATED，等待 observation 完成。"
+```
+
 - **Category**: reliability / ChatGPT App session binding
 - **Problem**: GrandeGPT App/插件仍显示 installed/enabled、server schema/tool discovery 正常时，某个运行中的 ChatGPT 会话仍可能在真实 `grande_*` 调用时直接 disabled，随后该会话无法继续使用 GrandeGPT。
 - **Evidence / Detail**: 早期样本见 [`docs/research/2026-08-19-phase5-production-followup-backlog.md`](research/2026-08-19-phase5-production-followup-backlog.md) 与 [`docs/chatgpt-connector-compatibility-runbook.md`](docs/chatgpt-connector-compatibility-runbook.md)。已有 89 次、256 次调用后 pre-Gateway disable 样本，以及 installed/enabled、schema discovery 可见时首次真实调用即 disabled 的样本；还观察过 client snapshot 23 tools 而同一 production Gateway 为 25 tools / epoch 2，证明 session/app binding 与 server tool identity 可分叉。
@@ -167,44 +178,72 @@
 - **2026-08-23 formal matrix evidence**: `C-Web-1 + C-iOS + C-Web-2` 已 **3/3 PASS**。三次运行均在 frozen `toolsetEpoch=2` / `toolsCount=25` / digest `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815` 下完成 same-conversation two-task gate，无 unexplained disabled / Resource not found / unexpected formal-path 401 / Gateway restart / identity drift；详见 C-Web-1、C-iOS、C-Web-2 独立 evidence。另有 `C-macOS-App supplemental validation: PASS`，只作为额外客户端覆盖，不改变 formal matrix 组成。
 - **Remaining**: §7.2 formal matrix 已完成。现在只剩 §7.3 **7-day ordinary-use observation**：至少 5 个普通 conversation、每个 conversation 至少 2 个真实用户任务，覆盖 Web 与当前实际 capability-supported 的 iOS；只保留 redacted telemetry summary，7 天内不得出现 unexplained disablement，并要求 frozen formal identity 仍成立。该 Remaining 同时构成 Phase 9 public Tool Epoch 的 release gate。
 - **Escalation**: 若在 frozen identity / under-budget 条件下出现两个独立、当前 epoch、证据完整的 pre-Gateway disable 样本，且失败调用未到 Gateway、无 401/restart/identity change，则停止继续通过 server payload/OAuth/annotations/tools-list 试探，转 `BLOCKED — ChatGPT platform/session binding boundary` 并附完整证据。
-- **Done when**: **跨客户端两任务** formal matrix 三次全绿，随后 7 天 / ≥5 ordinary conversations 无 unexplained disablement，或获得可控根因并证明长期稳定后再转 DONE。formal matrix 已满足；当前仍保持 MITIGATED，等待 observation 完成。
+- **Original status**: MITIGATED
 
-### GG-BL-024 — 下一次 Tool Epoch 收敛公开 MCP surface
+## GG-BL-024: 下一次 Tool Epoch 收敛公开 MCP surface
 
-- **Priority**: P2
-- **Status**: BLOCKED
+```yaml alljobs
+id: GG-BL-024
+work_mode: implementation
+status: blocked
+priority: P2
+phase: phase-9
+done_when: ①旧 25-tool identity 与新 identity 明确不同且新 count/epoch/digest 稳定；② public
+  deliveryTarget 正式可选且扩大外部副作用需要 Human confirmation；③删除工具不再出现在 tools/list；④
+  `repo_register` 不接受 path/force，proposal 零写入，register 保持 Human Gate/stale
+  protection；⑤ deploy 重入不重复外部副作用；⑥ task 自动 cleanup 不暴露通用 delete；⑦ Dev/Production
+  App refresh 后所有当时实际 capability-supported 的目标 release clients 用 fresh
+  conversation 完成真实任务；⑧失败可直接 rollback 上一 Gateway build/tool epoch。
+```
+
 - **Category**: MCP contract / tool surface
 - **Problem**: 当前 25-tool contract 中仍有 onboarding 两工具、capability inspect、deploy verify、task close 等可在保持风险语义的前提下合并或内部化；Phase 8 的 internal delivery-target projection 也尚未进入 public TaskBrief schema。零散修改 tools/list 会放大 ChatGPT binding/snapshot 排障变量。
 - **Evidence / Detail**: 2026-08-22 owner-approved simplification proposal 要求一次正式 tool epoch 收敛；Phase 8 已完成 no-tool-epoch primitives，且 production 仍保持 25 tools / epoch 2 / 原 digest。`GG-BL-010` 证明 session/app binding 与 server tool identity 可分叉，因此本项目前被 release gate 阻塞。
 - **Next**: **先完成 `GG-BL-010` release-ready gate，不提前改 production contract。** gate 满足后一次 release 完成：① public `TaskBrief.deliveryTarget`；② `repo_add_propose/apply → grande_repo_register`；③ capability inspect 并入 list filter；④ deploy verify 并入可重入 deploy；⑤正常完成路径移除公开 task_close；⑥ bump toolset epoch 并执行 Dev/Production App refresh。
-- **Done when**: ①旧 25-tool identity 与新 identity 明确不同且新 count/epoch/digest 稳定；② public deliveryTarget 正式可选且扩大外部副作用需要 Human confirmation；③删除工具不再出现在 tools/list；④ `repo_register` 不接受 path/force，proposal 零写入，register 保持 Human Gate/stale protection；⑤ deploy 重入不重复外部副作用；⑥ task 自动 cleanup 不暴露通用 delete；⑦ Dev/Production App refresh 后所有当时实际 capability-supported 的目标 release clients 用 fresh conversation 完成真实任务；⑧失败可直接 rollback 上一 Gateway build/tool epoch。
+- **Original status**: BLOCKED
 
-### GG-BL-025 — 内部执行、receipt 与 tool assembly 存在潜在重复和隐式耦合
+## GG-BL-025: 内部执行、receipt 与 tool assembly 存在潜在重复和隐式耦合
 
-- **Priority**: P3
-- **Status**: OPEN
+```yaml alljobs
+id: GG-BL-025
+work_mode: implementation
+status: ready
+priority: P2
+phase: phase-10
+done_when: ①逐项 evidence review 完成并删除已经不存在的 scope；②若 runner/verifier 确有重复，仅保留一套窄
+  process lifecycle primitive；③ receipt/job eligibility 有单一 fail-closed
+  parser/validator；④ deployment 不通过公开 MCP handler 触发内部领域动作；⑤写工具 wrapper
+  顺序有集中测试且不依赖共享可变 ToolDef；⑥没有新增与轻量定位冲突的通用框架。
+```
+
 - **Category**: architecture / maintainability
 - **Problem**: 2026-08-22 架构评审指出 runner/host verifier process supervision、job/receipt JSON eligibility、公开 tool handler 互调以及 handler wrapping/assembly 可能存在重复实现或隐式顺序耦合；设计基线早于部分 Phase 6–8 改动，不能把旧快照直接当成当前代码事实。
 - **Evidence / Detail**: owner-reviewed lightweight architecture design；Phase 8 新增 flow wrapper 后更应先做最新 canonical evidence review，而不是直接抽象框架。
 - **Next**: 先做 code evidence review。只对仍存在且至少有两个真实使用者的重复 primitive 做收敛；禁止建设 workflow engine、通用 interceptor framework、第二状态系统或 capability marketplace。
-- **Done when**: ①逐项 evidence review 完成并删除已经不存在的 scope；②若 runner/verifier 确有重复，仅保留一套窄 process lifecycle primitive；③ receipt/job eligibility 有单一 fail-closed parser/validator；④ deployment 不通过公开 MCP handler 触发内部领域动作；⑤写工具 wrapper 顺序有集中测试且不依赖共享可变 ToolDef；⑥没有新增与轻量定位冲突的通用框架。
+- **Original priority**: P3
+- **Original status**: OPEN
 
-### GG-BL-029 — GrandeGPT sandbox 无法支持受控 macOS native build：`/usr/bin/clang` 经 `xcode-select` 访问 `/var/select/developer_dir` 被拒绝
+## GG-BL-030: post-merge release closeout 缺少受控 canonical docs 回写路径
 
-- **Priority**: P1
-- **Status**: OPEN
-- **Category**: sandbox / macOS native toolchain
-- **Problem**: GrandeGPT sandbox 已能启动固定 `/usr/bin/clang`，但 clang 初始化所需的 macOS Developer Tools resolution dependency chain 不完整。`xcode-select` 读取 `/var/select/developer_dir` 时得到 `Operation not permitted`，导致受控 native helper 在编译器初始化阶段失败，尚未进入 helper 源码或 `renameatx_np` 行为验证。
-- **Evidence / Detail**: `grande-obsidian-mcp` Phase 3 / Safe Move & Rename Core 的 P3-0 feasibility probe，task `task-gomcp-phase3-spec-20260824-001`、失败测试 `test/exclusiveRename.test.ts`、最近复现 job `job_1fc4adeb-834e-4b67-b56c-b619ba964ac8`，`exitCode=1`。测试以 no-shell `spawnSync("/usr/bin/clang", ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O2", "native/rename-excl.c", "-o", "<repo-owned-output>"])` 编译 repo-owned helper；核心错误链为 `clang → xcode-select → read /var/select/developer_dir → EPERM`。在 npm attestation 与 npm `.bin` sandbox 修复已 activation 的 Gateway build `b2da29a954f9453622f7455387da2bb3c7bd2de2` 下原样复现，确认是独立缺陷。
-- **Required use case**: Phase 3 需要一个窄 Darwin helper 调用 `renameatx_np(..., RENAME_EXCL | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH)`，因为 Node 公共 `fs` API 无法表达 approved no-overwrite 语义；普通 `rename()` 存在 target-overwrite race。若 sandbox 无法可靠编译/执行，必须 fail closed，不能降级为普通 `rename()` 或 copy-delete。
-- **Security boundary**: 修复不得开放 generic shell、generic host exec、任意 executable、任意 compiler argv/flags/output、任意绝对路径读写或 repo 普遍 host filesystem 权限；不得绕过 task/worktree isolation。目标路径仍应是 repo-declared approved profile → fixed executable allowlist → fixed/validated argv → repo-owned source/output → 必要 system dependency 的最小只读 closure → no shell → auditable receipt。
-- **Next**: 在 Host 上枚举 `/usr/bin/clang` 实际 Developer Tools/SDK resolution dependency chain，区分 executable dependency 与 read-only filesystem dependency；仅为 approved native-build profile 增加最小、确定、可测试的 dependency closure，并为越界 executable/path/argv 增加负向回归。不要通过放开 `/var`、整个 Xcode tree 或通用 host execution 解决。
-- **Done when**: ① GrandeGPT sandbox 中固定 `/usr/bin/clang` 能正常解析 Developer Tools，不再因 `/var/select/developer_dir` EPERM 失败；②原样重跑 `test/exclusiveRename.test.ts` 能进入 native helper 的实际编译与运行阶段；③helper 尚未实现时，RED 是正常源码/实现级失败而非 sandbox/toolchain denial；④helper 完成后可真实验证 `RENAME_EXCL / RENAME_NOFOLLOW_ANY / RENAME_RESOLVE_BENEATH` 行为；⑤新增负向测试证明 generic shell、generic host exec、越界 executable、任意 compiler flags/output/path 仍被拒绝；⑥不扩大 public MCP tool surface。
+```yaml alljobs
+id: GG-BL-030
+work_mode: implementation
+status: blocked
+priority: P1
+phase: maintenance
+done_when: ① 已注册 repo 的 canonical main 可通过 GrandeGPT 一次 closeout 请求完成一组允许的
+  docs/evidence/backlog 修改，并最终在 canonical main read-back；②不依赖 ChatGPT GitHub
+  integration Contents API 写权限；③支持 expected HEAD CAS 与已有文件 expected
+  digest；④dirty canonical、stale HEAD、unauthorized
+  repo/path、non-fast-forward/merge rejection、partial edit failure 全部 fail
+  closed；⑤一次多文件 closeout 只产生一个原子 commit/merge outcome；⑥完整 audit receipt 可读回
+  before/after HEAD、commit/merge SHA、changed files 与 push/merge/read-back 结果；⑦无
+  repo 外写、force push、generic host shell 或 source-code hotfix bypass；⑧自动化覆盖 happy
+  path、stale HEAD、dirty repo、unauthorized repo/path、push/merge rejection、partial
+  edit failure；⑨以 `grande-console` 与 `mathmagics` 的真实 release closeout 复现为
+  E2E，完成 closeout 后从 canonical main 读回验证。
+```
 
-### GG-BL-030 — post-merge release closeout 缺少受控 canonical docs 回写路径
-
-- **Priority**: P1
-- **Status**: BLOCKED
 - **Category**: developer workflow / repository write / release closeout
 - **Problem**: GrandeGPT 已能完成 task worktree 开发、commit、push、PR、merge、deploy 与 verify，但 release 验收后对 `docs/BACKLOG.md`、verification/release evidence、`README.md` 等 canonical truth source 的收尾没有一条明确的一次性 closeout 路径。当前 `grande_repo_edit` 只写 task worktree；若调用方转而依赖 ChatGPT GitHub integration 的 Contents API / merge 权限，则可能因 integration scope 返回 `403 Resource not accessible by integration`，最终退化为 Human Owner 本机 `gh` / shell。虽然可以另开 docs-only task 再走一遍 PR 流程，但这不是 first-class release closeout，且会持续制造额外任务/PR ceremony 与人工误用外部 GitHub integration 的机会。
 - **Evidence / Detail**: 2026-08-25 `grande-console` Pleurat redesign release closeout：implementation、tests、PR、merge、production activation 与 live smoke 已完成，最后仍需要同步 BACKLOG / verification / README；ChatGPT GitHub integration 的写/merge 路径出现 `403 Resource not accessible by integration`，Human Owner 使用本机 `gh` 完成 merge，docs-only closeout 仍暴露同类人工 fallback。2026-08-26 `mathmagics` Phase 6 再次复现：PR #6 已 merge 且 canonical exact-HEAD Host verification 已通过后，`.agent/CURRENT.md` / `.agent/BACKLOG.md` 仍停在 `Host Verification Pending`，只能再创建 `task-mathmagics-phase6-closeout-20260826-001` 与第二个 docs-only PR #7 才能把 release truth 回写 canonical。当前 GrandeGPT contract 也明确 `grande_repo_edit` 只能写 task worktree，不接受 canonical target。
@@ -214,70 +253,144 @@
 - **Audit receipt**: 每次 closeout 至少记录 repo、branch、before HEAD、after HEAD、changed files、每个文件 before/after digest、actor/task/reason、closeout branch/PR（若使用）、commit/merge SHA、push/merge result 与 canonical read-back 结果；失败不得留下“部分已更新但状态显示 DONE”的 receipt。
 - **Related**: `GG-BL-001`（canonical refresh，已 DONE）、`GG-BL-008`（GrandeGPT GitHub credential least-privilege）、`GG-BL-017`（per-repo write lock，已 DONE）、`GG-BL-010`（当前 public tool-contract release gate）、`GG-BL-024`（下一次 Tool Epoch surface convergence）。
 - **Blocked by / sequencing**: production 25-tool contract 在 `GG-BL-010` §7.3 observation 完成前冻结，因此不得为了本项单独修改 public `tools/list` 或 `grande_repo_edit` schema。可以先设计/实现不暴露的新 internal primitive 与测试；用户可调用的 public surface 应与 `GG-BL-024` 下一次正式 Tool Epoch 一并评审和发布，避免额外 tool snapshot/digest churn。
-- **Done when**: ① 已注册 repo 的 canonical main 可通过 GrandeGPT 一次 closeout 请求完成一组允许的 docs/evidence/backlog 修改，并最终在 canonical main read-back；②不依赖 ChatGPT GitHub integration Contents API 写权限；③支持 expected HEAD CAS 与已有文件 expected digest；④dirty canonical、stale HEAD、unauthorized repo/path、non-fast-forward/merge rejection、partial edit failure 全部 fail closed；⑤一次多文件 closeout 只产生一个原子 commit/merge outcome；⑥完整 audit receipt 可读回 before/after HEAD、commit/merge SHA、changed files 与 push/merge/read-back 结果；⑦无 repo 外写、force push、generic host shell 或 source-code hotfix bypass；⑧自动化覆盖 happy path、stale HEAD、dirty repo、unauthorized repo/path、push/merge rejection、partial edit failure；⑨以 `grande-console` 与 `mathmagics` 的真实 release closeout 复现为 E2E，完成 closeout 后从 canonical main 读回验证。
+- **Original status**: BLOCKED
 
-### GG-BL-031 — fresh task worktree / canonical checkout 缺少可靠 dependency bootstrap
+## GG-BL-034: existing external self-host PR 无法纳入 exact-SHA Host Verification / merge lifecycle
 
-- **Priority**: P1
-- **Status**: DONE (2026-08-27)
-- **Category**: developer workflow / dependency bootstrap / sandbox
-- **Problem**: GrandeGPT 的正常 profile execution 假设 task worktree 已具备对应 package-manager dependencies，但 `grande_task_open` 创建 fresh worktree 时不会可靠准备 `node_modules`；task merge/cleanup 后 canonical checkout 也可能没有依赖。结果是 `grande_run(test/lint/build)` 或 formal Host verification 在业务代码尚未运行前直接得到 `vitest/tsc/tsx/eslint/next: command not found`，并把开发闭环退化为 Human Owner 手工安装依赖。
-- **Evidence / Detail**: `mathmagics` Phase 5 首次暴露 fresh-worktree gap：新 task 无 `node_modules`，sandbox 内尝试 `npm ci` / `npm install` / `pnpm import && pnpm install` 无法在正常 job 窗口可靠完成。Phase 6 再次复现：初始 TDD RED 前必须由 Human Host 在 task worktree 执行 `npm ci`；Phase 6 merge 后对 canonical SHA `a0b0c0aa37c882b2c8fd9850a76327f3068b487f` 做 formal verification 时，`vitest`、`tsc`、`tsx`、`eslint`、`next` 五个命令全部 `command not found`，Host `npm ci` 后同一 exact HEAD 的 311 tests / typecheck / curriculum / lint / build 全部 PASS；紧接着 docs-only closeout task `task-mathmagics-phase6-closeout-20260826-001` 的 `grande_run(lint)` 又以 job `job_79b83ace-c029-49cd-a0cd-b686222791f2` / exit 127 复现 `eslint: command not found`。这证明不是单个 task 偶发，而是 task-open 与 canonical verification 两端都缺 dependency readiness contract。
-- **Design direction**: dependency bootstrap 必须成为受控、package-manager/lockfile-aware 的 execution prerequisite，而不是让测试 profile 临时安装。优先按 `(repoId, packageManager identity, lockfile digest, platform/arch/runtime identity)` 建立可信 dependency readiness/cache；task_open 或首次 profile 前可复用经过验证的 prepared dependency tree / package-store closure，lockfile 或 toolchain identity 改变即失效。大型 dependency graph 需要独立较长 bootstrap budget 或可复用 cache，不应挤在普通 test job 的短窗口里。
-- **Security boundary**: 不新增 generic host shell / generic install command / 任意 argv；package manager 与 lockfile 从 registered repo + trusted profile/control-plane 推导。不同 repo 不共享可变 `node_modules`；若共享 package store/cache，必须只作为内容寻址/只读来源并在 task 内建立隔离 dependency tree。生命周期脚本策略必须显式、可审计、与现有 sandbox/attestation threat model 一致，不能为了速度绕过 task isolation。
-- **Related**: `GG-BL-026`、`GG-BL-027`（均已 DONE，解决 toolchain identity 与 `.bin` exec，不解决 dependency provisioning）。
-- **Resolution / verification**: PR #45 在 exact head `df5ca534383bc0650166fb29cd5d5f201e5c68e8` 通过 GitHub CI、attestation 与 exact-SHA Host verification 后合并为 `e2e6ec1df00e16b436fb708fe8c371ba57687d6d`。production activation receipt 读回相同 build、toolset epoch 2、25 tools、digest `sha256:cbe77b4bcd8d81bcbda1253d06feeb643895a92625941d76545a99a38dae4d53`，且 LaunchAgent、endpoint 与 trusted read probe 均正常。MathMagics fresh E2E #1 首次 `grande_run(test)` 进入受控 npm dependency bootstrap（job `job_3fe13741-34f1-493d-b90f-1c0a78b22db1`，identity `4d26b42df2ec517c3eee5dbcac2b3a3b60d749da33c9d49b6f61822a499d62d7`，437 packages，PASS），随后真实 Vitest（job `job_5c300021-aedb-44c6-bd01-3be880361595`，81 files / 384 tests PASS）和 ESLint（job `job_6ec5ca2f-6130-49ba-b7c8-9cbfe1a8b9f0`，PASS）执行成功。第二个独立 fresh worktree 首次 test（job `job_c568354b-ce14-49b1-a4ac-fedd7c9a1be8`）直接由隔离 cache materialization 进入 Vitest并 PASS；两个 worktree 与 cache 的 identity marker 内容及 SHA-256 完全一致，证明相同 lockfile/package-manager/Node/platform/arch identity 被复用且没有共享可变 `node_modules`。
-- **Done when**: ① fresh npm/pnpm task 创建后，无 Human 安装步骤即可运行其 registered test/lint/build profile；② lockfile/package-manager/runtime identity 改变会可靠 invalidation，不复用 stale dependencies；③大依赖图可通过受控长时 bootstrap 或可信 cache 完成，不受普通短 job 窗口限制；④ canonical exact-HEAD Host verification 不再因缺 `node_modules` 退化为 Human bootstrap；⑤ bootstrap 失败被明确报告为 dependency/bootstrap blocker，而不是伪装成 product test failure；⑥不存在跨 repo 可变 dependency tree、generic host exec 或任意 install argv；⑦ attestation/verification evidence 能绑定实际使用的 package-manager + lockfile dependency identity。
+```yaml alljobs
+id: GG-BL-034
+work_mode: implementation
+status: ready
+priority: P1
+phase: maintenance
+done_when: "①已有 external self-host PR 可在 Human 授权下安全 adopt 到 controlled
+  Task；②receipt/attestation/CI/PR head 全部绑定同一 exact SHA；③SHA drift、repo
+  mismatch、dirty/stale state fail closed；④adopt 后继续复用正常 `grande_pr_merge`，不新增
+  bypass merge path；⑤PR #50 场景可不依赖人工 exception 完成。"
+```
 
-### GG-BL-032 — 非 self-host TaskProgress 的 Host Gate 投影与 merge enforcement 不一致，可诱发意外合并
+- **Category**: developer workflow / self-host verification / PR adoption
+- **Problem**: GrandeGPT 当前将 Host Verification receipt 与 `grande_pr_merge` 绑定到 Task-owned branch/worktree。由 Codex、Work mode 或其他外部路径创建的 self-host PR 即使代码、CI 与 review 已满足要求，也没有合法方式绑定到现有 Task，因此无法通过正常 exact-SHA Host Verification receipt 与 merge gate。
+- **Evidence / Detail**: GitHub issue #51。PR #50 `codex/gg-bl-033-ci-baseline` 的 exact head `7d431ba8e6863d6d0f23671786af1f74a0ac1c35` 无法绑定到当时 active self-host task；现有 task HEAD 为另一分支 SHA，继续验证会验证错误 commit。最终只能采用 Human Owner 明确授权的 external-PR exception 完成 closeout。
+- **Design direction**: 增加 fail-closed 的 existing-PR adoption 机制，只允许显式用户授权的 registered self-host repo PR。adoption 必须绑定 PR number + exact remote head SHA + controlled task/worktree，并重新校验 repo ownership、cleanliness、remote PR head、CI、attestation 与 current canonical relation；不得演化为 generic arbitrary-branch merge path。
+- **Security boundary**: 不接受任意 repo/path/branch；不得跳过 attestation、CI、exact-SHA Host receipt 或现有 `grande_pr_merge` gate；PR head 漂移、repo 不匹配、dirty worktree、stale canonical 或无法证明 ownership 时全部 fail closed。
+- **Related**: `GG-BL-013`（exact-SHA Host gate，DONE）、`GG-BL-030`（canonical closeout path）、`GG-BL-033`（触发本缺口的 canonical CI repair）。
+- **Next**: 先设计最小 adoption primitive 与 RED tests，覆盖 external PR happy path、SHA drift、repo mismatch、dirty worktree、stale attestation、wrong-task binding。保持 public MCP surface 不变，除非与下一次正式 Tool Epoch 一并发布。
+- **Original status**: OPEN
 
-- **Priority**: P0
-- **Status**: OPEN
-- **Category**: verification integrity / task progress / merge safety
-- **Problem**: `planTaskHostVerification()` / TaskProgress 会按 changed-file risk 对所有 registered repo 投影 `Host smoke|full/required`，并在 auto mode 给出 `nextAction = 调用 grande_pr_merge 创建或观察当前 exact-SHA host verifier`；但 `src/prLifecycle.ts` 的 receipt enforcement 被 `if (state.task.repoId === "grande-gpt")` 限定为 self-host repo。对于 `mathmagics` 等非 self-host task，状态层宣称存在 Host Gate，merge 层却不检查该 receipt，也不会创建 verifier。这会让 agent 在“只是启动/观察 verifier”的预期下调用 destructive merge，并立即合并 PR。
-- **Evidence / Detail**: 2026-08-26 `task-mathmagics-phase6-design-20260825-001` / PR #6，head `7a92b5955979849274a3d12703582c5848e8f1a7`。merge 前 `grande_task_status` 明确返回 `developmentRisk=L3`、`hostVerification.requiredLevel=full`、`manualOnlyRequired=false`、`receiptEligible=false`、`state=required`、`jobId=null`，`nextAction` 为“直接调用 grande_pr_merge 创建或观察当前 exact-SHA host verifier”；`grande_pr_status` 显示 PR mergeable、CI=none、current SHA attested。随后第一次 `grande_pr_merge` 没有返回 `merged:false + verification job/state`，而是直接 `merged:true`，merge SHA `a0b0c0aa37c882b2c8fd9850a76327f3068b487f`，并清理/关闭 task。代码 forensic 证据与运行结果吻合：`src/prLifecycle.ts` 只有 `state.task.repoId === "grande-gpt"` 才调用 `inspectCurrentHostVerification()`；而 `src/taskProgress.ts` / `src/deliveryTarget.ts` 对 `host.state === "required"` 无 repo-awareness，统一指导调用 merge 启动 verifier。现有 `hostVerificationProductionWiring` 测试也只覆盖 grande-gpt self-host fixture，没有非 self-host 对称测试。
-- **Impact**: 这不是证明自动 Host Verifier 本身错误执行，而是 **status contract 与 destructive merge contract 不一致**。它会制造未经预期确认的合并，并让 Human/agent 误以为 required Host verification 是 merge gate；merge 后 task cleanup 还会丢失原 task verifier continuation 上下文。事后在 canonical SHA 上手工 Host 验证即使 PASS，也不能倒推证明 pre-merge gate 曾被满足。
-- **Design decision required**: 必须明确一种一致语义并全链路执行：A) Host verification 只属于 `grande-gpt` self-host，则非 self-host `task_status` 不得投影 `required`/verifier nextAction；或 B) L2/L3 host verification 是所有 repo 的真实 merge gate，则必须有 repo-specific trusted host plan/profile，且 `grande_pr_merge` 对所有启用该 gate 的 repo fail closed。不能继续保持“状态层按 B 展示、merge 层按 A 执行”。
-- **Immediate safety preference**: 在完成正式设计前优先 fail closed：任何 TaskProgress 已宣告 `hostVerification.state=required|manual-required|running|failed` 的 PR，不得由同一状态投影指导一次可能直接 merge 的调用；若 merge gate 不支持该 repo 的 verifier，状态应明确 `not-applicable` 或显式 blocker，而不是伪造 continuation。
-- **Related**: `GG-BL-013`（exact-SHA Host gate，已 DONE）、`GG-BL-022`（PR/verifier continuation，已 DONE）、`GG-BL-023`（risk classifier，已 DONE）。本项是这些已完成 primitive 在非 self-host repo 组合时出现的契约断裂，不应重开旧 ID。
-- **Next**: 增加一个 `mathmagics`/generic registered repo fixture，先写 RED 同时锁住 `task_status` 与 `pr_merge` 的一致性；明确 Host Verification 的 repo policy/source of truth，再做最小修复。不要通过删除 risk classification、绕过 attestation、或让 agent“记住不要调用 merge”来缓解。
-- **Done when**: ①同一 task 的 `task_status.hostVerification` 与 `grande_pr_merge` enforcement 永远同源一致；②若 status 为 `required` 且 `receiptEligible=false`，第一次 merge 调用绝不可能返回 `merged:true`，只能返回 verifier continuation / manual gate /明确 unsupported blocker；③若非 self-host 不适用 Host gate，status 必须为 `not-required/not-applicable` 且不得出现“调用 merge 创建 verifier”的 nextAction；④增加非 self-host L1/L2/L3 回归与 grande-gpt self-host 回归，证明两类 repo 都不会语义漂移；⑤task cleanup 仅在所有实际 merge gates 满足且 merge 成功后发生；⑥tool description、TaskProgress、deliveryTarget nextAction、merge runtime 行为保持一致；⑦以 `mathmagics` PR #6 复现场景做 regression，旧实现应 RED、修复后不得意外 merge。
+## GG-BL-011: `grande_repo_search` 的 truncated 信号曾被忽略
 
-## Observations
+```yaml alljobs
+id: GG-BL-011
+work_mode: implementation
+status: idea
+priority: P2
+phase: maintenance
+done_when: 重复证据足以升格工程项，或长期无复现后由 Human Owner 明确归档。
+```
 
-### GG-BL-011 — `grande_repo_search` 的 truncated 信号曾被忽略
-
-- **Priority**: OBS
-- **Status**: OBSERVATION
 - **Category**: agent UX
 - **Problem**: 曾有一次模型收到 `truncated + nextCursor` 后没有继续分页。
 - **Next**: 收集重复样本；若成为稳定失败模式，再考虑 guidance/UI 改善。
-- **Done when**: 重复证据足以升格工程项，或长期无复现后由 Human Owner 明确归档。
+- **Original priority**: OBS
+- **Original status**: OBSERVATION
 
-### GG-BL-012 — `/.well-known/openid-configuration` 返回 404
+## GG-BL-012: `/.well-known/openid-configuration` 返回 404
 
-- **Priority**: OBS
-- **Status**: OBSERVATION
+```yaml alljobs
+id: GG-BL-012
+work_mode: implementation
+status: idea
+priority: P2
+phase: maintenance
+done_when: 出现真实需要后实现并验证兼容，或确认长期无需支持并由 Human Owner 归档。
+```
+
 - **Category**: OAuth compatibility
 - **Problem**: ChatGPT/其他客户端可能探测 OIDC discovery path；GrandeGPT 当前提供 OAuth authorization-server metadata，现有 OAuth 流程正常，但该路径仍为 404。
 - **Next**: 仅在真实客户端兼容性要求出现时评估别名/兼容端点。
-- **Done when**: 出现真实需要后实现并验证兼容，或确认长期无需支持并由 Human Owner 归档。
+- **Original priority**: OBS
+- **Original status**: OBSERVATION
 
-## Not backlog
+## GG-BL-029: 受控 macOS native build / execution 缺少 Darwin toolchain dependency closure
 
-以下内容**不要**重复创建 backlog：
+```yaml alljobs
+id: GG-BL-029
+work_mode: implementation
+status: done
+priority: P1
+phase: maintenance
+```
 
-- `CLAUDE.md` 的 **已接受的风险**：明确取舍，不是待办；除非 Human Owner 重新打开决策。
-- `package.json` 的 `postinstall/prepare` 宿主执行风险：当前是已知且有意保留的安全/可用性取舍；若威胁模型变化再建立新 ID。
-- 已修复并有验证证据的历史事故（token epoch、loopback bind、schema arg validation、outer-test 等）：保留历史记录，不重新进入 Active。
-- research 文档中的旧 priority/status：只作为当时快照，当前状态以本文件为准。
+- **DONE date**: 2026-08-24
+- **Fix**: PR #38 / #39 补齐 trusted `darwin-clang` 所需的最小只读 Developer Tools selector closure；PR #40 增加 trusted-profile-only、repo-relative exact `nativeExecTargets`，允许同一 sandbox job 编译并执行固定 native artifact。没有开放 generic shell / generic host exec、任意 executable、`/var` subtree 或 public MCP surface。
+- **GrandeGPT evidence**: PR #38 merge `0f29af634f138dcc141ca9c1f1c01c72fb6d2661`；PR #39 merge `9e51252e0e387c496d3c1cd9772545728da15bed`；PR #40 merge `af30bc3ab9b2966685973b4a876e6c42711ae09c`；PR/canonical CI PASS，production activation 已完成。
+- **Real consumer evidence**: `grande-obsidian-mcp` Phase 3 PR #4 在 GrandeGPT 受控路径中完成固定 Darwin helper 编译/执行，真实验证 `RENAME_EXCL | RENAME_NOFOLLOW_ANY | RENAME_RESOLVE_BENEATH`；14 test files / 104 tests PASS，并完成 target-overwrite load-bearing proof。Phase 3 live S5 acceptance 后续 PASS，PR #6 正式记录 PASSED/CLOSED。
+- **Done evidence**: 原始 P3-0 `clang → xcode-select → /var/select/developer_dir → EPERM` sandbox/toolchain blocker 已不再存在；真实消费方已越过编译器初始化并完成目标 native 行为验证，同时安全边界未扩大。
+- **Original status**: DONE
 
-## Archive
+## GG-BL-031: fresh task worktree / canonical checkout 缺少可靠 dependency bootstrap
 
-### GG-BL-028 — mutable profile registry 污染 `toolsDigest`
+```yaml alljobs
+id: GG-BL-031
+work_mode: implementation
+status: done
+priority: P1
+phase: maintenance
+```
 
-- **Priority**: P1
-- **Status**: DONE
+- **DONE date**: 2026-08-27
+- **Task / PR**: `task-gg-bl-031-bootstrap-triggering-20260827-001` / PR #45
+- **Fix**: 完成受控 dependency bootstrap triggering 与隔离 cache materialization，使 fresh npm/pnpm worktree 首次 profile execution 可自动准备依赖；identity 绑定 package manager、lockfile、Node/platform/arch，避免跨 repo 共享可变 `node_modules`。
+- **Verification evidence**: exact head `df5ca534383bc0650166fb29cd5d5f201e5c68e8`；GitHub CI、attestation、exact-SHA Host verification PASS；merge SHA `e2e6ec1df00e16b436fb708fe8c371ba57687d6d`。production activation receipt 读回同 build / epoch 2 / 25 tools；MathMagics 两个 fresh worktree 真实 E2E 均无需 Human `npm ci`，第二个 worktree 命中隔离 cache 并直接进入 Vitest。
+- **Original status**: DONE
+
+## GG-BL-032: host verification applicability policy
+
+```yaml alljobs
+id: GG-BL-032
+work_mode: implementation
+status: done
+priority: P0
+phase: maintenance
+```
+
+- **DONE date**: 2026-08-28
+- **Task / PR**: `task-gg-bl-032-host-verification-20260828-001` / PR #49
+- **Root cause**: `taskProgress` 对所有 registered repo 投影 Host Verification requirement，但 `prLifecycle` 只对 `grande-gpt` self-host 强制 receipt，导致非 self-host status contract 与 destructive merge enforcement 不一致。
+- **Fix**: 建立共享 `isHostVerificationApplicable(repoId)` policy/source-of-truth。非 self-host repo 直接投影 `requiredLevel=none`、`state=not-required`、`receiptEligible=true`，不调用 Host inspector、不进入 host-verification phase；`prLifecycle` 复用同一 policy。
+- **Verification evidence**: final exact head `c5552eab531777d16fd58a85292b9233c29ea77c`；`unit-selfhost` 130 files / 939 PASS / 2 skipped；typecheck PASS；attestation `att_e18e8222-2e48-49fe-b488-ef466f601856`；Ubuntu CI GREEN；macOS Seatbelt 因 paths filter 不适用；independent review APPROVE；manual trusted Host suite 11 files / 187 PASS。
+- **Release evidence**: merge SHA `6b459fed0d5b19998e192b54dd50a6c9f1fce399`；canonical main 同 SHA；post-merge main CI GREEN。
+- **Original status**: DONE
+
+## GG-BL-033: canonical main CI portability baseline
+
+```yaml alljobs
+id: GG-BL-033
+work_mode: implementation
+status: done
+priority: P0
+phase: maintenance
+```
+
+- **DONE date**: 2026-08-28
+- **PR**: #50
+- **Problem**: canonical main CI 在 Ubuntu 与 GitHub-hosted macOS 上因 macOS-only `/bin/cp -Rc`、platform-specific CLI expectations、Seatbelt PATH/runtime resolution 以及 stale historical toolsDigest fixture 失败，阻塞后续 self-host exact-SHA merge gates。
+- **Fix**: 用共享 Node native copy helper 替换 `/bin/cp -Rc` 并保留 relative symlink text；将 doctor/gateway tests 改为 platform-aware contract；把 active Node root 放到 sandbox PATH 首位而不扩大 exec roots/permissions；更新 GG-BL-028 后已过期的 pinned toolsDigest fixture。
+- **Verification evidence**: final exact head `93bdfdd119a20bbddf1b2fda8bcf44d0c57ec83b`；targeted `tools.test.ts` 53 PASS；typecheck PASS；trusted Host suite 11 files / 187 PASS；Ubuntu `verify` GREEN；macOS `seatbelt-dns` GREEN；independent review APPROVE（symlink blocker 修复后仅做 proportional re-review）。
+- **Release evidence**: merge SHA `1d96292dfaa9b6f1dfa01e55be6fd436467af067`；canonical main 同 SHA 后 Ubuntu CI / macOS Seatbelt GREEN。该 PR 暴露的 external existing self-host PR adoption gap 独立记录为 `GG-BL-034` / GitHub issue #51。
+- **Original status**: DONE
+
+## GG-BL-028: mutable profile registry 污染 `toolsDigest`
+
+```yaml alljobs
+id: GG-BL-028
+work_mode: implementation
+status: done
+priority: P1
+phase: maintenance
+```
+
 - **DONE date**: 2026-08-27
 - **Task / PR**: `task-gg-bl-028-digest-stability-20260827-002` / PR #47
 - **Root cause**: runtime registered repo/profile state 曾进入 `grande_run.inputSchema.properties.profile.description`，而 `inputSchema` 属于 `toolsDigest` hash contract，导致 same-build / same-epoch / same-count 下 registry mutation 可改变 digest。
@@ -286,156 +399,317 @@
 - **Release evidence**: exact head `0956ea206bcb0bea69d051afb0ee74e3e554dfbe`；GitHub CI PASS；exact-SHA Host smoke PASS；merge SHA `e9e6a4da50da91004e82154b73837463bf611e08`。
 - **Production evidence**: build `git:e9e6a4da50da91004e82154b73837463bf611e08`；`toolsetEpoch=2`；`toolsCount=25`；`toolsDigest=sha256:7f2390e540b4311f9e3f70b890239460bf0c63e770e3c2e45f227dac41dcb7da`；activation receipt eligibility 已证明 runtime build/tool identity、LaunchAgent/endpoint readiness 与 trusted read probe HTTP 200 全部一致。
 - **Related**: `GG-BL-010`、`GG-BL-024`、`GG-BL-030`。
+- **Original status**: DONE
 
-### GG-BL-026 — npm repo 的 verification attestation 错误绑定 pnpm toolchain
+## GG-BL-026: npm repo 的 verification attestation 错误绑定 pnpm toolchain
 
-- **Priority**: P0
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-026
+work_mode: implementation
+status: done
+priority: P0
+phase: maintenance
+```
+
 - **DONE date**: 2026-08-24
 - **Task / PR**: `task-npm-compat-20260824-001` / PR #35
 - **Fix**: 新增窄 `packageManagerIdentity` primitive；verification identity 显式记录 `packageManager / packageManagerVersion / lockfile / lockfileSha256`，支持 pnpm 与 npm；冲突、缺对应 lockfile、unsupported manager fail closed；legacy pnpm attestation/receipt 保持只读兼容。ordinary attestation、trusted Host Verifier、V2 receipt 共用同一 identity 语义。
 - **Verification evidence**: exact candidate `585ead9a990728625576801e240e332cbf592233`；fresh `unit-selfhost` **118 files / 888 tests PASS**、`typecheck` PASS、GitHub Actions PASS；manual Host outer-test **10 files / 176 tests PASS**；PR #35 merge SHA `b2da29a954f9453622f7455387da2bb3c7bd2de2`；production activation receipt 已读回 `targetBuild = runtimeBuild = git:b2da29a954f9453622f7455387da2bb3c7bd2de2`、`toolsetEpoch=2`、`toolsCount=25`、`toolsDigest=sha256:ce3a7107fd8861f5816b94bda803dd9bdae5059d25cf14627ae8fbde49b31227`，LaunchAgent running、endpoint ready、read probe HTTP 200。
+- **Original status**: DONE
 
-### GG-BL-027 — npm `node_modules/.bin` symlink target 被 Seatbelt `process-exec` 拒绝
+## GG-BL-027: npm `node_modules/.bin` symlink target 被 Seatbelt `process-exec` 拒绝
 
-- **Priority**: P1
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-027
+work_mode: implementation
+status: done
+priority: P1
+phase: maintenance
+```
+
 - **DONE date**: 2026-08-24
 - **Task / PR**: `task-npm-compat-20260824-001` / PR #35
 - **Fix**: `runSandboxed()` 从当前 worktree 根部 `node_modules/.bin` 重新枚举 symlink，只接受 `realpath` 后仍位于本 worktree `node_modules` 内的普通文件，并把真实 target 作为 exact `literal process-exec` allow；`buildProfile()` 再做 containment 校验。没有放开整个 `node_modules` 或 worktree。
 - **Verification evidence**: trusted Host suite 验证 npm-style `.bin -> node_modules/<pkg>/...` 正向执行、越界 target 拒绝、worktree 其他 executable 拒绝，并包含 load-bearing A/B proof：去掉 exact-target allow 时同一 npm case 重新得到 `Operation not permitted`。同一 exact candidate `585ead9a990728625576801e240e332cbf592233` 完成 `unit-selfhost` **118/888 PASS**、`typecheck`、GitHub Actions、Host **10/176 PASS**；PR #35 merge SHA `b2da29a954f9453622f7455387da2bb3c7bd2de2`，随后 production activation 到该 merge SHA。
+- **Original status**: DONE
 
-### GG-BL-001 — PR 已 merge，但 local canonical `main` 仍旧
+## GG-BL-001: PR 已 merge，但 local canonical `main` 仍旧
+
+```yaml alljobs
+id: GG-BL-001
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
 - **Fix**: S16 引入受控 canonical refresh：固定 registered repo、origin/current canonical branch、clean precondition、fetch+compare+fast-forward-only；dirty/diverged fail closed；`task_open` 基于 refresh 后 canonical。
 - **Verification evidence**: canonical refresh / task-open 行为与 fail-closed 测试纳入 Phase 5.5 gates。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-002 — `grande gateway restart` 非 failure-safe
+## GG-BL-002: `grande gateway restart` 非 failure-safe
+
+```yaml alljobs
+id: GG-BL-002
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
 - **Fix**: loaded restart 使用 `kickstart -k`；unloaded bootstrap error 5 有限重试；restart success 前等待 endpoint readiness，并暴露 runtime identity。
 - **Verification evidence**: fresh `unit-selfhost`/typecheck；S17 production acceptance 10/10 restart 全绿。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-003 — `grande_sync_base` 方向与 `up-to-date` 文案误导
+## GG-BL-003: `grande_sync_base` 方向与 `up-to-date` 文案误导
+
+```yaml alljobs
+id: GG-BL-003
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
 - **Fix**: contract 明确 canonical → task，绝不修改 canonical；relation 为 `equal/task_ahead/canonical_ahead/diverged`。
 - **Verification evidence**: task-ahead / canonical-ahead / diverged 行为回归纳入 Phase 5.5 tests。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-004 — Merge 与 production runtime activation 仍是两步
+## GG-BL-004: Merge 与 production runtime activation 仍是两步
+
+```yaml alljobs
+id: GG-BL-004
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Phase / task**: Phase 5.5 / `task-p55-20260819-001`
 - **Fix**: release activation evidence 显式化，通过 `gatewayBuild/toolsetEpoch/toolsCount/toolsDigest` 识别实际 runtime，不再把 merged 等同于 activated。
 - **Verification evidence**: S17 10/10 restart acceptance 与真实 read probes；后续由 GG-BL-019 durable activation receipt 完整收敛。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-005 — GC 看不到 `CLOSED` 但 worktree 残留
+## GG-BL-005: GC 看不到 `CLOSED` 但 worktree 残留
+
+```yaml alljobs
+id: GG-BL-005
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Task**: `task-p1-20260822-001`
 - **Fix**: 增加 `closedResidualWorktrees` reconciliation，受管 path + current-state recheck + existing `removeWorktree`，Gateway 启动只报告不自动删除。
 - **Verification evidence**: real Git worktree fixtures；candidate `unit-selfhost` 98 files / 827 tests PASS、`typecheck` PASS。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-013 — Host outer-test 自动形成 exact-SHA merge gate
+## GG-BL-013: Host outer-test 自动形成 exact-SHA merge gate
+
+```yaml alljobs
+id: GG-BL-013
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Phase / task**: Phase 5.5 S18，后续由 Reliability & Automated Host Verifier supersede
 - **Fix**: exact-SHA/current-plan Host receipt gate，后升级为 controlled automatic Host Verifier；manual CLI 保留为受信 fallback/manual-only Human Gate。
 - **Verification evidence**: receipt persistence/expiry、restricted async verifier、Receipt V2、startup reconciliation 与 bounded infra retry；production controlled auto mode 已 activation。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-014 — 长任务可能在只读分析后静默停滞
+## GG-BL-014: 长任务可能在只读分析后静默停滞
+
+```yaml alljobs
+id: GG-BL-014
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Task**: `task-p1-20260822-001`
 - **Fix**: `TaskProgress` 增加只读 liveness projection，不写 heartbeat、不新增生命周期状态；stalled 不伪装 blocker。
 - **Verification evidence**: deterministic regression；candidate `unit-selfhost` 98 files / 827 tests PASS、`typecheck` PASS。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-015 — Auto Verifier 缺少最小可信运行可观察性
+## GG-BL-015: Auto Verifier 缺少最小可信运行可观察性
+
+```yaml alljobs
+id: GG-BL-015
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Phase / task**: Phase 6 S19 / `task-p6-20260822-001`
 - **Fix**: `grande_task_status` 增加 trusted host-verifier operational snapshot，无新 MCP tool/metrics store/queue。
 - **Verification evidence**: behavior tests；Phase 6 code gate 97 files / 817 tests PASS、`typecheck` PASS。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-016 — Auto Verifier 失败分类与升级语义不完整
+## GG-BL-016: Auto Verifier 失败分类与升级语义不完整
+
+```yaml alljobs
+id: GG-BL-016
+work_mode: implementation
+status: done
+priority: P2
+phase: maintenance
+```
 
 - **DONE date**: 2026-08-22
 - **Phase / task**: Phase 6 S20 / `task-p6-20260822-001`
 - **Fix**: `candidate | infrastructure | integrity` failure taxonomy；bounded infra retry、integrity zero-retry fail closed、SHA isolation。
 - **Verification evidence**: load-bearing tests；Phase 6 code gate 97 files / 817 tests PASS、`typecheck` PASS。
+- **Original priority**: (missing)
+- **Original status**: (missing)
 
-### GG-BL-007 — Control-plane backup、SQLite migration 与 restore 路径不完整
+## GG-BL-007: Control-plane backup、SQLite migration 与 restore 路径不完整
 
-- **Priority**: P1
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-007
+work_mode: implementation
+status: done
+priority: P1
+phase: phase-7
+```
+
 - **DONE date**: 2026-08-23
 - **Phase / task**: Phase 7 / `task-p7-20260822-001`
 - **Fix**: ordered 5→6 migration、verified pre-migration backup、transaction rollback、managed backup root/retention、dry-run Human restore、ordinary backup excludes `secrets/`。
 - **Verification evidence**: real version-5 fixtures；Phase 7 exact candidate 109/859 PASS、typecheck PASS、PR #22 CI/Host gates PASS。
+- **Original status**: DONE
 
-### GG-BL-017 — Gateway / CLI 缺少跨进程 repo write lock
+## GG-BL-017: Gateway / CLI 缺少跨进程 repo write lock
 
-- **Priority**: P1
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-017
+work_mode: implementation
+status: done
+priority: P1
+phase: phase-7
+```
+
 - **DONE date**: 2026-08-23
 - **Phase / task**: Phase 7 / `task-p7-20260822-001`
 - **Fix**: trusted control-root per-repo cross-process lock，live PID busy fail closed、ESRCH stale recovery、malformed metadata fail closed、nonce ownership release；Gateway writes 与 Git/worktree-writing CLI 共用。
 - **Verification evidence**: two-process behavior tests；Phase 7 exact candidate 109/859 PASS、typecheck/CI/Host PASS。
+- **Original status**: DONE
 
-### GG-BL-018 — GrandeGPT 自身缺少最小独立 CI gate
+## GG-BL-018: GrandeGPT 自身缺少最小独立 CI gate
 
-- **Priority**: P1
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-018
+work_mode: implementation
+status: done
+priority: P1
+phase: phase-7
+```
+
 - **DONE date**: 2026-08-23
 - **Phase / task**: Phase 7 / `task-p7-20260822-001`
 - **Fix**: pinned macOS GitHub Actions CI，Node 24、pnpm 10.33.0、frozen lockfile、selfhost-safe tests、typecheck、focused tool-contract checks。
 - **Verification evidence**: final exact PR head `bb9091d96ea6b0cf2197c473e0556e53cbcc68aa` Actions run PASS；Host 10/171 PASS。
+- **Original status**: DONE
 
-### GG-BL-019 — Production activation 缺少 durable evidence / receipt
+## GG-BL-019: Production activation 缺少 durable evidence / receipt
 
-- **Priority**: P1
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-019
+work_mode: implementation
+status: done
+priority: P1
+phase: phase-7
+```
+
 - **DONE date**: 2026-08-23
 - **Phase / task**: Phase 7 / `task-p7-20260822-001`
 - **Fix**: durable activation receipt 绑定 target/runtime build、toolset epoch/count/digest、activation time、LaunchAgent/endpoint readiness 与 trusted read probe；mismatch fail closed。
 - **Verification evidence**: Phase 7 activation receipt 跨会话成功读回；Phase 8 再次使用同一路径并读回 build `217a2dadc2887046decdeb9ab3c2813060ae7d97`，证明机制持续有效。
+- **Original status**: DONE
 
-### GG-BL-020 — Task 缺少 delivery-target projection
+## GG-BL-020: Task 缺少 delivery-target projection
 
-- **Priority**: P2
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-020
+work_mode: implementation
+status: done
+priority: P2
+phase: phase-8
+```
+
 - **DONE date**: 2026-08-23
 - **Phase / task**: Phase 8 / `task-p8-20260823-001`
 - **Fix**: 新增内部 `DeliveryTarget = local | pr | deploy` domain primitive 与 TaskProgress projection，基于可信现有 evidence/default 解析目标并屏蔽无关阶段，重新计算单一 blocker/nextAction。Phase 8 按批准的 no-tool-epoch 范围**未**改变 public TaskBrief schema；public explicit target 选择和外部副作用扩大确认移交 `GG-BL-024`。
 - **Verification evidence**: delivery-target regressions 覆盖 local masking、PR 不要求 deploy、deploy 缺可信 spec fail closed、PR opened 后直达 merge action；Phase 8 exact candidate 112/871 PASS、typecheck/CI/Host PASS，production activation readback PASS。
+- **Original status**: DONE
 
-### GG-BL-021 — 短 job 普遍需要 `grande_run → grande_run_result` 两次调用
+## GG-BL-021: 短 job 普遍需要 `grande_run → grande_run_result` 两次调用
 
-- **Priority**: P2
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-021
+work_mode: implementation
+status: done
+priority: P2
+phase: phase-8
+```
+
 - **DONE date**: 2026-08-23
 - **Phase / task**: Phase 8 / `task-p8-20260823-001`
 - **Fix**: `grande_run` response layer 使用现有 `waitForTerminalJob` 最多观察 5 秒；预算内直接返回 terminal result，超预算返回稳定 jobId + poll hint；runner 仍拥有进程 lifecycle，artifact/shutdown/timeout/RSS/recovery 语义不变。
 - **Verification evidence**: short/slow regressions；Host `tools.host.test.ts` 同时验证长 job bounded wait 与短 job first-call terminal；Phase 8 Host 10 files / 172 tests PASS。
+- **Original status**: DONE
 
-### GG-BL-022 — 正常 PR / verifier 流程存在不必要状态往返
+## GG-BL-022: 正常 PR / verifier 流程存在不必要状态往返
 
-- **Priority**: P2
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-022
+work_mode: implementation
+status: done
+priority: P2
+phase: phase-8
+```
+
 - **DONE date**: 2026-08-23
 - **Phase / task**: Phase 8 / `task-p8-20260823-001`
 - **Fix**: TaskProgress PR projection 不再把预先 `pr_status` 当强制阶段；正常路径直接进入 `grande_pr_merge`，blocker 后才按需诊断。merge authority/exact-SHA checks 保持在 merge gate，verifier/runner 不获得 merge 权限。
 - **Verification evidence**: PR #25 dogfood：direct merge → CI pending blocker → on-demand status → merge re-entry → real manual-only Host gate → receipt 后再次 merge；最终 PR #25 成功 merge，证明 continuation 减少往返但安全 gate 未退化。
+- **Original status**: DONE
 
-### GG-BL-023 — 开发风险等级未正式落地，普通修改流程过重
+## GG-BL-023: 开发风险等级未正式落地，普通修改流程过重
 
-- **Priority**: P2
-- **Status**: DONE
+```yaml alljobs
+id: GG-BL-023
+work_mode: implementation
+status: done
+priority: P2
+phase: phase-8
+```
+
 - **DONE date**: 2026-08-23
 - **Phase / task**: Phase 8 / `task-p8-20260823-001`，closeout correction `task-p8-closeout-20260823-001`
 - **Fix**: 新增 `DevelopmentRiskLevel = L1 | L2 | L3` classifier；文档/非运行资源 L1、普通源码 L2、sandbox/runner/auth/gateway/host-verifier/merge/deploy/tools 等关键边界 L3，未知路径 fail closed 到 L3。`CLAUDE.md` 将对应 ceremony 写成 coding-agent 硬约束。Closeout dogfood 发现 root `CLAUDE.md` 未列入 L1 文档集合而被误判 L3，随后以最小 source/test correction 显式加入并增加回归，不扩展未知路径白名单。
 - **Verification evidence**: classifier regressions + 与 existing host classifier 的 L1→none、L2→smoke、L3→full 对齐证明；Phase 8 implementation 走 L3 full/manual Host gate。Closeout 的文档 diff 首先真实暴露 `CLAUDE.md` 漏项，修复后因包含 classifier source/test correction 合理成为 L2，而不是继续承担错误的 L3 ceremony；该 correction 必须通过本任务 fresh verification/CI/merge 后才进入 canonical。
+- **Original status**: DONE
