@@ -111,12 +111,10 @@ done_when: 当前权威入口不会把读者导向旧能力结论，历史文件
 ```yaml alljobs
 id: GG-BL-010
 work_mode: implementation
-status: doing
+status: done
 priority: P0
 phase: maintenance
-done_when: "**跨客户端两任务** formal matrix 三次全绿，随后 7 天 / ≥5 ordinary conversations 无
-  unexplained disablement，或获得可控根因并证明长期稳定后再转 DONE。formal matrix 已满足；当前仍保持
-  MITIGATED，等待 observation 完成。"
+done_when: "Human Owner 于 2026-08-30 明确接受剩余 observation 风险并授权关闭。§7.2 cross-client formal matrix 已 3/3 PASS；§7.3 ordinary-use observation 未按原 frozen-identity 条件完整证明，因此本次 DONE 是显式 residual-risk acceptance，不代表该 observation 被补写为 PASS。"
 ```
 
 - **Category**: reliability / ChatGPT App session binding
@@ -127,8 +125,9 @@ done_when: "**跨客户端两任务** formal matrix 三次全绿，随后 7 天 
 - **2026-08-23 Phase 8 evidence**: Phase 8 在不改变 25-tool identity 的情况下完成大量真实 status/read/edit/run/PR/merge 调用并成功 activation，说明 flow simplification 可独立发布；这**不等于** binding drift 已根因关闭。
 - **2026-08-23 target-client capability evidence**: OpenAI Help Center 当日公开说明仍写 custom/full MCP apps mobile unavailable / web only，但 Human Owner 当前 ChatGPT iOS 原生会话可以真实连续调用 GrandeGPT direct tools。平台文档与实际 rollout/account/product-path 存在冲突；本项目 release gate 因此以目标客户端真实 capability 为准。当前 iOS capability 已确认，所以本轮 formal matrix 仍包含 iOS。
 - **2026-08-23 formal matrix evidence**: `C-Web-1 + C-iOS + C-Web-2` 已 **3/3 PASS**。三次运行均在 frozen `toolsetEpoch=2` / `toolsCount=25` / digest `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815` 下完成 same-conversation two-task gate，无 unexplained disabled / Resource not found / unexpected formal-path 401 / Gateway restart / identity drift；详见 C-Web-1、C-iOS、C-Web-2 独立 evidence。另有 `C-macOS-App supplemental validation: PASS`，只作为额外客户端覆盖，不改变 formal matrix 组成。
-- **Remaining**: §7.2 formal matrix 已完成。现在只剩 §7.3 **7-day ordinary-use observation**：至少 5 个普通 conversation、每个 conversation 至少 2 个真实用户任务，覆盖 Web 与当前实际 capability-supported 的 iOS；只保留 redacted telemetry summary，7 天内不得出现 unexplained disablement，并要求 frozen formal identity 仍成立。该 Remaining 同时构成 Phase 9 public Tool Epoch 的 release gate。
-- **Escalation**: 若在 frozen identity / under-budget 条件下出现两个独立、当前 epoch、证据完整的 pre-Gateway disable 样本，且失败调用未到 Gateway、无 401/restart/identity change，则停止继续通过 server payload/OAuth/annotations/tools-list 试探，转 `BLOCKED — ChatGPT platform/session binding boundary` 并附完整证据。
+- **DONE date**: 2026-08-30
+- **Closeout decision**: Human Owner 明确授权先关闭 `GG-BL-010`。此前 §7.3 要求的 7-day ordinary-use observation 没有形成足以证明“≥5 conversations、每个 ≥2 real tasks、Web+iOS coverage 且 frozen formal identity 仍成立”的完整 evidence ledger；当前 production build/digest 也已不同于 formal matrix 的 frozen identity。因此这里记录的是 **owner-accepted residual risk**，不是把缺失证据倒推成 PASS。
+- **Residual risk**: 既有 server-side mitigations、formal matrix 3/3 PASS 与 macOS supplemental PASS 继续作为有效证据；若未来再次出现 unexplained `tool disabled` / `Resource not found` / pre-Gateway binding failure，应重新打开本项或建立明确 related incident，而不是假设本次 owner closeout 已证明平台根因消失。
 - **Original status**: MITIGATED
 
 ## GG-BL-024: 下一次 Tool Epoch 收敛公开 MCP surface

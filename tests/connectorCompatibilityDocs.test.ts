@@ -38,7 +38,7 @@ describe("ChatGPT connector compatibility operational contract", () => {
     expect(text).toContain("server-side");
   });
 
-  it("records exact candidate host evidence while keeping the remaining cross-client gate explicit", () => {
+  it("records exact candidate host evidence and preserves the explicit owner-risk closure of GG-BL-010", () => {
     const backlog = read("docs/BACKLOG.md");
     const runbook = read("docs/chatgpt-connector-compatibility-runbook.md");
     const candidateCommit = "7b98f7dce2f0b10723b29be64ca28e1438f1a779";
@@ -56,9 +56,12 @@ describe("ChatGPT connector compatibility operational contract", () => {
     expect(runbook).toContain("JSON.stringify(toMcpTextResult(envelope))");
     expect(runbook).toMatch(/SDK-generated[\s\S]{0,160}outputBytes=unknown/i);
 
-    const incident = backlog.match(/### GG-BL-010[\s\S]*?(?=\n### |\s*$)/)?.[0] ?? "";
-    expect(incident).toMatch(/\*\*Status\*\*: MITIGATED/);
-    expect(incident).toMatch(/\*\*Remaining\*\*:[\s\S]*(Web|跨客户端)[\s\S]*(iOS|fresh-Web|两任务)/i);
-    expect(incident).toMatch(/\*\*Done when\*\*:[\s\S]*(跨客户端|cross-client)[\s\S]*(两任务|two-task|两个.*用户任务)/i);
+    const incident = backlog.match(/## GG-BL-010:[\s\S]*?(?=\n## GG-BL-|\s*$)/)?.[0] ?? "";
+    expect(incident).toMatch(/status:\s*done/);
+    expect(incident).toContain("3/3 PASS");
+    expect(incident).toContain("owner-accepted residual risk");
+    expect(incident).toContain("§7.3 ordinary-use observation");
+    expect(incident).toContain("未按原 frozen-identity 条件完整证明");
+    expect(incident).toContain("不代表该 observation 被补写为 PASS");
   });
 });
