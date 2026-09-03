@@ -214,3 +214,10 @@ features:
         spec: .pact/tasks/minv2-gw-4-console-api.md
         evidence: null
         deps: [minv2-gw-3-readiness]
+      - id: minv2-gw-5-merge
+        owner: w1
+        status: assigned
+        reviewer: rev
+        spec: .pact/tasks/minv2-gw-5-merge.md
+        evidence: null
+        deps: [minv2-gw-4-console-api]
