@@ -207,3 +207,10 @@ features:
         spec: .pact/tasks/minv2-gw-3-readiness.md
         evidence: null
         deps: [minv2-gw-2-auth]
+      - id: minv2-gw-4-console-api
+        owner: w1
+        status: assigned
+        reviewer: rev
+        spec: .pact/tasks/minv2-gw-4-console-api.md
+        evidence: null
+        deps: [minv2-gw-3-readiness]
