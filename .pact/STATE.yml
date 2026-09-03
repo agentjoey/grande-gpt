@@ -190,10 +190,10 @@ features:
     tasks:
       - id: minv2-gw-1-target
         owner: w1
-        status: in_progress
+        status: awaiting_review
         reviewer: rev
         spec: .pact/tasks/minv2-gw-1-target.md
-        evidence: null
+        evidence: Task 1 (explicit immutable delivery target) 完成，commit f0a8203 "feat: persist explicit delivery targets"，仅含规格列出的 7 个文件。  RED → GREEN 过程：先写 tests/taskDeliveryTarget.test.ts（新）+ deliveryTarget/tools 增补断言，观察到 3 个测试文件全部因 `Cannot find module '../src/taskDeliveryTarget.ts'` 失败（observed RED）；实现后 GREEN。  验收命令输出（verify，与 task 规格一致）： ``` $ pnpm exec vitest run tests/taskDeliveryTarget.test.ts tests/deliveryTarget.test.ts tests/tools.test.ts  Test Files  3 passed (3)       Tests  69 passed (69) $ pnpm typecheck   # tsc --noEmit TYPECHECK OK ```  实现要点： - src/taskDeliveryTarget.ts（新）：DeliveryTarget 类型、parseDeliveryTarget（拒绝 "production" 等自由文本，INVALID_INPUT）、saveExplicitDeliveryTarget（BEGIN IMMEDIATE 临界区；相同取值幂等 no-op，不同取值抛 STALE_STATE 且原值不变）、getExplicitDeliveryTarget。 - src/db.ts：新增向后兼容附属表 task_delivery_target（taskId PK FK→task、CHECK IN local/pr/deploy），不升 user_version。 - src/deliveryTarget.ts：resolveDeliveryTarget 显式行优先，无行时保留 Phase 8 legacy 投影；DeliveryTarget 类型改为从 taskDeliveryTarget.ts re-export。 - src/toolsCore.ts：grande_task_open 增加可选 deliveryTarget（enum local/pr/deploy，非 required）；在 worktree 创建与审计 INTENT 之前校验；审计输入纳入 deliveryTarget；createTask 后持久化显式行。 - tests/tools.test.ts：新增 schema/持久化/审计 digest/非法值不留痕迹 4 条断言；pinned toolsDigest 随合同变化更新为 sha256:d5243888…（TOOLSET_EPOCH 保持 2，正式 epoch 发布属 Task 7 范围）。  额外回归：tests/toolsetIdentity / toolsetProfileRegistryDrift / onboardingTools / db / hostVerificationProductionWiring 共 30 个测试全部通过。  未触碰：Task 2+、public terminal profile model、Console 仓库。
       - id: minv2-gw-2-auth
         owner: w1
         status: assigned
