@@ -28,7 +28,7 @@ import { canMigrate, migrateDb } from "./dbMigrations.ts";
  * 更老或更新的未知版本继续 fail closed，不能“猜着升”。
  *
  * S4 的 `task_brief`、S7 的 `deployment_receipt`、S18 的 `outer_test_receipt` 与
- * Minimal V2 的 `task_delivery_target` 都是
+ * Minimal V2 的 `task_delivery_target`、`delivery_authorization` 都是
  * 【向后兼容的附属表】：旧代码完全忽略它们，新代码可用 `CREATE TABLE IF NOT EXISTS`
  * 在已匹配版本的库上安全补齐，因此不增加 user_version。它们都不改变既有表/列，
  * 也不扩张 Task 状态机。
@@ -104,6 +104,33 @@ export function openDb(layout: Layout): DatabaseSync {
       target    TEXT NOT NULL CHECK (target IN ('local','pr','deploy')),
       createdAt INTEGER NOT NULL
     );
+
+    -- Minimal V2 Task 2：durable delivery authorization（附属表，不升 user_version）。
+    -- nonce 只存 SHA-256 digest；binding 存 canonical JSON 与其 digest。
+    -- 状态机与 CAS 语义见 src/deliveryAuthorization.ts（规格 §8.3/§8.4）。
+    CREATE TABLE IF NOT EXISTS delivery_authorization (
+      authorizationId TEXT PRIMARY KEY,
+      kind              TEXT NOT NULL,
+      taskId           TEXT NOT NULL REFERENCES task(taskId),
+      bindingJson      TEXT NOT NULL,
+      bindingDigest    TEXT NOT NULL,
+      nonceDigest      TEXT,
+      status           TEXT NOT NULL,
+      approverSub      TEXT,
+      approverEmail    TEXT,
+      approvedAt       INTEGER,
+      executingAt      INTEGER,
+      executionDeadlineAt INTEGER,
+      stageJson        TEXT NOT NULL,
+      reason           TEXT,
+      createdAt        INTEGER NOT NULL,
+      updatedAt        INTEGER NOT NULL
+    );
+
+    -- 同一 task 最多一条活跃（READY|APPROVED|EXECUTING）authorization。
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_delivery_authorization_active_task
+    ON delivery_authorization(taskId)
+    WHERE status IN ('READY', 'APPROVED', 'EXECUTING');
 
     CREATE TABLE IF NOT EXISTS deployment_receipt (
       taskId      TEXT PRIMARY KEY REFERENCES task(taskId),
