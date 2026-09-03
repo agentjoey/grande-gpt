@@ -5,6 +5,7 @@ agents:
   - { id: w1, roles: [worker] }
   - { id: w2, roles: [worker] }
   - { id: rev, roles: [reviewer] }
+  - { id: claude, roles: [reviewer] }
 features:
   - id: s0b
     branch: feat/s0b-repo-read-write
