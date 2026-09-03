@@ -228,3 +228,10 @@ features:
         spec: .pact/tasks/minv2-gw-6-deploy.md
         evidence: null
         deps: [minv2-gw-5-merge]
+      - id: minv2-gw-7-integration
+        owner: w1
+        status: assigned
+        reviewer: rev
+        spec: .pact/tasks/minv2-gw-7-integration.md
+        evidence: null
+        deps: [minv2-gw-6-deploy]
