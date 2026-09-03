@@ -289,7 +289,7 @@ CREATE TABLE IF NOT EXISTS delivery_authorization (
   taskId           TEXT NOT NULL REFERENCES task(taskId),
   bindingJson      TEXT NOT NULL,
   bindingDigest    TEXT NOT NULL,
-  nonceDigest      TEXT NOT NULL,
+  nonceDigest      TEXT,
   status           TEXT NOT NULL,
   approverSub      TEXT,
   approverEmail    TEXT,
@@ -340,14 +340,25 @@ EXECUTING
 
 ### 9.1 Route
 
-Console 增加两个专用写端点：
+Console 增加三个专用端点：
 
 ```text
+POST /console/delivery/:authorizationId/challenge
 POST /console/delivery/:authorizationId/approve
 POST /console/delivery/:authorizationId/reject
 ```
 
-请求体只接受：
+`challenge` 经 Access 与 Origin 校验后，轮换 durable nonce digest，并返回与该 nonce 绑定的 bounded approval summary 和一次性明文 nonce。明文 nonce 只出现在这次响应中，不写 SQLite、不进入日志，也不返回给 MCP/Agent。独立 `grande-console` 必须通过该 route 取得 challenge，不能自己生成 nonce。
+
+Challenge 请求体只接受：
+
+```json
+{
+  "bindingDigest": "sha256:..."
+}
+```
+
+Approve/Reject 请求体只接受：
 
 ```json
 {
@@ -367,7 +378,7 @@ POST /console/delivery/:authorizationId/reject
 3. `Origin` 精确等于 `access-console.yaml` 中可信配置的 Console origin；
 4. method 为 POST，`Content-Type` 为 `application/json`；
 5. authorizationId、bindingDigest 与 durable row 一致；
-6. nonce 至少 256 bit、服务端生成、只存 digest、与 authorization 和 expiry 绑定；
+6. nonce 至少 256 bit、由 challenge route 服务端生成、每次 challenge 轮换、只存 digest、与 authorization 和 expiry 绑定；
 7. authorization 尚未过期且状态允许本次转移；
 8. 单事务 CAS 写入 approval/rejection identity 与时间。
 
@@ -608,6 +619,8 @@ UI 与工具返回只展示必要 identity 摘要；绝对控制平面路径、H
 - production activation receipt/readback 与 candidate build/tool identity 完全一致。
 
 ## 15. 最小实现范围
+
+实现分为两个顺序依赖的 pactify feature：本仓库 `grande-gpt` 先提供 authorization/API/execution contract；兄弟仓库 `/Users/xtation/AgentWorks/GPT_Workspace/grande-console` 再消费该已接受 contract 实现 T3 UI。两个仓库保持独立 commit、review 和 release evidence，Gateway worker 不跨仓库修改 Console。
 
 实现计划只能覆盖以下有界变更：
 
