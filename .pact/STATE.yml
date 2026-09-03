@@ -183,3 +183,13 @@ features:
         spec: docs/superpowers/plans/2026-08-21-chatgpt-binding-budget-reliability.md
         evidence: Local/code review approved; exact candidate host boundary 5 files/160 tests passed at 7b98f7d; targeted 205/205, full 850/850, typecheck passed. External deployment/selfcheck/Web+iOS gates pending and GG-BL-010 remains OPEN.
         deps: [binding-a-5-budgets]
+  - id: minv2-gw
+    branch: feat/minv2-gateway
+    status: in_progress
+    tasks:
+      - id: minv2-gw-1-target
+        owner: w1
+        status: assigned
+        reviewer: rev
+        spec: .pact/tasks/minv2-gw-1-target.md
+        evidence: null
