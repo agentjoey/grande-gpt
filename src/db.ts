@@ -27,7 +27,8 @@ import { canMigrate, migrateDb } from "./dbMigrations.ts";
  * Phase 7 起只支持显式、顺序的相邻版本 migration；当前首条受支持路径是 5 → 6。
  * 更老或更新的未知版本继续 fail closed，不能“猜着升”。
  *
- * S4 的 `task_brief`、S7 的 `deployment_receipt` 与 S18 的 `outer_test_receipt` 都是
+ * S4 的 `task_brief`、S7 的 `deployment_receipt`、S18 的 `outer_test_receipt` 与
+ * Minimal V2 的 `task_delivery_target` 都是
  * 【向后兼容的附属表】：旧代码完全忽略它们，新代码可用 `CREATE TABLE IF NOT EXISTS`
  * 在已匹配版本的库上安全补齐，因此不增加 user_version。它们都不改变既有表/列，
  * 也不扩张 Task 状态机。
@@ -94,6 +95,14 @@ export function openDb(layout: Layout): DatabaseSync {
       taskId    TEXT PRIMARY KEY REFERENCES task(taskId),
       briefJson TEXT NOT NULL,
       updatedAt INTEGER NOT NULL
+    );
+
+    -- Minimal V2：grande_task_open 显式给出的不可变 delivery target（附属表，
+    -- 不升 user_version）。没有行的旧任务继续走 deliveryTarget.ts 的 legacy 投影。
+    CREATE TABLE IF NOT EXISTS task_delivery_target (
+      taskId    TEXT PRIMARY KEY REFERENCES task(taskId),
+      target    TEXT NOT NULL CHECK (target IN ('local','pr','deploy')),
+      createdAt INTEGER NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS deployment_receipt (

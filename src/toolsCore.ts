@@ -19,6 +19,10 @@ import type { Layout } from "./layout.ts";
 import { assertPairedEditsSatisfied, loadEffectiveDenyRules } from "./policy.ts";
 import { beginAudit } from "./audit.ts";
 import { CheckpointError, restoreCheckpoint } from "./checkpoint.ts";
+import {
+  parseDeliveryTarget,
+  saveExplicitDeliveryTarget,
+} from "./taskDeliveryTarget.ts";
 
 export interface ToolDef {
   name: string;
@@ -426,6 +430,13 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
             taskId: { type: "string", description: "任务ID" },
             slug: { type: "string", description: "任务简称（1–40 个小写字母、数字或连字符）" },
             repoId: { type: "string", description: "要在哪个已注册仓库里开任务" },
+            deliveryTarget: {
+              type: "string",
+              enum: ["local", "pr", "deploy"],
+              description: "可选：本任务的交付目标，创建后不可变。缺省保持现有安全默认" +
+                "（GitHub origin → pr，否则 local）；deploy 必须显式给出，且只代表准备" +
+                "交付证据，不等于已授权 production side effect。",
+            },
           },
           required: ["taskId", "slug", "repoId"],
         },
@@ -450,11 +461,22 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
                 `仓库 ${repoId} 未注册。工作区下的仓库会被自动发现为候选，但必须显式注册后才可访问。`,
               );
             }
+            // Minimal V2：deliveryTarget 在建任何 worktree、留任何 INTENT 之前校验——
+            // 非法取值是请求本身不合法，与上面两个前置检查同级。
+            const deliveryTarget = args.deliveryTarget === undefined
+              ? undefined
+              : parseDeliveryTarget(args.deliveryTarget);
             // task_open 建分支、建 worktree、写 task 行——它是变更操作，必须先留下 INTENT
             // （规格 §7.0①）。此前漏了：真实使用中它成功建出 worktree 而审计账本为空。
             // openWorktree 的签名没有 AuditHandle 参数（不像 repoEdit/startJob 那样是
             // 硬约束），所以这里必须由调用方显式记——这也正是它被漏掉的原因。
-            const h = beginAudit(db, { taskId, tool: "grande_task_open", input: { slug, repoId } });
+            const h = beginAudit(db, {
+              taskId,
+              tool: "grande_task_open",
+              input: deliveryTarget === undefined
+                ? { slug, repoId }
+                : { slug, repoId, deliveryTarget },
+            });
             h.allowed();
             if (!h.executing()) {
               throw new StateError("STALE_STATE", `任务 ${taskId} 的审计句柄无法推进到 EXECUTING。`);
@@ -470,6 +492,11 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
               taskId, repoId, branch: wt.branch, baseCommit: wt.baseCommit,
               worktreePath: wt.worktreePath, state: "READY",
             });
+            // 显式 target 随 Task 创建一起固化（不可变）；未提供时完全不留行，
+            // resolveDeliveryTarget 继续走 legacy 投影。
+            if (deliveryTarget !== undefined) {
+              saveExplicitDeliveryTarget(db, taskId, deliveryTarget);
+            }
             h.succeeded([wt.worktreePath]);
             return ok({
               taskId,

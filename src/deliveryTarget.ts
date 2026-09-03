@@ -1,10 +1,13 @@
 import type { DatabaseSync } from "node:sqlite";
 import { listAudit } from "./audit.ts";
 import { safeGit } from "./gitExec.ts";
+import { getExplicitDeliveryTarget, type DeliveryTarget } from "./taskDeliveryTarget.ts";
 import type { TaskProgress, TaskProgressPhase } from "./taskProgress.ts";
 import type { TaskRow } from "./tasks.ts";
 
-export type DeliveryTarget = "local" | "pr" | "deploy";
+// 单一真相源在 taskDeliveryTarget.ts（V2 起 target 可以显式持久化）；
+// 这里保留 re-export，既有调用点不用改 import。
+export type { DeliveryTarget } from "./taskDeliveryTarget.ts";
 
 export interface DeliveryTargetOptions {
   readOrigin?: (task: TaskRow) => string | null;
@@ -36,16 +39,23 @@ function isGitHubOrigin(value: string | null): boolean {
 }
 
 /**
- * Phase 8 cannot add deliveryTarget to the public grande_task_open schema without changing
- * the tool digest. Resolve the target from already-trusted task evidence instead. A repo with
- * a GitHub origin defaults to PR; production is selected only after durable deployment evidence
- * exists, meaning Phase 8 never upgrades an ordinary task into a new production side effect.
+ * Minimal V2：`grande_task_open` 可以把显式 `deliveryTarget` 持久化到
+ * `task_delivery_target`（见 taskDeliveryTarget.ts）——显式行一旦存在就优先，
+ * 不可变，不从 repo 内容推断。
+ *
+ * 没有显式行的旧任务保留 Phase 8 的纯证据投影（仅影响 status 展示，不能凭它
+ * 创建 V2 authorization）：有 durable deployment evidence 才算 deploy；repo 有
+ * GitHub origin 默认 PR；否则 local。这个默认方向是保守的——legacy 投影永远
+ * 不会把一个普通任务升级出新的 production side effect。
  */
 export function resolveDeliveryTarget(
   db: DatabaseSync,
   task: TaskRow,
   options: DeliveryTargetOptions = {},
 ): DeliveryTarget {
+  const explicit = getExplicitDeliveryTarget(db, task.taskId);
+  if (explicit !== undefined) return explicit;
+
   const deploymentReceipt = db.prepare("SELECT 1 AS present FROM deployment_receipt WHERE taskId=?").get(task.taskId);
   if (deploymentReceipt) return "deploy";
 
