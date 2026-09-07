@@ -285,10 +285,10 @@ describe("V2 delivery-authorized capability deploy/verify", () => {
     artifactDigest: DIGEST,
   };
 
-  function writeV2Spec(): void {
+  function writeV2Spec(deployName = "deploy", verifyName = "verify"): void {
     writeSpec(
-      "deploy:\n  capability:\n    provider: platform\n    name: deploy\n" +
-      "verify:\n  capability:\n    provider: platform\n    name: verify\n",
+      `deploy:\n  capability:\n    provider: platform\n    name: ${deployName}\n` +
+      `verify:\n  capability:\n    provider: platform\n    name: ${verifyName}\n`,
     );
   }
 
@@ -319,11 +319,13 @@ describe("V2 delivery-authorized capability deploy/verify", () => {
     };
   }
 
-  function createExecutingAuth(): { authorizationId: string; bindingDigest: string } {
+  function createExecutingAuth(
+    overrides: Partial<DeliveryAuthorizationBinding> = {},
+  ): { authorizationId: string; bindingDigest: string } {
     const auth = createAuthorization(deps.db, {
       kind: "delivery",
       taskId,
-      binding: v2Binding(),
+      binding: { ...v2Binding(), ...overrides },
       stages: {},
     });
     const { approvalNonce } = rotateAuthorizationChallenge(deps.db, auth.authorizationId, auth.bindingDigest);
@@ -337,13 +339,16 @@ describe("V2 delivery-authorized capability deploy/verify", () => {
     return { authorizationId: executing.authorizationId, bindingDigest: executing.bindingDigest };
   }
 
-  function plantMergeReceipt(authorizationId: string): void {
+  function plantMergeReceipt(
+    authorizationId: string,
+    overrides: { baseSha?: string; headSha?: string; mergeSha?: string; mergeTree?: string } = {},
+  ): void {
     persistExactMergeReceipt(layout, {
       authorizationId,
-      baseSha: BASE,
-      headSha: HEAD,
-      mergeSha: MERGE,
-      mergeTree: TREE,
+      baseSha: overrides.baseSha ?? BASE,
+      headSha: overrides.headSha ?? HEAD,
+      mergeSha: overrides.mergeSha ?? MERGE,
+      mergeTree: overrides.mergeTree ?? TREE,
       releaseSourceRealpath: join(root, "release-source"),
     });
   }
@@ -576,6 +581,139 @@ describe("V2 delivery-authorized capability deploy/verify", () => {
     const again = await callTool(tools, "grande_deploy_verify");
     expect(again.ok).toBe(false);
     expect(calls).toEqual(["platform/deploy", "platform/verify"]);
+    expect(authStatus(authorizationId)).toBe("UNCERTAIN");
+  });
+
+  it("旧 receipt + 新活跃 authorization：deploy/verify 早退 fail closed，绝不复用旧 DONE", async () => {
+    writeV2Spec();
+    saveExplicitDeliveryTarget(deps.db, taskId, "deploy");
+    const a1 = createExecutingAuth();
+    plantMergeReceipt(a1.authorizationId);
+    const calls: string[] = [];
+    const tools = makeTools(calls, { deploy: EVIDENCE, verify: EVIDENCE });
+
+    await callTool(tools, "grande_deploy");
+    const done = await callTool(tools, "grande_deploy_verify");
+    expect(done.ok).toBe(true);
+    expect(done.data.state).toBe("DONE");
+    expect(authStatus(a1.authorizationId)).toBe("SUCCEEDED");
+    expect(calls).toEqual(["platform/deploy", "platform/verify"]);
+
+    // a1 进终态后 Human 开新审批 a2（新 binding：不同 head/merge/tree）。
+    // 重入绝不能命中 a1 的旧 receipt 早退而谎报 DONE/failed。
+    const a2 = createExecutingAuth({ headSha: "4".repeat(40), expectedMergeTree: "5".repeat(40) });
+    plantMergeReceipt(a2.authorizationId, {
+      headSha: "4".repeat(40),
+      mergeSha: "b".repeat(40),
+      mergeTree: "5".repeat(40),
+    });
+
+    const deployAgain = await callTool(tools, "grande_deploy");
+    expect(deployAgain.ok).toBe(false);
+    expect(calls).toEqual(["platform/deploy", "platform/verify"]);
+
+    const verifyAgain = await callTool(tools, "grande_deploy_verify");
+    expect(verifyAgain.ok).toBe(false);
+    expect(calls).toEqual(["platform/deploy", "platform/verify"]);
+
+    // fail closed：a2 不被旧 receipt 短路推进，旧 receipt 也不被改写。
+    expect(authStatus(a2.authorizationId)).toBe("EXECUTING");
+    expect(loadStoredReceipt().authorizationId).toBe(a1.authorizationId);
+  });
+
+  it("exact merge receipt 的 baseSha 与 binding 漂移 → 拒绝 deploy，零 side effect", async () => {
+    writeV2Spec();
+    saveExplicitDeliveryTarget(deps.db, taskId, "deploy");
+    const { authorizationId } = createExecutingAuth();
+    plantMergeReceipt(authorizationId, { baseSha: "9".repeat(40) });
+    const calls: string[] = [];
+    const tools = makeTools(calls, { deploy: EVIDENCE, verify: EVIDENCE });
+
+    const envelope = await callTool(tools, "grande_deploy");
+    expect(envelope.ok).toBe(false);
+    expect(calls).toEqual([]);
+    expect(authStatus(authorizationId)).toBe("EXECUTING");
+  });
+
+  it("exact merge receipt 的 headSha 与 binding 漂移 → 拒绝 deploy，零 side effect", async () => {
+    writeV2Spec();
+    saveExplicitDeliveryTarget(deps.db, taskId, "deploy");
+    const { authorizationId } = createExecutingAuth();
+    plantMergeReceipt(authorizationId, { headSha: "9".repeat(40) });
+    const calls: string[] = [];
+    const tools = makeTools(calls, { deploy: EVIDENCE, verify: EVIDENCE });
+
+    const envelope = await callTool(tools, "grande_deploy");
+    expect(envelope.ok).toBe(false);
+    expect(calls).toEqual([]);
+    expect(authStatus(authorizationId)).toBe("EXECUTING");
+  });
+
+  it("exact merge receipt 的 mergeTree 与 binding.expectedMergeTree 漂移 → 拒绝 deploy，零 side effect", async () => {
+    writeV2Spec();
+    saveExplicitDeliveryTarget(deps.db, taskId, "deploy");
+    const { authorizationId } = createExecutingAuth();
+    plantMergeReceipt(authorizationId, { mergeTree: "9".repeat(40) });
+    const calls: string[] = [];
+    const tools = makeTools(calls, { deploy: EVIDENCE, verify: EVIDENCE });
+
+    const envelope = await callTool(tools, "grande_deploy");
+    expect(envelope.ok).toBe(false);
+    expect(calls).toEqual([]);
+    expect(authStatus(authorizationId)).toBe("EXECUTING");
+  });
+
+  it("当前 spec 的 deployRef 与 binding 漂移 → 拒绝 deploy，零 side effect", async () => {
+    writeV2Spec("redeploy");
+    saveExplicitDeliveryTarget(deps.db, taskId, "deploy");
+    const { authorizationId } = createExecutingAuth();
+    plantMergeReceipt(authorizationId);
+    const calls: string[] = [];
+    const tools = makeTools(calls, { deploy: EVIDENCE, verify: EVIDENCE });
+
+    const envelope = await callTool(tools, "grande_deploy");
+    expect(envelope.ok).toBe(false);
+    expect(calls).toEqual([]);
+    expect(authStatus(authorizationId)).toBe("EXECUTING");
+  });
+
+  it("当前 spec 的 verifyRef 与 binding 漂移 → 拒绝 deploy，零 side effect", async () => {
+    writeV2Spec("deploy", "reverify");
+    saveExplicitDeliveryTarget(deps.db, taskId, "deploy");
+    const { authorizationId } = createExecutingAuth();
+    plantMergeReceipt(authorizationId);
+    const calls: string[] = [];
+    const tools = makeTools(calls, { deploy: EVIDENCE, verify: EVIDENCE });
+
+    const envelope = await callTool(tools, "grande_deploy");
+    expect(envelope.ok).toBe(false);
+    expect(calls).toEqual([]);
+    expect(authStatus(authorizationId)).toBe("EXECUTING");
+  });
+
+  it("capability verify 在 running 状态重入（崩溃窗口）→ UNCERTAIN 且绝不二次 invoke", async () => {
+    writeV2Spec();
+    saveExplicitDeliveryTarget(deps.db, taskId, "deploy");
+    const { authorizationId } = createExecutingAuth();
+    plantMergeReceipt(authorizationId);
+    const calls: string[] = [];
+    const tools = makeTools(calls, { deploy: EVIDENCE, verify: EVIDENCE });
+
+    await callTool(tools, "grande_deploy");
+    expect(calls).toEqual(["platform/deploy"]);
+
+    // 模拟上次 verify 在 stages.verify="running" 落账后、invoke 结果落账前崩溃。
+    const stored = loadStoredReceipt();
+    stored.stages = { ...stored.stages, verify: "running" };
+    deps.db
+      .prepare("UPDATE deployment_receipt SET receiptJson=? WHERE taskId=?")
+      .run(JSON.stringify(stored), taskId);
+
+    const reentry = await callTool(tools, "grande_deploy_verify");
+    expect(reentry.ok).toBe(true);
+    expect(reentry.data.state).toBe("uncertain");
+    expect(reentry.data.retryable).toBe(false);
+    expect(calls).toEqual(["platform/deploy"]);
     expect(authStatus(authorizationId)).toBe("UNCERTAIN");
   });
 });

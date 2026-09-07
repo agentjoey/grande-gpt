@@ -507,6 +507,27 @@ function assertSameAuthorization(ctx: V2Context, receipt: DeploymentReceipt): vo
   }
 }
 
+/**
+ * 重入早退的 fail-closed 门禁：deployment receipt 只属于其落账时的 authorization。
+ * 旧审批进终态后 Human 开了新审批时，旧 receipt（哪怕 DONE/failed）绝不能给新
+ * authorization 背书——拒绝继续，而不是复用旧 receipt 谎报状态。无活跃
+ * authorization 时（旧审批已终态、未开新审批），重入观察旧终态是合法幂等语义。
+ */
+function assertReceiptBoundToActiveAuthorization(
+  deps: ToolDeps,
+  taskId: string,
+  receipt: DeploymentReceipt,
+): void {
+  const active = activeAuthorizationForTask(deps.db, taskId);
+  if (active && active.authorizationId !== receipt.authorizationId) {
+    throw new StateError(
+      "STALE_STATE",
+      `deployment receipt 属于已终态的 authorization ${receipt.authorizationId}，` +
+        `与当前活跃 authorization ${active.authorizationId} 不符；拒绝复用旧 receipt。请开新 Task 重新部署。`,
+    );
+  }
+}
+
 /** V2 只走 deployment-host runner（有受控证据通道）；普通 grande_run job 没有证据面。 */
 function assertV2HostProfile(
   deps: ToolDeps,
@@ -551,6 +572,7 @@ async function v2Deploy(
   const existing = loadReceipt(deps, taskId);
   if (existing) {
     ensureReceiptMatches(existing, spec);
+    assertReceiptBoundToActiveAuthorization(deps, taskId, existing);
     if (existing.deployUncertain) return uncertainDeployEnvelope(taskId, true, existing.deployRef);
     return {
       structuredContent: ok({
@@ -674,6 +696,7 @@ async function v2Verify(
     throw new StateError("INVALID_INPUT", `任务 ${taskId} 没有 V2 deployment receipt；必须先 grande_deploy。`);
   }
   ensureReceiptMatches(receipt, spec);
+  assertReceiptBoundToActiveAuthorization(deps, taskId, receipt);
   if (receipt.deployUncertain) return uncertainDeployEnvelope(taskId, true, receipt.deployRef);
   if (receipt.verifyComplete) {
     return { structuredContent: ok({ taskId, data: { state: "DONE", existing: true }, hint: `任务 ${taskId} 已部署并验证完成。` }) };
@@ -806,6 +829,23 @@ async function v2Verify(
   const ctx = requireV2Authorization(deps, taskId, spec);
   assertSameAuthorization(ctx, receipt);
   await assertCapabilityRole(tools, spec.verify, "verify");
+
+  // Uncertainty-first 重入：stages.verify==="running" 只可能是上次调用在 invoke
+  // 与结果落账之间崩溃留下的状态；远端副作用未知，置 UNCERTAIN 且绝不二次 invoke
+  //（与 capability deploy 的 deployUncertain 先落账、rollback 的 running→UNCERTAIN 一致）。
+  if (receipt.stages?.verify === "running") {
+    receipt.stages = { ...receipt.stages, verify: "uncertain" };
+    saveReceipt(deps, receipt);
+    v2Transition(
+      deps,
+      ctx.auth,
+      "UNCERTAIN",
+      "verify",
+      "uncertain",
+      "capability verify 在 running 状态重入：上次调用结果未落账，远端副作用未知，绝不二次 invoke。",
+    );
+    return uncertainDeployEnvelope(taskId, true, receipt.verifyRef);
+  }
 
   receipt.stages = { ...receipt.stages, verify: "running" };
   saveReceipt(deps, receipt);
