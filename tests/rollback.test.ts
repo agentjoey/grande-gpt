@@ -485,4 +485,51 @@ describe("V2 rollback (explicit deliveryTarget=deploy)", () => {
     expect(calls).toEqual(["rollback"]);
     expect(authStatus(authorizationId)).toBe("UNCERTAIN");
   });
+
+  it("旧 rollback receipt=succeeded + 新活跃 rollback authorization → fail closed，零 side effect", async () => {
+    const { calls, tools } = setup();
+    const r1 = createApprovedAuth(rollbackBinding());
+    const first = await callRollback(tools);
+    expect(first.ok).toBe(true);
+    expect(first.data.state).toBe("rolled-back");
+    expect(authStatus(r1)).toBe("SUCCEEDED");
+    expect(calls).toEqual(["rollback"]);
+
+    // r1 进终态后 Human 批准一条全新的 rollback authorization r2；
+    // 重入绝不能复用 r1 的旧 receipt 早退而对 r2 谎报 rolled-back。
+    const r2 = createApprovedAuth(
+      rollbackBinding({ rollbackDeploymentId: "prev-2", rollbackSourceSha: "c".repeat(40) }),
+    );
+
+    const reentry = await callRollback(tools);
+    expect(reentry.ok).toBe(false);
+    expect(JSON.stringify(reentry)).not.toContain(r1);
+    expect(authStatus(r2)).toBe("APPROVED");
+    expect(calls).toEqual(["rollback"]);
+  });
+
+  it("旧 rollback receipt=uncertain + 新活跃 rollback authorization → fail closed，零 side effect", async () => {
+    writeV2Spec();
+    saveExplicitDeliveryTarget(deps.db, TASK_ID, "deploy");
+    seedReceipt();
+    const calls: string[] = [];
+    const tools = createDeploymentTools(deps, capabilityTools(calls, { unexpected: true }));
+    const r1 = createApprovedAuth(rollbackBinding());
+
+    const first = await callRollback(tools);
+    expect(first.ok).toBe(true);
+    expect(first.data.state).toBe("uncertain");
+    expect(authStatus(r1)).toBe("UNCERTAIN");
+    expect(calls).toEqual(["rollback"]);
+
+    // Human 按流程到平台确认真实状态后批准新 rollback authorization r2 来完成回滚；
+    // 重入绝不能只回放 r1 的旧 uncertain 而让 r2 永远执行不了。
+    const r2 = createApprovedAuth(rollbackBinding());
+
+    const reentry = await callRollback(tools);
+    expect(reentry.ok).toBe(false);
+    expect(JSON.stringify(reentry)).not.toContain(r1);
+    expect(authStatus(r2)).toBe("APPROVED");
+    expect(calls).toEqual(["rollback"]);
+  });
 });

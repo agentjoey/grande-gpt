@@ -509,21 +509,24 @@ function assertSameAuthorization(ctx: V2Context, receipt: DeploymentReceipt): vo
 
 /**
  * 重入早退的 fail-closed 门禁：deployment receipt 只属于其落账时的 authorization。
- * 旧审批进终态后 Human 开了新审批时，旧 receipt（哪怕 DONE/failed）绝不能给新
- * authorization 背书——拒绝继续，而不是复用旧 receipt 谎报状态。无活跃
+ * 旧审批进终态后 Human 开了新审批时，旧 receipt（哪怕 DONE/failed/rolled-back）
+ * 绝不能给新 authorization 背书——拒绝继续，而不是复用旧 receipt 谎报状态。无活跃
  * authorization 时（旧审批已终态、未开新审批），重入观察旧终态是合法幂等语义。
+ * rollback 早退用 boundAuthorizationId=receipt.rollbackAuthorizationId 复用同一语义；
+ * 错误消息刻意不带旧 authorization id，避免向新授权泄漏旧授权身份。
  */
 function assertReceiptBoundToActiveAuthorization(
   deps: ToolDeps,
   taskId: string,
   receipt: DeploymentReceipt,
+  boundAuthorizationId: string | undefined = receipt.authorizationId,
 ): void {
   const active = activeAuthorizationForTask(deps.db, taskId);
-  if (active && active.authorizationId !== receipt.authorizationId) {
+  if (active && active.authorizationId !== boundAuthorizationId) {
     throw new StateError(
       "STALE_STATE",
-      `deployment receipt 属于已终态的 authorization ${receipt.authorizationId}，` +
-        `与当前活跃 authorization ${active.authorizationId} 不符；拒绝复用旧 receipt。请开新 Task 重新部署。`,
+      "deployment receipt 是在另一条已终态的 authorization 下落账的，与当前活跃 authorization 不符；" +
+        "拒绝复用旧 receipt 的早退结果。请开新 Task 重新部署。",
     );
   }
 }
@@ -956,6 +959,9 @@ async function v2Rollback(
 
   // 终态/已有 rollback receipt 的幂等重入：只观察 durable receipt，绝不重试。
   if (receipt.rollbackAuthorizationId !== undefined) {
+    // 与 v2Deploy/v2Verify 同源的绑定门禁：旧 rollback receipt 的早退结果
+    // （succeeded/uncertain/failed）绝不能给新活跃 authorization 背书。
+    assertReceiptBoundToActiveAuthorization(deps, taskId, receipt, receipt.rollbackAuthorizationId);
     const stage = receipt.stages?.rollback;
     if (stage === "succeeded") {
       return {
