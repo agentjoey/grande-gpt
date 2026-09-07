@@ -224,7 +224,7 @@ features:
         deps: [minv2-gw-4-console-api]
       - id: minv2-gw-6-deploy
         owner: w1
-        status: awaiting_review
+        status: changes_requested
         reviewer: rev
         spec: .pact/tasks/minv2-gw-6-deploy.md
         evidence: R1 fixed: v2Deploy existing early-return and v2Verify verifyComplete/deployUncertain early-returns now call assertReceiptBoundToActiveAuthorization — any active authorization whose id differs from the receipt's fails closed (STALE_STATE), old DONE/failed never reported for a new authorization. RED observed first: 'old receipt + new active authorization' test failed (deploy reentry returned ok:true/existing:true) before the fix, GREEN after. R2: 5 new load-bearing drift tests for requireV2Authorization (baseSha/headSha/mergeTree/deployRef/verifyRef vs binding). Mutation proof: deleting the baseSha guard line turned exactly the baseSha drift test RED (1 failed | 22 passed); restoring it returned GREEN. R3: capability verify reentry with stages.verify=running now transitions to UNCERTAIN without a second invoke (new test; was DONE + double-invoke before fix). R4 not touched per scope. Gate: pnpm exec vitest run tests/deliveryEvidence.test.ts tests/deployment.test.ts tests/deploymentRetry.test.ts tests/rollback.test.ts tests/taskProgress.test.ts → Test Files 5 passed (5), Tests 77 passed (77); pnpm typecheck clean; git diff --check clean. File scope: src/deployment.ts + tests/deployment.test.ts only (commit 9e520aa). No production changes, no real deploy.
