@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { listAudit } from "./audit.ts";
 import { safeGit } from "./gitExec.ts";
 import { getExplicitDeliveryTarget, type DeliveryTarget } from "./taskDeliveryTarget.ts";
-import type { TaskProgress, TaskProgressPhase } from "./taskProgress.ts";
+import type { DeliveryAuthorizationProjection, TaskProgress, TaskProgressPhase } from "./taskProgress.ts";
 import type { TaskRow } from "./tasks.ts";
 
 // 单一真相源在 taskDeliveryTarget.ts（V2 起 target 可以显式持久化）；
@@ -129,6 +129,32 @@ function phaseForPr(progress: TaskProgress): TaskProgressPhase {
 }
 
 /**
+ * V2：有 DeliveryAuthorizationProjection 时，deploy target 的 nextAction 由授权状态机
+ * 唯一决定——READY 停下等 Human Console 审批，FAILED/UNCERTAIN 停止一切自动工作。
+ */
+function deliveryAuthorizationNextAction(p: DeliveryAuthorizationProjection): string {
+  switch (p.state) {
+    case "READY_FOR_DELIVERY_APPROVAL":
+      return "停止自动执行；等待 Human Console 审批该 delivery authorization";
+    case "DELIVERY_APPROVED":
+      return "调用 grande_pr_merge";
+    case "DELIVERY_EXECUTING":
+      switch (p.stage) {
+        case "merge": return "调用或重入观察 grande_pr_merge 的 delivery merge";
+        case "deploy": return "调用 grande_deploy";
+        case "verify": return "调用 grande_deploy_verify";
+        case "rollback": return "调用 grande_deploy_rollback";
+      }
+    case "DELIVERY_FAILED":
+      return "停止自动工作；delivery authorization 已 FAILED，需 Human 处理后开新审批";
+    case "DELIVERY_UNCERTAIN":
+      return "停止自动工作；delivery authorization 处于 UNCERTAIN，Human 先确认外部真实状态";
+    case "DELIVERY_DONE":
+      return "无待处理动作";
+  }
+}
+
+/**
  * Mask lifecycle stages that are irrelevant to the selected delivery target and recompute the
  * single blocker/nextAction projection. This deliberately does not add a lifecycle table/state.
  */
@@ -228,6 +254,9 @@ export function projectDeliveryTargetProgress(
     }
   }
 
+  if (target === "deploy" && progress.deliveryAuthorization) {
+    progress.nextAction = deliveryAuthorizationNextAction(progress.deliveryAuthorization);
+  }
   progress.liveness.phase = progress.phase;
   progress.liveness.nextAction = progress.nextAction;
   if (progress.completed || progress.blocker !== null) progress.liveness.state = "active";

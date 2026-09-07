@@ -9,6 +9,7 @@ import type { HostVerifierFailureClass } from "./hostVerifierFailure.ts";
 import type { HostVerificationLevel } from "./hostVerification.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
 import { inspectCurrentHostVerification, type CurrentHostVerification } from "./prHostVerification.ts";
+import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
 import type { TaskRow } from "./tasks.ts";
 
 export type ProgressState = "done" | "pending" | "running" | "blocked" | "unknown" | "not-applicable";
@@ -56,6 +57,19 @@ export type TaskProgressPhase =
 
 export type TaskLivenessState = "active" | "stalled";
 
+/**
+ * Minimal V2 Task 6 slice 6：explicit deliveryTarget=deploy 的只读授权投影。
+ * 从最新一条 delivery_authorization（含终态行）+ durable deployment receipt 证据
+ * 派生；绝不写库，绝不在缺证据时捏造身份。
+ */
+export type DeliveryAuthorizationProjection =
+  | { state: "READY_FOR_DELIVERY_APPROVAL"; authorizationId: string; bindingDigest: string; expiresAt: number }
+  | { state: "DELIVERY_APPROVED"; authorizationId: string }
+  | { state: "DELIVERY_EXECUTING"; authorizationId: string; stage: "merge" | "deploy" | "verify" | "rollback" }
+  | { state: "DELIVERY_FAILED"; authorizationId: string; detail: string }
+  | { state: "DELIVERY_UNCERTAIN"; authorizationId: string; detail: string }
+  | { state: "DELIVERY_DONE"; authorizationId: string; sourceSha: string; target: string; deploymentId: string };
+
 export interface TaskLiveness {
   state: TaskLivenessState;
   progressAt: number;
@@ -84,6 +98,8 @@ export interface TaskProgress {
   blocker: string | null;
   nextAction: string;
   liveness: TaskLiveness;
+  /** 仅 explicit deliveryTarget=deploy 且存在 authorization 行时出现的只读投影。 */
+  deliveryAuthorization?: DeliveryAuthorizationProjection;
 }
 
 export interface TaskProgressOptions {
@@ -104,6 +120,10 @@ interface ReceiptProjection {
   verifyComplete?: boolean;
   verifyJobId?: string;
   rolledBackAt?: number;
+  authorizationId?: string;
+  rollbackAuthorizationId?: string;
+  verifyEvidence?: { sourceSha?: unknown; target?: unknown; deploymentId?: unknown };
+  stages?: { deploy?: string; verify?: string; rollback?: string };
 }
 
 const ACTIVE_PROGRESS = new Set<ProgressState>(["running"]);
@@ -175,6 +195,95 @@ function firstBlocked(stages: TaskProgress["stages"]): string | null {
     if (stage.state === "blocked") return `${name}: ${stage.detail}`;
   }
   return null;
+}
+
+/** EXECUTING 的当前 stage：只读 receipt 的 stage 状态推导，绝不写库。 */
+function deriveExecutingStage(receipt: ReceiptProjection | null): "merge" | "deploy" | "verify" | "rollback" {
+  const s = receipt?.stages;
+  if (s?.rollback) return "rollback";
+  if (s?.verify && s.verify !== "pending") return "verify";
+  if (s?.deploy === "succeeded") return "verify";
+  if (s?.deploy) return "deploy";
+  return "merge";
+}
+
+/**
+ * 最新一条 authorization（含终态行）→ 只读投影。DONE 必须匹配 durable
+ * verifyComplete+verifyEvidence（rollback 则是 rollbackAuthorizationId+succeeded stage +
+ * binding 里的精确 rollback 身份）；证据缺失/不匹配一律 fail closed 成 FAILED detail。
+ */
+function projectDeliveryAuthorization(
+  db: DatabaseSync,
+  taskId: string,
+): DeliveryAuthorizationProjection | undefined {
+  if (getExplicitDeliveryTarget(db, taskId) !== "deploy") return undefined;
+  const row = db.prepare(
+    "SELECT authorizationId, kind, status, bindingDigest, bindingJson, reason FROM delivery_authorization " +
+      "WHERE taskId=? ORDER BY updatedAt DESC LIMIT 1",
+  ).get(taskId) as
+    | { authorizationId: string; kind: string; status: string; bindingDigest: string; bindingJson: string; reason: string | null }
+    | undefined;
+  if (!row) return undefined;
+  const id = row.authorizationId;
+
+  if (row.status === "READY") {
+    const binding = JSON.parse(row.bindingJson) as { expiresAt?: unknown };
+    const expiresAt = typeof binding.expiresAt === "number" ? binding.expiresAt : 0;
+    return { state: "READY_FOR_DELIVERY_APPROVAL", authorizationId: id, bindingDigest: row.bindingDigest, expiresAt };
+  }
+  if (row.status === "APPROVED") return { state: "DELIVERY_APPROVED", authorizationId: id };
+  if (row.status === "EXECUTING") {
+    return { state: "DELIVERY_EXECUTING", authorizationId: id, stage: deriveExecutingStage(loadReceipt(db, taskId)) };
+  }
+  if (row.status === "FAILED") {
+    return { state: "DELIVERY_FAILED", authorizationId: id, detail: row.reason ?? "FAILED" };
+  }
+  if (row.status === "UNCERTAIN") {
+    return { state: "DELIVERY_UNCERTAIN", authorizationId: id, detail: row.reason ?? "UNCERTAIN" };
+  }
+  if (row.status === "SUCCEEDED") {
+    const receipt = loadReceipt(db, taskId);
+    if (row.kind === "rollback") {
+      if (receipt?.rollbackAuthorizationId === id && receipt.stages?.rollback === "succeeded") {
+        const binding = JSON.parse(row.bindingJson) as {
+          rollbackSourceSha?: unknown; deployTarget?: unknown; rollbackDeploymentId?: unknown;
+        };
+        if (
+          typeof binding.rollbackSourceSha === "string" &&
+          typeof binding.deployTarget === "string" &&
+          typeof binding.rollbackDeploymentId === "string"
+        ) {
+          return {
+            state: "DELIVERY_DONE",
+            authorizationId: id,
+            sourceSha: binding.rollbackSourceSha,
+            target: binding.deployTarget,
+            deploymentId: binding.rollbackDeploymentId,
+          };
+        }
+      }
+      return { state: "DELIVERY_FAILED", authorizationId: id, detail: "rollback SUCCEEDED 但缺少 durable rollback receipt 证据；fail closed" };
+    }
+    const evidence = receipt?.verifyEvidence;
+    if (
+      receipt?.verifyComplete === true &&
+      receipt.authorizationId === id &&
+      evidence &&
+      typeof evidence.sourceSha === "string" &&
+      typeof evidence.target === "string" &&
+      typeof evidence.deploymentId === "string"
+    ) {
+      return {
+        state: "DELIVERY_DONE",
+        authorizationId: id,
+        sourceSha: evidence.sourceSha,
+        target: evidence.target,
+        deploymentId: evidence.deploymentId,
+      };
+    }
+    return { state: "DELIVERY_FAILED", authorizationId: id, detail: "SUCCEEDED 但缺少匹配的 durable verifyEvidence；fail closed，绝不捏造身份" };
+  }
+  return undefined; // REJECTED/REVOKED/STALE/EXPIRED：没有可投影的 delivery 进展。
 }
 
 export function projectHostVerificationProgress(
@@ -518,6 +627,7 @@ export function projectTaskProgress(
   else phase = "completed";
 
   const progressAt = latestMeaningfulProgressAt(task, jobs, audits);
+  const deliveryAuthorization = projectDeliveryAuthorization(db, task.taskId);
   const now = options.now?.() ?? Date.now();
   const stallAfterMs = options.stallAfterMs ?? DEFAULT_TASK_STALL_AFTER_MS;
   const inactiveForMs = Math.max(0, now - progressAt);
@@ -548,6 +658,7 @@ export function projectTaskProgress(
     blocker,
     nextAction,
     liveness,
+    ...(deliveryAuthorization === undefined ? {} : { deliveryAuthorization }),
   };
 }
 

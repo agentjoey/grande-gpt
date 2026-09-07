@@ -4,8 +4,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { beginAudit, getAudit } from "../src/audit.ts";
 import { openDb } from "../src/db.ts";
+import { APPROVAL_TTL_MS, createAuthorization } from "../src/deliveryAuthorization.ts";
+import { projectDeliveryTargetProgress } from "../src/deliveryTarget.ts";
 import { createJob } from "../src/jobs.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
+import { saveExplicitDeliveryTarget } from "../src/taskDeliveryTarget.ts";
 import { projectTaskProgress } from "../src/taskProgress.ts";
 import { createTask } from "../src/tasks.ts";
 
@@ -220,6 +223,203 @@ describe("task lifecycle projection", () => {
     expect(progress.stages.tests.state).toBe("pending");
     expect(progress.stages.tests.detail).toContain("未提交");
     expect(progress.completed).toBe(false);
+    db.close();
+  });
+});
+
+describe("V2 delivery authorization projection (explicit deliveryTarget=deploy)", () => {
+  const TASK = "task-progress";
+
+  function deployTask(db: ReturnType<typeof openDb>) {
+    const t = task(db);
+    saveExplicitDeliveryTarget(db, TASK, "deploy");
+    return t;
+  }
+
+  function insertAuth(
+    db: ReturnType<typeof openDb>,
+    status: string,
+    opts: { stages?: unknown; reason?: string } = {},
+  ): { authorizationId: string; bindingDigest: string; expiresAt: number } {
+    const createdAt = Date.now();
+    const auth = createAuthorization(db, {
+      kind: "delivery",
+      taskId: TASK,
+      binding: {
+        authorizationKind: "delivery",
+        taskId: TASK,
+        repoId: "demo",
+        worktreeRealpath: "/tmp/wt",
+        deliveryTarget: "deploy",
+        deployTarget: "production",
+        deploySpecDigest: `sha256:${"0".repeat(64)}`,
+        policyDigest: `sha256:${"0".repeat(64)}`,
+        runtimeBuild: "test",
+        toolsetEpoch: 1,
+        toolsDigest: `sha256:${"0".repeat(64)}`,
+        createdAt,
+        expiresAt: createdAt + APPROVAL_TTL_MS,
+        prNumber: 1,
+        baseRef: "main",
+        baseSha: "1".repeat(40),
+        headSha: "2".repeat(40),
+        mergeMethod: "merge",
+        expectedMergeTree: "3".repeat(40),
+        deployRef: "capability:platform/deploy",
+        verifyRef: "capability:platform/verify",
+      },
+      stages: {},
+    });
+    db.prepare("UPDATE delivery_authorization SET status=?, stageJson=?, reason=? WHERE authorizationId=?")
+      .run(status, JSON.stringify(opts.stages ?? {}), opts.reason ?? null, auth.authorizationId);
+    return { authorizationId: auth.authorizationId, bindingDigest: auth.bindingDigest, expiresAt: createdAt + APPROVAL_TTL_MS };
+  }
+
+  function insertReceipt(db: ReturnType<typeof openDb>, receipt: Record<string, unknown>): void {
+    db.prepare("INSERT INTO deployment_receipt (taskId,receiptJson,updatedAt) VALUES (?,?,?)")
+      .run(TASK, JSON.stringify(receipt), Date.now());
+  }
+
+  function project(db: ReturnType<typeof openDb>, t: ReturnType<typeof task>) {
+    const progress = projectTaskProgress(db, t, { ...baseOptions, deployConfigured: () => true });
+    return projectDeliveryTargetProgress(progress, "deploy", TASK);
+  }
+
+  it("READY → READY_FOR_DELIVERY_APPROVAL，唯一动作是停下等 Human Console 审批", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = deployTask(db);
+    const auth = insertAuth(db, "READY");
+
+    const progress = project(db, t);
+    expect(progress.deliveryAuthorization).toEqual({
+      state: "READY_FOR_DELIVERY_APPROVAL",
+      authorizationId: auth.authorizationId,
+      bindingDigest: auth.bindingDigest,
+      expiresAt: auth.expiresAt,
+    });
+    expect(progress.nextAction).toContain("Human Console");
+    expect(progress.liveness.nextAction).toBe(progress.nextAction);
+    db.close();
+  });
+
+  it("APPROVED → DELIVERY_APPROVED，唯一动作是 grande_pr_merge", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = deployTask(db);
+    const auth = insertAuth(db, "APPROVED");
+
+    const progress = project(db, t);
+    expect(progress.deliveryAuthorization).toEqual({
+      state: "DELIVERY_APPROVED",
+      authorizationId: auth.authorizationId,
+    });
+    expect(progress.nextAction).toBe("调用 grande_pr_merge");
+    db.close();
+  });
+
+  it("EXECUTING：stage 由 receipt 只读推导（merge/deploy/verify/rollback），动作唯一", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = deployTask(db);
+    const auth = insertAuth(db, "EXECUTING");
+
+    const noReceipt = project(db, t);
+    expect(noReceipt.deliveryAuthorization).toMatchObject({ state: "DELIVERY_EXECUTING", stage: "merge" });
+    expect(noReceipt.nextAction).toContain("grande_pr_merge");
+
+    insertReceipt(db, { taskId: TASK, authorizationId: auth.authorizationId, stages: { deploy: "running", verify: "pending" } });
+    const deploying = project(db, t);
+    expect(deploying.deliveryAuthorization).toMatchObject({ state: "DELIVERY_EXECUTING", stage: "deploy" });
+    expect(deploying.nextAction).toBe("调用 grande_deploy");
+
+    db.prepare("UPDATE deployment_receipt SET receiptJson=? WHERE taskId=?").run(
+      JSON.stringify({ taskId: TASK, authorizationId: auth.authorizationId, stages: { deploy: "succeeded", verify: "running" } }),
+      TASK,
+    );
+    const verifying = project(db, t);
+    expect(verifying.deliveryAuthorization).toMatchObject({ state: "DELIVERY_EXECUTING", stage: "verify" });
+    expect(verifying.nextAction).toBe("调用 grande_deploy_verify");
+
+    db.prepare("UPDATE deployment_receipt SET receiptJson=? WHERE taskId=?").run(
+      JSON.stringify({ taskId: TASK, authorizationId: auth.authorizationId, stages: { deploy: "succeeded", verify: "succeeded", rollback: "running" } }),
+      TASK,
+    );
+    const rollingBack = project(db, t);
+    expect(rollingBack.deliveryAuthorization).toMatchObject({ state: "DELIVERY_EXECUTING", stage: "rollback" });
+    expect(rollingBack.nextAction).toBe("调用 grande_deploy_rollback");
+    db.close();
+  });
+
+  it("终态 FAILED/UNCERTAIN 行也投影 detail，唯一动作是停止自动工作", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = deployTask(db);
+    const failed = insertAuth(db, "FAILED", { reason: "evidence mismatch" });
+
+    const progress = project(db, t);
+    expect(progress.deliveryAuthorization).toEqual({
+      state: "DELIVERY_FAILED",
+      authorizationId: failed.authorizationId,
+      detail: "evidence mismatch",
+    });
+    expect(progress.nextAction).toContain("停止自动工作");
+    expect(progress.liveness.nextAction).toBe(progress.nextAction);
+
+    db.prepare("UPDATE delivery_authorization SET status='UNCERTAIN', reason=? WHERE authorizationId=?")
+      .run("response lost", failed.authorizationId);
+    const uncertain = project(db, t);
+    expect(uncertain.deliveryAuthorization).toEqual({
+      state: "DELIVERY_UNCERTAIN",
+      authorizationId: failed.authorizationId,
+      detail: "response lost",
+    });
+    expect(uncertain.nextAction).toContain("停止自动工作");
+    db.close();
+  });
+
+  it("SUCCEEDED + durable verifyComplete/verifyEvidence → DELIVERY_DONE 带真实身份；证据缺失则 fail closed", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = deployTask(db);
+    const auth = insertAuth(db, "SUCCEEDED");
+    insertReceipt(db, {
+      taskId: TASK,
+      authorizationId: auth.authorizationId,
+      verifyComplete: true,
+      verifyEvidence: { target: "production", deploymentId: "dep-9", sourceSha: "a".repeat(40) },
+      stages: { deploy: "succeeded", verify: "succeeded" },
+    });
+
+    const progress = project(db, t);
+    expect(progress.deliveryAuthorization).toEqual({
+      state: "DELIVERY_DONE",
+      authorizationId: auth.authorizationId,
+      sourceSha: "a".repeat(40),
+      target: "production",
+      deploymentId: "dep-9",
+    });
+    expect(progress.nextAction).toBe("无待处理动作");
+
+    db.prepare("UPDATE deployment_receipt SET receiptJson=? WHERE taskId=?").run(
+      JSON.stringify({ taskId: TASK, authorizationId: auth.authorizationId, verifyComplete: false }),
+      TASK,
+    );
+    const failClosed = project(db, t);
+    expect(failClosed.deliveryAuthorization?.state).toBe("DELIVERY_FAILED");
+    expect(failClosed.deliveryAuthorization).toMatchObject({ authorizationId: auth.authorizationId });
+    db.close();
+  });
+
+  it("没有显式 target=deploy 的任务不出现 deliveryAuthorization 字段（legacy 不变）", () => {
+    const layout = loadLayout();
+    const db = openDb(layout);
+    const t = task(db);
+    insertAuth(db, "APPROVED");
+
+    const progress = projectTaskProgress(db, t, { ...baseOptions, deployConfigured: () => true });
+    expect(progress.deliveryAuthorization).toBeUndefined();
+    expect("deliveryAuthorization" in progress).toBe(false);
     db.close();
   });
 });
