@@ -21,6 +21,12 @@ export interface GithubPullRequestDetail {
   headSha: string;
   headRef: string;
   baseRef: string;
+  /**
+   * Minimal V2 readiness 需要 PR base 的精确 SHA（规格 §7.2「current base SHA 已读取」）。
+   * 真实 GitHub 响应总是带 base.sha；类型上保持可选是为了不打破既有测试 fake——
+   * readiness 侧会对缺失/非 SHA 形状 fail closed。
+   */
+  baseSha?: string;
 }
 
 export interface GithubCheckRun {
@@ -191,6 +197,8 @@ function pullRequestDetail(value: unknown, token: string): GithubPullRequestDeta
     headSha: requiredString(head, "sha", "PR.head"),
     headRef: requiredString(head, "ref", "PR.head"),
     baseRef: requiredString(base, "ref", "PR.base"),
+    // 真实 API 恒有 base.sha；缺失时不抛错、由 readiness 的 SHA 形状校验 fail closed。
+    ...(typeof base.sha === "string" ? { baseSha: base.sha } : {}),
   };
 }
 

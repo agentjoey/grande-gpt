@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { isAbsolute, join, normalize } from "node:path";
 import { parse } from "yaml";
 import type { Layout } from "./layout.ts";
@@ -246,4 +247,73 @@ export function loadDepDirs(layout: Layout, repoId: string): readonly string[] {
     throw new ProfileError("BAD_CONFIG", `${file} 中 depDirs.${repoId} 必须是字符串数组`);
   }
   return forRepo as string[];
+}
+
+// ---------------------------------------------------------------------------
+// Minimal V2 Task 3：delivery readiness 的可信 profile 证据。
+
+export type DeploymentActionRole = "deploy" | "verify" | "rollback";
+
+export interface TrustedProfileEvidence {
+  /** 按 (role, profile) 字典序排列的精确注册记录。 */
+  records: Array<{ role: DeploymentActionRole; profile: RunProfile }>;
+  /** 只覆盖被引用记录的 canonical SHA-256（`sha256:<hex>`）。 */
+  digest: string;
+}
+
+/** canonical JSON：对象键递归字典序，数组保持顺序；undefined 字段被省略。 */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const source = value as Record<string, unknown>;
+    const body = Object.keys(source)
+      .filter((key) => source[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(source[key])}`)
+      .join(",");
+    return `{${body}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+/**
+ * delivery readiness 的 profile 证据（规格 §7.2「deploy/verify 引用的 profile…由可信
+ * 控制平面注册且 role 匹配」与 §8.1「policyDigest 只覆盖本次交付真正依赖的可信配置」）。
+ *
+ * - 每个被引用的 profile 必须存在于控制平面 profiles.yaml（不存在即 PROFILE_NOT_FOUND）；
+ * - 角色匹配沿用 deployment.ts 的边界：deploy 只接受 deploy/deploy-*，rollback 只接受
+ *   rollback/rollback-*，verify 无名字约束；repo 不能把普通测试 profile 冒充生产部署；
+ * - digest 只覆盖【被引用】的记录：无关 profile 的新增/修改不改变 digest，不制造 stale。
+ */
+export function trustedDeploymentProfileEvidence(
+  layout: Layout,
+  repoId: string,
+  refs: ReadonlyArray<{ role: DeploymentActionRole; profile: string }>,
+): TrustedProfileEvidence {
+  const records: Array<{ role: DeploymentActionRole; profile: RunProfile }> = [];
+  for (const ref of refs) {
+    if (typeof ref.profile !== "string" || ref.profile.trim().length === 0) {
+      throw new ProfileError("BAD_CONFIG", "deploy spec 引用的 profile 名必须是非空字符串。");
+    }
+    const name = ref.profile;
+    if (ref.role === "deploy" && !/^deploy(?:-|$)/.test(name)) {
+      throw new ProfileError(
+        "POLICY_DENIED",
+        `deploy.profile=${name} 不是 deploy/deploy-*；repo 不能把普通测试 profile 冒充生产部署。`,
+      );
+    }
+    if (ref.role === "rollback" && !/^rollback(?:-|$)/.test(name)) {
+      throw new ProfileError("POLICY_DENIED", `rollback.profile=${name} 不是 rollback/rollback-*。`);
+    }
+    records.push({ role: ref.role, profile: profileOrThrow(layout, repoId, name) });
+  }
+  records.sort((a, b) =>
+    a.role === b.role
+      ? (a.profile.name < b.profile.name ? -1 : a.profile.name > b.profile.name ? 1 : 0)
+      : (a.role < b.role ? -1 : 1),
+  );
+  const digest = `sha256:${createHash("sha256")
+    .update(canonicalJson(records), "utf8")
+    .digest("hex")}`;
+  return { records, digest };
 }
