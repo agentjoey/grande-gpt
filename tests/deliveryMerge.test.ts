@@ -162,6 +162,18 @@ describe("ensurePinnedReleaseSource", () => {
     expect(git(pinned.realpath, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
   });
 
+  it("创建之时 canonical 已经领先于 mergeSha，pinned 仍精确钉在 mergeSha（不 checkout 可移动 ref）", () => {
+    // 这条钉住规格 §10.2「Do not deploy from moving canonical main」：【创建之时】canonical
+    // 已经前进，exact commit 与 HEAD 取值已经不同。若实现误用可移动 ref（HEAD 或分支名）
+    // 而不是 mergeSha，pinned 会钉到错误的 commit 上——这条测试必须变红。
+    commitFile(canonical, "later.txt", "later\n", "canonical advances before pin");
+    expect(git(canonical, "rev-parse", "HEAD")).not.toBe(mergeSha);
+    const pinned = ensurePinnedReleaseSource(input());
+    expect(pinned.headSha).toBe(mergeSha);
+    expect(pinned.tree).toBe(expectedTree);
+    expect(git(pinned.realpath, "rev-parse", "HEAD")).toBe(mergeSha);
+  });
+
   it("canonical 之后继续前进，pinned release source 仍钉在 mergeSha", () => {
     const pinned = ensurePinnedReleaseSource(input());
     commitFile(canonical, "later.txt", "later\n", "canonical advances");
