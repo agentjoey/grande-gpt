@@ -224,7 +224,7 @@ features:
         deps: [minv2-gw-4-console-api]
       - id: minv2-gw-6-deploy
         owner: w1
-        status: awaiting_review
+        status: changes_requested
         reviewer: rev
         spec: .pact/tasks/minv2-gw-6-deploy.md
         evidence: Task 6 (delivery evidence + authorization-gated deploy/verify/rollback + status projection) complete in 6 slices. RED first: tests/deliveryEvidence.test.ts initially failed with module-not-found (../src/deliveryEvidence.ts) before implementation. Final gate: pnpm exec vitest run tests/deliveryEvidence.test.ts tests/deployment.test.ts tests/deploymentRetry.test.ts tests/rollback.test.ts tests/taskProgress.test.ts → Test Files 5 passed (5), Tests 70 passed (70); pnpm typecheck (tsc --noEmit) clean; git diff --check clean. Mutation check (slice 5): removing the rollback delivery-kind rejection turned the dedicated test RED, restoring it returned GREEN. No real deployment performed — all side effects via seams/stubs/durable job rows. File scope exactly 10 files: src/deliveryEvidence.ts, src/deployment.ts, src/deploymentHostRunner.ts, src/taskProgress.ts, src/deliveryTarget.ts, tests/deliveryEvidence.test.ts, tests/deployment.test.ts, tests/deploymentRetry.test.ts, tests/rollback.test.ts, tests/taskProgress.test.ts. Commit f9d2bb9 "feat: enforce authorized delivery evidence".
