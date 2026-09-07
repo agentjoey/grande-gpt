@@ -192,14 +192,15 @@ describe("工具注解", () => {
     expect(haystack).toMatch(/\bok\b|\bslow\b|curl-probe|\bfail\b/);
   });
 
-  it("repo_read/repo_search 描述明确给出默认值、硬上限与搜索结果字节预算，且 epoch 仍为 2", () => {
+  it("repo_read/repo_search 描述明确给出默认值、硬上限与搜索结果字节预算，且 epoch 已为 3", () => {
     const tools = buildTools(deps);
     const read = tools.find((t) => t.name === "grande_repo_read")!;
     const search = tools.find((t) => t.name === "grande_repo_search")!;
 
     expect(read.description).toMatch(/16\s*KiB.*24\s*KiB/s);
     expect(search.description).toMatch(/20.*25.*16\s*KiB/s);
-    expect(TOOLSET_EPOCH).toBe(2);
+    // Task 7 closeout：正式 epoch 3（唯一 delta 是 grande_task_open 可选 deliveryTarget）。
+    expect(TOOLSET_EPOCH).toBe(3);
   });
 
   it("assembled tool contract 保持 GG-BL-028 stabilized contract digest", () => {
@@ -208,7 +209,7 @@ describe("工具注解", () => {
     const pinnedDigest = "sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496";
     expect(toolsetIdentity(assembled, "db5d020-test-build")).toEqual({
       gatewayBuild: "db5d020-test-build",
-      toolsetEpoch: 2,
+      toolsetEpoch: 3,
       toolsCount: 25,
       toolsDigest: pinnedDigest,
     });

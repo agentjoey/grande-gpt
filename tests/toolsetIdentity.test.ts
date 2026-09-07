@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { openDb } from "../src/db.ts";
+import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import * as toolsModule from "../src/tools.ts";
-import type { ToolDef } from "../src/tools.ts";
+import type { ToolDef, ToolDeps } from "../src/tools.ts";
 
 const noop = async () => ({ structuredContent: { ok: true } });
 
@@ -138,5 +143,75 @@ describe("toolset identity", () => {
     expect(buildIdentity!({ GRANDE_GATEWAY_BUILD: " release-42 " } as NodeJS.ProcessEnv, process.cwd()))
       .toBe("release-42");
     expect(buildIdentity!({} as NodeJS.ProcessEnv, process.cwd())).toMatch(/^git:[0-9a-f]{40}$/);
+  });
+});
+
+/**
+ * Task 7 closeout：正式 public contract identity。
+ *
+ * 本 feature 唯一 intentional public contract delta 是 grande_task_open 的可选
+ * deliveryTarget 字段（Task 1 已进 schema，digest d5243888… 已含它）。closeout
+ * 把这个 delta 正式结算为 TOOLSET_EPOCH=3；contract 本身不再变化——不新增
+ * public argv/approval/nonce 工具，也不移除 grande_deploy_verify——所以
+ * stabilized digest 与 toolsCount 保持 Task 1 之后的值。
+ *
+ * RED 锚点：当前 src/toolsetIdentity.ts 的 TOOLSET_EPOCH 仍是 2。
+ */
+describe("Task 7 closeout：正式 toolset epoch/digest 与 public surface", () => {
+  const CLOSEOUT_EPOCH = 3;
+  const CLOSEOUT_DIGEST = "sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496";
+  const CLOSEOUT_TOOLS_COUNT = 25;
+
+  let root: string;
+  let layout: Layout;
+  let deps: ToolDeps;
+  let savedWs: string | undefined;
+  let savedCtrl: string | undefined;
+
+  beforeEach(() => {
+    savedWs = process.env.GRANDE_WORKSPACE;
+    savedCtrl = process.env.GRANDE_CONTROL;
+    root = mkdtempSync(join(tmpdir(), "toolset-closeout-"));
+    process.env.GRANDE_WORKSPACE = join(root, "workspace");
+    process.env.GRANDE_CONTROL = join(root, "control");
+    mkdirSync(process.env.GRANDE_WORKSPACE, { recursive: true });
+    mkdirSync(process.env.GRANDE_CONTROL, { recursive: true });
+    layout = loadLayout();
+    ensureLayout(layout);
+    deps = { db: openDb(layout), layout };
+  });
+
+  afterEach(() => {
+    deps.db.close();
+    if (savedWs === undefined) delete process.env.GRANDE_WORKSPACE; else process.env.GRANDE_WORKSPACE = savedWs;
+    if (savedCtrl === undefined) delete process.env.GRANDE_CONTROL; else process.env.GRANDE_CONTROL = savedCtrl;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("assembled toolset 的正式 closeout identity：epoch 3 + Task 1 之后的 stabilized digest", () => {
+    const identity = toolsModule.toolsetIdentity(toolsModule.buildTools(deps), "task7-closeout-build");
+    expect(identity).toEqual({
+      gatewayBuild: "task7-closeout-build",
+      toolsetEpoch: CLOSEOUT_EPOCH,
+      toolsCount: CLOSEOUT_TOOLS_COUNT,
+      toolsDigest: CLOSEOUT_DIGEST,
+    });
+    expect(toolsModule.TOOLSET_EPOCH).toBe(CLOSEOUT_EPOCH);
+  });
+
+  it("grande_task_open 的可选 deliveryTarget 是唯一 intentional delta；无 public argv/approval/nonce 工具", () => {
+    const tools = toolsModule.buildTools(deps);
+    const open = tools.find((t) => t.name === "grande_task_open")!;
+    const deliveryTarget = open.inputSchema.properties.deliveryTarget as
+      | { type?: string; enum?: string[] }
+      | undefined;
+    expect(deliveryTarget).toMatchObject({ type: "string", enum: ["local", "pr", "deploy"] });
+    expect(open.inputSchema.required ?? []).not.toContain("deliveryTarget");
+
+    const names = tools.map((t) => t.name);
+    expect(names).toContain("grande_deploy_verify");
+    for (const name of names) {
+      expect(name).not.toMatch(/argv|nonce|approv/i);
+    }
   });
 });

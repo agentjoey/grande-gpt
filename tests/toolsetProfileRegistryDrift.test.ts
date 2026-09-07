@@ -86,7 +86,7 @@ describe("GG-BL-028 profile registry toolset identity", () => {
     expect(afterIdentity.toolsDigest).toBe(beforeIdentity.toolsDigest);
     expect(beforeIdentity.toolsCount).toBe(25);
     expect(afterIdentity.toolsCount).toBe(25);
-    expect(TOOLSET_EPOCH).toBe(2);
+    expect(TOOLSET_EPOCH).toBe(3);
 
     const beforeProfileDescription = (beforeRun.inputSchema.properties.profile as { description?: string }).description;
     const afterProfileDescription = (afterRun.inputSchema.properties.profile as { description?: string }).description;

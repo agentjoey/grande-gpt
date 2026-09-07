@@ -135,7 +135,7 @@ done_when: "Human Owner 于 2026-08-30 明确接受剩余 observation 风险并�
 ```yaml alljobs
 id: GG-BL-024
 work_mode: implementation
-status: blocked
+status: in-progress
 priority: P2
 phase: phase-9
 done_when: ①旧 25-tool identity 与新 identity 明确不同且新 count/epoch/digest 稳定；② public
@@ -149,6 +149,7 @@ done_when: ①旧 25-tool identity 与新 identity 明确不同且新 count/epoc
 - **Category**: MCP contract / tool surface
 - **Problem**: 当前 25-tool contract 中仍有 onboarding 两工具、capability inspect、deploy verify、task close 等可在保持风险语义的前提下合并或内部化；Phase 8 的 internal delivery-target projection 也尚未进入 public TaskBrief schema。零散修改 tools/list 会放大 ChatGPT binding/snapshot 排障变量。
 - **Evidence / Detail**: 2026-08-22 owner-approved simplification proposal 要求一次正式 tool epoch 收敛；Phase 8 已完成 no-tool-epoch primitives，且 production 仍保持 25 tools / epoch 2 / 原 digest。`GG-BL-010` 证明 session/app binding 与 server tool identity 可分叉，因此本项目前被 release gate 阻塞。
+- **2026-09-08 Minimal V2 closeout（Gateway code complete, pending production delivery）**: Minimal V2 automatic terminal delivery 已在 Gateway 侧完成实现与 focused 验证——public contract 唯一 intentional delta 是 `grande_task_open` 可选 `deliveryTarget`(local/pr/deploy)；正式 identity 收敛为 **epoch 3 / toolsCount 25 / digest `sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`**(epoch 唯一 source of truth 是 `contract.ts` 的 `PUBLIC_TOOLSET_EPOCH`，与 `GG-BL-010` frozen identity epoch 2 / digest `7f9d2a32…` 明确不同）。Console delivery approval API handoff 见 [`docs/contracts/2026-09-04-minimal-v2-console-api.md`](contracts/2026-09-04-minimal-v2-console-api.md):Human 只在 Console 审批一次，approval/nonce/argv 不进 public MCP；approval 后 merge/deploy/verify 仍由 GrandeGPT 工具推进，`grande-gpt` 自身 DONE 另有 activation receipt 门禁。验证证据：Task 7 focused 8 files / 101 tests PASS + `pnpm typecheck` 干净。**尚未 production deploy/push，未做 Dev/Production App refresh 与目标客户端 fresh-conversation 验证**——done_when ③（删除工具收敛，本轮刻意保留 `grande_deploy_verify` 等全部 25 工具）、④（repo_register 收敛）、⑥（task_close 移除）、⑦（production client 验证）、⑧（rollback 演练）均未执行，因此本条保持非 DONE。
 - **Next**: **先完成 `GG-BL-010` release-ready gate，不提前改 production contract。** gate 满足后一次 release 完成：① public `TaskBrief.deliveryTarget`；② `repo_add_propose/apply → grande_repo_register`；③ capability inspect 并入 list filter；④ deploy verify 并入可重入 deploy；⑤正常完成路径移除公开 task_close；⑥ bump toolset epoch 并执行 Dev/Production App refresh。
 - **Original status**: BLOCKED
 

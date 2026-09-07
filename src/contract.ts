@@ -101,3 +101,21 @@ export const CONSOLE_TOOLS = [
 ] as const;
 
 export type AuditedTool = (typeof MCP_WRITE_TOOLS)[number] | (typeof CONSOLE_TOOLS)[number];
+
+// ─────────────────────────────────────────────────────────────────────────
+// 公开 toolset epoch（Task 7 closeout）
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * 正式 public toolset epoch 的**唯一** source of truth。
+ *
+ * Minimal V2 delivery 的唯一 intentional public contract delta 是
+ * `grande_task_open` 的可选 `deliveryTarget` 字段；Task 7 closeout 把它正式
+ * 结算为 epoch 3。toolsDigest 只覆盖 name+schema+annotations，不含 epoch，
+ * 因此 digest 不因本次 bump 变化。
+ *
+ * `src/toolsetIdentity.ts` 的 `TOOLSET_EPOCH` 直接等于本常量（单向引用，
+ * contract.ts 保持零 import）；gatewayCli、src/tools.ts、server
+ * （withToolsetIdentity）与 selfcheck 读到的是同一个值，不存在第二份。
+ */
+export const PUBLIC_TOOLSET_EPOCH = 3;

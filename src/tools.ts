@@ -3,7 +3,7 @@ import { checkArgs } from "./argCheck.ts";
 import { beginAudit } from "./audit.ts";
 import { addCapabilityTools } from "./capabilities.ts";
 import { refreshCanonical } from "./canonicalRefresh.ts";
-import { addDeploymentTools } from "./deployment.ts";
+import { addDeploymentTools, type DeploymentToolOptions } from "./deployment.ts";
 import { err } from "./envelope.ts";
 import { toToolError, redact, StateError } from "./errors.ts";
 import { addFlowSimplification } from "./flowSimplification.ts";
@@ -25,6 +25,8 @@ import {
 } from "./toolsCore.ts";
 
 export type { ToolDef, ToolDeps } from "./toolsCore.ts";
+// TOOLSET_EPOCH 的取值源头是 contract.ts 的 PUBLIC_TOOLSET_EPOCH（toolsetIdentity.ts
+// 单向引用它）；这里恢复直接 re-export，不做任何包装，避免双重 source-of-truth。
 export {
   TOOLSET_EPOCH,
   gatewayBuildIdentity,
@@ -33,7 +35,13 @@ export {
   type ToolsetIdentity,
 } from "./toolsetIdentity.ts";
 
-export type BuildToolsOptions = Pick<PrLifecycleOptions, "hostVerificationMode" | "hostVerifierCoordinator">;
+export interface BuildToolsOptions extends Pick<PrLifecycleOptions, "hostVerificationMode" | "hostVerifierCoordinator"> {
+  /**
+   * 透传给 addDeploymentTools 的既有 seam（如测试用 startHostProfile）。
+   * 只影响 handler 运行时接线，不进入 public schema/digest。
+   */
+  deployment?: DeploymentToolOptions;
+}
 
 const TASK_SCOPED_REPO_WRITES = new Set([
   "grande_commit",
@@ -161,7 +169,7 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
   const withOnboarding = addOnboardingTools(deps, withBrief);
 
   const deploymentDeps = [...withOnboarding];
-  const withDeployment = addDeploymentTools(deps, deploymentDeps);
+  const withDeployment = addDeploymentTools(deps, deploymentDeps, options.deployment);
 
   const withCapabilities = addCapabilityTools(deps, withDeployment);
   const capabilityTools = withCapabilities.slice(withDeployment.length);
@@ -170,9 +178,64 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
   const serialized = withTaskRepoWriteLocks(deps, withCapabilities);
   return stableToolDefinitions(withToolsetIdentity(
     deps,
-    withArgCheck(deps, serialized),
+    withArgCheck(deps, withSelfRepoActivationGate(deps, serialized)),
     options.hostVerificationMode ?? "manual",
   ));
+}
+
+/**
+ * Task 7：Gateway 自身仓库（grande-gpt）的 production DONE activation 门禁。
+ *
+ * grande_deploy_verify 在 durable deployment receipt 已 deployComplete、尚未
+ * verifyComplete 时，下一次推进就可能进入 DONE（profile：观察已通过 verify job；
+ * capability：invoke 后直接 DONE）。对 repoId=grande-gpt，这一步之前必须存在
+ * durable activation receipt/readback（activationReceipt.ts 的单例表，由
+ * grande activate 的 trusted read probe 落账）；缺失时在 inner handler【之前】
+ * fail closed——authorization 保持 EXECUTING、verify 证据不落账。补齐 receipt
+ * 后重入同一 durable evidence 可正常 DONE；verifyComplete 的重入观察始终放行。
+ * 其他 repo 完全不经此门禁。
+ */
+function withSelfRepoActivationGate(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
+  const SELF_REPO_ID = "grande-gpt";
+  const verify = tools.find((tool) => tool.name === "grande_deploy_verify");
+  if (!verify) return tools;
+  const inner = verify.handler;
+  verify.handler = async (args) => {
+    const taskId = typeof args.taskId === "string" ? args.taskId : null;
+    const task = taskId ? getTask(deps.db, taskId) : null;
+    if (!task || task.repoId !== SELF_REPO_ID) return inner(args);
+    if (getLatestActivationReceipt(deps.db)) return inner(args);
+
+    const row = deps.db
+      .prepare("SELECT receiptJson FROM deployment_receipt WHERE taskId=?")
+      .get(task.taskId) as { receiptJson: string } | undefined;
+    let deployComplete = false;
+    let verifyComplete = true;
+    if (row) {
+      try {
+        const receipt = JSON.parse(row.receiptJson) as { deployComplete?: unknown; verifyComplete?: unknown };
+        deployComplete = receipt.deployComplete === true;
+        verifyComplete = receipt.verifyComplete === true;
+      } catch {
+        // receipt 损坏交给 inner handler 的既有 fail-closed 路径报告。
+        return inner(args);
+      }
+    }
+    // 只在「本次调用可能进入 DONE」时拦截：未 deployComplete 的调用仍在
+    // deploy 观察/启动 verify job 阶段；已 verifyComplete 的是幂等重入观察。
+    if (!deployComplete || verifyComplete) return inner(args);
+
+    const error = new StateError(
+      "POLICY_DENIED",
+      `任务 ${task.taskId} 属于 ${SELF_REPO_ID}：进入 DONE 之前必须存在 durable activation ` +
+        "receipt/readback，当前没有任何 activation receipt；拒绝完成 production verify，" +
+        "authorization 保持 EXECUTING。先完成 grande activate 的 trusted read probe。",
+    );
+    const toolError = toToolError(error);
+    toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+    return { structuredContent: err({ ...toolError, taskId: task.taskId }) };
+  };
+  return tools;
 }
 
 /**

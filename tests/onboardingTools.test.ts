@@ -85,7 +85,7 @@ describe("ChatGPT repository onboarding tools", () => {
     expect(apply.annotations).toEqual({ readOnlyHint: false, destructiveHint: false, openWorldHint: false });
 
     expect(tools).toHaveLength(25);
-    expect(TOOLSET_EPOCH).toBe(2);
+    expect(TOOLSET_EPOCH).toBe(3);
     const identity = toolsetIdentity(tools, "test-build");
     expect(identity.toolsCount).toBe(25);
     expect(identity.toolsDigest).toMatch(/^sha256:[0-9a-f]{64}$/);

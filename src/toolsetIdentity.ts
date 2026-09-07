@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { PUBLIC_TOOLSET_EPOCH } from "./contract.ts";
 import type { ToolDef } from "./toolsCore.ts";
 
 /**
@@ -8,8 +9,12 @@ import type { ToolDef } from "./toolsCore.ts";
  * Bump this value ONLY when the externally visible MCP tool contract changes
  * (tool name, input schema, or annotations). Ordinary implementation/build
  * patches keep the same epoch.
+ *
+ * Task 7 closeout 起，正式取值的唯一 source of truth 是 contract.ts 的
+ * PUBLIC_TOOLSET_EPOCH（contract.ts 零 import，本文件单向引用它）；这里只是
+ * 别名，gatewayCli 等直接 import 本模块的路径与 src/tools.ts 看到同一个值。
  */
-export const TOOLSET_EPOCH = 2;
+export const TOOLSET_EPOCH = PUBLIC_TOOLSET_EPOCH;
 
 export interface ToolsetIdentity {
   gatewayBuild: string;

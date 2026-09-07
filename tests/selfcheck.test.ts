@@ -3,8 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openDb } from "../src/db.ts";
+import { MCP_WRITE_TOOLS } from "../src/contract.ts";
 import type { Layout } from "../src/layout.ts";
 import { renderSelfCheck, selfCheck, type SelfCheckResult } from "../src/selfcheck.ts";
+import { TOOLSET_EPOCH } from "../src/tools.ts";
 
 /**
  * 遗留 #4 下半的渲染层。
@@ -19,9 +21,11 @@ const base = {
   httpStatus: 200,
   bytes: 11326,
   gatewayBuild: "build-test-abc",
-  toolsetEpoch: 1,
+  // Task 7 closeout：正式 epoch 3 / stabilized digest（grande_task_open 可选
+  // deliveryTarget 是本 feature 唯一 public contract delta，digest 已含它）。
+  toolsetEpoch: 3,
   toolsCount: 4,
-  toolsDigest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  toolsDigest: "sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496",
   tools: [
     { name: "grande_repo_read", readOnly: true, destructive: false, openWorld: false, requiredParams: ["path"] },
     { name: "grande_task_open", readOnly: false, destructive: false, openWorld: false, requiredParams: ["taskId"] },
@@ -36,7 +40,7 @@ const identity = {
   ok: true,
   data: {
     gatewayBuild: "build-from-wire",
-    toolsetEpoch: 2,
+    toolsetEpoch: 3,
     toolsCount: 1,
     toolsDigest: "sha256:wire",
   },
@@ -106,7 +110,7 @@ describe("selfcheck tool-result compatibility", () => {
     });
 
     expect(result.gatewayBuild).toBe("build-from-wire");
-    expect(result.toolsetEpoch).toBe(2);
+    expect(result.toolsetEpoch).toBe(3);
     expect(result.toolsCount).toBe(1);
     expect(result.toolsDigest).toBe("sha256:wire");
     expect(result.identityError).toBeUndefined();
@@ -159,9 +163,9 @@ describe("自检输出必须能直接支撑 2026-07-29 那次排查", () => {
   it("暴露 server toolset identity，并明确 ChatGPT session binding 无法 server-side 验证", () => {
     const t = text(base);
     expect(t).toContain("build-test-abc");
-    expect(t).toContain("toolsetEpoch  1");
+    expect(t).toContain("toolsetEpoch  3");
     expect(t).toContain("toolsCount    4");
-    expect(t).toContain("sha256:aaaaaaaa");
+    expect(t).toContain("sha256:d5243888");
     expect(t).toContain("ChatGPT session binding");
     expect(t).toContain("server-side 无法直接验证");
   });
@@ -202,5 +206,33 @@ describe("失败路径必须给出可照做的下一步", () => {
     const t = text({ ...base, httpStatus: 500, tools: [] } as SelfCheckResult);
     expect(t).toContain("[gw]");
     expect(t).toContain("[rpc]");
+  });
+});
+
+/**
+ * Task 7 closeout：selfcheck/contract 面的正式身份。
+ *
+ * RED 锚点：当前 src/toolsetIdentity.ts 的 TOOLSET_EPOCH 仍是 2；closeout 要求
+ * 自检报告（与真实 server identity 同源）进入正式 epoch 3。
+ */
+describe("Task 7 closeout：公开契约身份", () => {
+  it("自检报告的正式 toolset epoch 是 3（deliveryTarget 是本 feature 唯一 public contract delta）", () => {
+    expect(TOOLSET_EPOCH).toBe(3);
+  });
+
+  it("渲染输出报告正式 epoch/digest，grande_task_open 的 deliveryTarget 保持可选（不进 requiredParams）", () => {
+    const t = text(base);
+    expect(t).toContain("toolsetEpoch  3");
+    expect(t).toContain("sha256:d5243888");
+    const taskOpen = base.tools.find((tool) => tool.name === "grande_task_open")!;
+    expect(taskOpen.requiredParams).not.toContain("deliveryTarget");
+  });
+
+  it("审计契约没有 public approval/nonce/argv 工具面；grande_deploy_verify 保留", () => {
+    for (const name of MCP_WRITE_TOOLS) {
+      expect(name).not.toMatch(/argv|nonce|approv/i);
+    }
+    expect(MCP_WRITE_TOOLS).toContain("grande_task_open");
+    expect(MCP_WRITE_TOOLS).toContain("grande_deploy_verify");
   });
 });
