@@ -1169,12 +1169,13 @@ describe("网关只绑 loopback（纵深防御的前提）", () => {
 
 describe("控制台写端点：aud 隔离（S2.5 方案 A）", () => {
   const CONSOLE_AUD = "b".repeat(64);
+  const CONSOLE_ORIGIN = "https://console.example.test";
 
   function consoleCfg(): AppConfig {
     return {
       issuer: ISSUER, layout, db: openDb(layout),
       accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },
-      consoleAccessConfig: { teamDomain: ACCESS_TEAM, aud: CONSOLE_AUD },
+      consoleAccessConfig: { teamDomain: ACCESS_TEAM, aud: CONSOLE_AUD, origin: CONSOLE_ORIGIN },
     };
   }
 
@@ -1182,7 +1183,8 @@ describe("控制台写端点：aud 隔离（S2.5 方案 A）", () => {
     expect(() => createApp({
       issuer: ISSUER, layout, db: openDb(layout),
       accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },
-      consoleAccessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },  // 同一个
+      // 同一个 aud；origin 照常提供，证明拒绝的唯一原因是 aud 相同。
+      consoleAccessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD, origin: CONSOLE_ORIGIN },
     })).toThrow(/aud 相同/);
   });
 
@@ -1240,5 +1242,77 @@ describe("控制台写端点：aud 隔离（S2.5 方案 A）", () => {
     expect(row).toBeDefined();
     expect(row!.decision).toBe("ALLOWED");
     expect(row!.state).toBe("SUCCEEDED");
+  });
+});
+
+describe("控制台 delivery 审批 API（Minimal V2 Task 4）：真实门禁接线", () => {
+  const DELIVERY_AUD = "c".repeat(64);
+  const DELIVERY_ORIGIN = "https://console.example.test";
+
+  function deliveryApp(): Hono {
+    return createApp({
+      issuer: ISSUER, layout, db: openDb(layout),
+      accessConfig: { teamDomain: ACCESS_TEAM, aud: ACCESS_AUD },
+      consoleAccessConfig: { teamDomain: ACCESS_TEAM, aud: DELIVERY_AUD, origin: DELIVERY_ORIGIN },
+    });
+  }
+
+  const challengePath = "/console/delivery/authz_unknown/challenge";
+  const challengeInit = (headers: Record<string, string>) => ({
+    method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: JSON.stringify({ bindingDigest: `sha256:${"0".repeat(64)}` }),
+  });
+
+  it("无 Access JWT → 403", async () => {
+    const a = deliveryApp();
+    const res = await a.request(challengePath, challengeInit({ Origin: DELIVERY_ORIGIN }));
+    expect(res.status).toBe(403);
+  });
+
+  it("签名合法但 aud 是 /mcp 的 Access 令牌 → 403（审批路由只认控制台 aud）", async () => {
+    const a = deliveryApp();
+    const res = await a.request(challengePath, challengeInit({
+      "Cf-Access-Jwt-Assertion": await signAccessAssertion({ aud: ACCESS_AUD }),
+      Origin: DELIVERY_ORIGIN,
+    }));
+    expect(res.status).toBe(403);
+  });
+
+  it("控制台令牌但 Origin 缺失/错误 → 403", async () => {
+    const a = deliveryApp();
+    const jwt = await signAccessAssertion({ aud: DELIVERY_AUD });
+    expect((await a.request(challengePath, challengeInit({ "Cf-Access-Jwt-Assertion": jwt }))).status).toBe(403);
+    expect((await a.request(challengePath, challengeInit({
+      "Cf-Access-Jwt-Assertion": jwt, Origin: "https://evil.example.test",
+    }))).status).toBe(403);
+  });
+
+  it("控制台令牌 + 精确 Origin + 合法 JSON → 穿过门禁到达路由（未知 id → 404），响应带安全头", async () => {
+    const a = deliveryApp();
+    const res = await a.request(challengePath, challengeInit({
+      "Cf-Access-Jwt-Assertion": await signAccessAssertion({ aud: DELIVERY_AUD }),
+      Origin: DELIVERY_ORIGIN,
+    }));
+    expect(res.status).toBe(404);
+    expect((await res.json() as { error: { code: string } }).error.code).toBe("auth_not_found");
+    expect(res.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(res.headers.get("referrer-policy")).toBe("no-referrer");
+  });
+
+  it("非 JSON body → 400", async () => {
+    const a = deliveryApp();
+    const res = await a.request(challengePath, {
+      method: "POST",
+      headers: {
+        "Cf-Access-Jwt-Assertion": await signAccessAssertion({ aud: DELIVERY_AUD }),
+        Origin: DELIVERY_ORIGIN,
+        "content-type": "text/plain",
+      },
+      body: "hello",
+    });
+    expect(res.status).toBe(400);
   });
 });

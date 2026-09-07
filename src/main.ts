@@ -3,8 +3,8 @@ import { pathToFileURL } from "node:url";
 import { openDb } from "./db.ts";
 import { ensureLayout, loadLayout } from "./layout.ts";
 import { startGateway } from "./server.ts";
-import { loadAccessConfig, AccessConfigError, type AccessConfig } from "./accessGate.ts";
-import { loadConsoleAccessConfig } from "./consoleAuth.ts";
+import { loadAccessConfig, AccessConfigError } from "./accessGate.ts";
+import { loadConsoleAccessConfig, type ConsoleAccessConfig } from "./consoleAuth.ts";
 import { awaitAllDeploymentHostJobsSettled } from "./deploymentHostRunner.ts";
 import { awaitAllJobsSettled } from "./runner.ts";
 import { planGc, applyGcWithRepoWriteLocks } from "./worktreeGc.ts";
@@ -32,7 +32,7 @@ async function main(): Promise<void> {
   const accessConfig = loadAccessConfig(layout);
   // 控制台配置缺失不致命：没配就是没装控制台，写端点整组不挂载。
   // 但**格式错误是致命的**——那说明有人试图配它却配错了，静默跳过会让人以为装上了。
-  let consoleAccessConfig: AccessConfig | undefined;
+  let consoleAccessConfig: ConsoleAccessConfig | undefined;
   try {
     consoleAccessConfig = loadConsoleAccessConfig(layout);
   } catch (e) {

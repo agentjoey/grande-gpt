@@ -1,8 +1,67 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
-import { AccessConfigError, type AccessConfig } from "./accessGate.ts";
+import { AccessConfigError, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
 import type { Layout } from "./layout.ts";
+
+/**
+ * 控制台的 Access 配置（`access-console.yaml`），在 `/mcp` 那份的基础上多一个
+ * **可信 Origin**——审批写端点的 CSRF 边界：浏览器跨站 POST 会带调用方页面的
+ * `Origin`，而 Access JWT 是浏览器自动携带的；只有「JWT 合法 **且** Origin 精确
+ * 等于配置」同时成立才允许写。
+ */
+export interface ConsoleAccessConfig extends AccessConfig {
+  /** 归一化后的 origin：`https://host[:port]`，无路径、无尾斜杠。 */
+  origin: string;
+}
+
+/**
+ * 把配置里的 origin 收敛成规范形式。校验在配置侧做一次（启动时），请求侧只做
+ * 逐字节比较——请求侧不宽容，宽容会重新引入绕过面（尾斜杠、默认端口、大小写）。
+ */
+function normalizeConsoleOrigin(value: unknown, file: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new AccessConfigError(
+      "BAD_CONFIG",
+      `${file} 的 origin 必须是非空字符串。origin 是审批端点的 CSRF 边界，` +
+        `缺失的含义是「审批面从未配置」，不是「不校验 Origin」——拒绝启动。`,
+    );
+  }
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new AccessConfigError("BAD_CONFIG", `${file} 的 origin 必须是绝对 URL，实际是 ${JSON.stringify(value)}`);
+  }
+  if (url.protocol !== "https:") {
+    throw new AccessConfigError("BAD_CONFIG", `${file} 的 origin 必须是 https URL，实际是 ${JSON.stringify(value)}`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new AccessConfigError("BAD_CONFIG", `${file} 的 origin 不能带用户名密码，实际是 ${JSON.stringify(value)}`);
+  }
+  if (url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+    throw new AccessConfigError(
+      "BAD_CONFIG",
+      `${file} 的 origin 必须是纯源（协议+主机+端口），不能带路径/query/hash，实际是 ${JSON.stringify(value)}`,
+    );
+  }
+  // URL.origin 已归一化：小写主机名、去默认端口、无尾斜杠。
+  return url.origin;
+}
+
+/**
+ * 请求侧的唯一判据：**逐字节相等**。缺失、`"null"`（不透明来源）、尾斜杠变体、
+ * 不同端口——全部拒绝。判据不在请求侧做归一化：两边的归一化规则只要有一处
+ * 对不齐，就是一条绕过缝。
+ */
+export function assertConsoleOrigin(headers: Headers, expectedOrigin: string): void {
+  const origin = headers.get("Origin");
+  if (origin === null || origin !== expectedOrigin) {
+    throw new AccessDeniedError(
+      "Origin 与控制台可信配置不一致。审批写端点要求 Origin 逐字节等于 access-console.yaml 的 origin。",
+    );
+  }
+}
 
 /**
  * 控制台的 Access 配置（`access-console.yaml`），与 `/mcp` 的那份**分开**。
@@ -22,7 +81,7 @@ import type { Layout } from "./layout.ts";
  * | `/mcp` | `749f9a93…` | **只有 `/authorize`** —— `/mcp` 要给 ChatGPT 用 bearer，不能被 Access 挡 |
  * | 控制台 | `1280de9f…` | **整站** —— 控制台没有机器访问的路径 |
  */
-export function loadConsoleAccessConfig(layout: Layout): AccessConfig {
+export function loadConsoleAccessConfig(layout: Layout): ConsoleAccessConfig {
   const file = join(layout.configDir, "access-console.yaml");
   if (!existsSync(file)) {
     throw new AccessConfigError(
@@ -40,7 +99,7 @@ export function loadConsoleAccessConfig(layout: Layout): AccessConfig {
   if (doc === null || typeof doc !== "object" || Array.isArray(doc)) {
     throw new AccessConfigError("BAD_CONFIG", `${file} 必须是一个映射`);
   }
-  const { teamDomain, aud } = doc as Record<string, unknown>;
+  const { teamDomain, aud, origin } = doc as Record<string, unknown>;
   if (typeof teamDomain !== "string" || teamDomain.length === 0) {
     throw new AccessConfigError("BAD_CONFIG", `${file} 的 teamDomain 必须是非空字符串`);
   }
@@ -52,7 +111,7 @@ export function loadConsoleAccessConfig(layout: Layout): AccessConfig {
   if (typeof aud !== "string" || !/^[0-9a-f]{64}$/i.test(aud)) {
     throw new AccessConfigError("BAD_CONFIG", `${file} 的 aud 必须是 64 位十六进制字符串，实际是 ${JSON.stringify(aud)}`);
   }
-  return { teamDomain, aud };
+  return { teamDomain, aud, origin: normalizeConsoleOrigin(origin, file) };
 }
 
 /**
