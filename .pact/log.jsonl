@@ -149,3 +149,4 @@
 {"event_id":"a9bab872044068fc41371ee9aee0c2a8","ts":"2026-09-07T04:37:27Z","agent_id":"rev","role":"reviewer","event_type":"accept","task_id":"minv2-gw-2-auth","feature":"minv2-gw","payload":{}}
 {"event_id":"495b6b67fa5d738fcefda4ec213cc2b6","ts":"2026-09-07T04:38:17Z","agent_id":"orch","role":"orchestrator","event_type":"start","task_id":"minv2-gw-3-readiness","feature":"minv2-gw","payload":{"owner":"w1"}}
 {"event_id":"37a45efc4c4004baa43e740beadb2a91","ts":"2026-09-07T04:38:27Z","agent_id":"w1","role":"worker","event_type":"join","task_id":"","feature":"","payload":{"client":{"name":"kimi-code","version":"0.0.0"},"protocol_version":1,"roles":["worker"],"task":"minv2-gw-3-readiness"}}
+{"event_id":"ebc30d5145d030cf5c65e4f836c9ba1a","ts":"2026-09-07T05:08:29Z","agent_id":"w1","role":"worker","event_type":"join","task_id":"","feature":"","payload":{"client":{"name":"pactify-cli","version":"0.11.0+dev"},"protocol_version":1,"roles":["worker"]}}
