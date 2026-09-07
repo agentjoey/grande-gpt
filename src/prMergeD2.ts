@@ -1,13 +1,25 @@
 import { beginAudit } from "./audit.ts";
 import { refreshCanonical, type CanonicalRefreshResult } from "./canonicalRefresh.ts";
-import { ok } from "./envelope.ts";
-import { redact } from "./errors.ts";
+import {
+  activeAuthorizationForTask,
+  type DeliveryAuthorizationBinding,
+} from "./deliveryAuthorization.ts";
+import {
+  canonicalRepoPath,
+  ensurePinnedReleaseSource,
+  markMergeAuthorizationUncertain,
+  persistExactMergeReceipt,
+  verifyMergedCommit,
+} from "./deliveryMerge.ts";
+import { err, ok } from "./envelope.ts";
+import { redact, StateError, toToolError } from "./errors.ts";
 import { createGithubApi, type GithubLifecycleApi } from "./githubApi.ts";
 import { loadGithubToken } from "./githubAuth.ts";
 import { reconcileMergedTaskFromRefresh, reconcileObservedMergedTask, type MergeReconcileResult } from "./mergeReconcile.ts";
 import { parseGithubRemote, readGithubRemoteUrl } from "./prOpen.ts";
 import { assertTaskBranch } from "./commit.ts";
-import { getTask } from "./tasks.ts";
+import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
+import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 import type { Layout } from "./layout.ts";
 
@@ -123,6 +135,59 @@ async function observeRemoteMerged(
 }
 
 /**
+ * Minimal V2 Task 5：丢失响应后的 reconcile 路径同样要过 exact 证据检查
+ * （规格 §10.2/§14.3）——reconcile 出的 merge commit 必须验证 parents/tree 并钉住
+ * pinned release source。返回 null 表示无需检查或检查通过；返回 StateError 表示证据
+ * 不符——此时 authorization 已被置为 UNCERTAIN（终态），绝不能继续 deploy。
+ */
+function reconcileAuthorizedDeployEvidence(
+  deps: ToolDeps,
+  task: TaskRow,
+  result: MergeReconcileResult,
+): StateError | null {
+  if (getExplicitDeliveryTarget(deps.db, task.taskId) !== "deploy") return null;
+  // 本地对账没收尾时只重试 reconcile，不定罪——remote merged 本身已经确认。
+  if (result.localState === "merged-but-local-stale") return null;
+  const active = activeAuthorizationForTask(deps.db, task.taskId);
+  if (!active || active.kind !== "delivery" || active.status !== "EXECUTING") return null;
+  const binding = active.binding as DeliveryAuthorizationBinding;
+  const mergeSha = result.canonicalRefresh?.after ?? null;
+  try {
+    if (!mergeSha || !/^[0-9a-f]{40}$/u.test(mergeSha)) {
+      throw new StateError("STALE_STATE", "reconcile 未给出精确 merge SHA，无法确认交付证据。");
+    }
+    const verified = verifyMergedCommit({
+      repoPath: canonicalRepoPath(deps.layout, task.repoId),
+      authorizationId: active.authorizationId,
+      baseSha: binding.baseSha,
+      headSha: binding.headSha,
+      mergeSha,
+      expectedMergeTree: binding.expectedMergeTree,
+    });
+    const pinned = ensurePinnedReleaseSource({
+      layout: deps.layout,
+      repoId: task.repoId,
+      authorizationId: active.authorizationId,
+      mergeSha,
+      expectedTree: binding.expectedMergeTree,
+    });
+    // 幂等：同一 authorizationId 的相同 receipt 重复写入是 no-op（响应丢失重放）。
+    persistExactMergeReceipt(deps.layout, { ...verified, releaseSourceRealpath: pinned.realpath });
+    return null;
+  } catch (error) {
+    const normalized = error instanceof StateError
+      ? error
+      : new StateError("STALE_STATE", error instanceof Error ? error.message : String(error));
+    try {
+      markMergeAuthorizationUncertain(deps.db, active, normalized.message);
+    } catch {
+      // 状态可能已被并发请求推进；不影响本次拒绝。
+    }
+    return normalized;
+  }
+}
+
+/**
  * D2 wrapper around the existing C3 merge gate. It never issues a merge itself.
  * The base tool owns all CI/attestation/receipt/expected-SHA gates and the single
  * remote merge attempt. This layer only observes ambiguous outcomes and reconciles
@@ -180,6 +245,13 @@ export function wrapPrMergeToolD2(
         canonicalRefresher,
       );
       const mergeSha = result.canonicalRefresh?.after ?? null;
+      // Task 5：deploy 任务的 reconcile 结果必须过 exact 证据检查；不符即 UNCERTAIN。
+      const evidenceError = reconcileAuthorizedDeployEvidence(deps, observed.task, result);
+      if (evidenceError) {
+        const toolError = toToolError(evidenceError);
+        toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+        return { structuredContent: err({ ...toolError, taskId }) };
+      }
       recordReconcileAudit(
         deps,
         taskId,

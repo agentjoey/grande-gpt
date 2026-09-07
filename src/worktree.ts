@@ -213,6 +213,32 @@ export function removeWorktree(
   }
 }
 
+/**
+ * Minimal V2 Task 5：固定在精确 commit 上的 detached release worktree（规格 §10.2）。
+ *
+ * 与 task worktree 的区别：不创建分支、不参与任务生命周期、绝不 checkout 可移动 ref——
+ * canonical main 之后被其他任务推进也拖不动它。已存在时只校验 HEAD 是否仍钉在
+ * `commit`，不符即拒绝复用（fail closed，不重建、不 reset）。
+ */
+export function openPinnedWorktree(
+  layout: Layout,
+  repoId: string,
+  options: { dir: string; commit: string },
+): void {
+  const repoRoot = resolveRepoPath(layout, repoId, registeredIds(layout));
+  if (existsSync(options.dir)) {
+    const head = git(options.dir, ["rev-parse", "HEAD"]).trim();
+    if (head !== options.commit) {
+      throw new GitError(
+        "STALE_STATE",
+        `pinned worktree ${options.dir} 的 HEAD=${head}，不是预期的 ${options.commit}；拒绝复用。`,
+      );
+    }
+    return;
+  }
+  git(repoRoot, ["worktree", "add", "--detach", options.dir, options.commit]);
+}
+
 const splitZ = (s: string): string[] => s.split("\0").filter((x) => x.length > 0);
 
 /**

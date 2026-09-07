@@ -1,15 +1,25 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  APPROVAL_TTL_MS,
+  approveAuthorization,
+  createAuthorization,
+  rotateAuthorizationChallenge,
+  type DeliveryAuthorizationBinding,
+} from "../src/deliveryAuthorization.ts";
+import { readExactMergeReceipt } from "../src/deliveryMerge.ts";
+import type { DeliveryReadinessDeps } from "../src/deliveryReadiness.ts";
 import { createDeploymentTools, type DeploymentToolOptions } from "../src/deployment.ts";
 import { openDb } from "../src/db.ts";
-import type { GithubLifecycleApi, GithubPullRequestDetail } from "../src/githubApi.ts";
+import { GithubApiError, type GithubLifecycleApi, type GithubPullRequestDetail } from "../src/githubApi.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createPrMergeTool } from "../src/prLifecycle.ts";
 import { wrapPrMergeToolD2 } from "../src/prMergeD2.ts";
 import { saveRegistry } from "../src/registry.ts";
+import { saveExplicitDeliveryTarget } from "../src/taskDeliveryTarget.ts";
 import { createTask, getTask } from "../src/tasks.ts";
 import type { ToolDef, ToolDeps } from "../src/tools.ts";
 
@@ -199,5 +209,224 @@ describe("D2 deployment response-loss and merge cleanup compatibility", () => {
     expect(refreshCalls).toBe(2);
     expect(existsSync(worktree)).toBe(true);
     expect(getTask(deps.db, taskId)?.state).toBe("READY");
+  });
+});
+
+/**
+ * Minimal V2 Task 5：deploy 任务的 merge 响应丢失路径。
+ * 规格 §10.2/§14.3：丢失响应后只 reconcile、绝不发第二个 merge；reconcile 出的
+ * merge commit 仍须通过 parents/tree 精确验证并钉住 pinned release source，
+ * 否则 authorization 进 UNCERTAIN、不能 deploy。
+ */
+describe("Task 5 authorized merge response-loss reconciliation", () => {
+  const SPEC_DIGEST = `sha256:${"a".repeat(64)}`;
+  const POLICY_DIGEST = `sha256:${"b".repeat(64)}`;
+  const TOOLS_DIGEST = `sha256:${"c".repeat(64)}`;
+  const RUNTIME_BUILD = `git:${"e".repeat(40)}`;
+
+  let expectedTree: string;
+  let createdMerge: string | null;
+
+  function readinessDeps(): DeliveryReadinessDeps {
+    return {
+      readPullRequest: async () => ({ number: 61, baseRef: "main", baseSha: baseCommit, headSha: headCommit, state: "open" }),
+      readRequiredCi: async () => "success",
+      readAttestation: () => ({ commit: headCommit, jobId: "job_att" }),
+      readHostVerification: () => ({ commit: headCommit, jobId: "job_host", planDigest: `sha256:${"d".repeat(64)}` }),
+      computeExpectedMergeTree: () => expectedTree,
+      resolveDeployAction: () => ({
+        deployTarget: "deployment-host:demo/deploy-prod",
+        deployRef: "profile:deploy-prod",
+        verifyRef: "profile:verify-prod",
+        deploySpecDigest: SPEC_DIGEST,
+        policyDigest: POLICY_DIGEST,
+      }),
+      readWorktreeState: () => ({ headSha: headCommit, clean: true, realpath: realpathSync(worktree) }),
+      readRuntimeIdentity: () => ({ runtimeBuild: RUNTIME_BUILD, toolsetEpoch: 2, toolsDigest: TOOLS_DIGEST }),
+    };
+  }
+
+  function approveDeployAuthorization(): { authorizationId: string; bindingDigest: string } {
+    const createdAt = Date.now();
+    const binding: DeliveryAuthorizationBinding = {
+      authorizationKind: "delivery",
+      taskId,
+      repoId: "demo",
+      worktreeRealpath: realpathSync(worktree),
+      deliveryTarget: "deploy",
+      deployTarget: "deployment-host:demo/deploy-prod",
+      deploySpecDigest: SPEC_DIGEST,
+      policyDigest: POLICY_DIGEST,
+      runtimeBuild: RUNTIME_BUILD,
+      toolsetEpoch: 2,
+      toolsDigest: TOOLS_DIGEST,
+      createdAt,
+      expiresAt: createdAt + APPROVAL_TTL_MS,
+      prNumber: 61,
+      baseRef: "main",
+      baseSha: baseCommit,
+      headSha: headCommit,
+      mergeMethod: "merge",
+      expectedMergeTree: expectedTree,
+      deployRef: "profile:deploy-prod",
+      verifyRef: "profile:verify-prod",
+    };
+    const row = createAuthorization(deps.db, {
+      kind: "delivery",
+      taskId,
+      binding,
+      stages: { merge: { state: "pending" }, deploy: { state: "pending" }, verify: { state: "pending" } },
+    });
+    const { approvalNonce } = rotateAuthorizationChallenge(deps.db, row.authorizationId, row.bindingDigest);
+    approveAuthorization(deps.db, {
+      authorizationId: row.authorizationId,
+      bindingDigest: row.bindingDigest,
+      approvalNonce,
+      identity: { sub: "owner-sub", email: "owner@example.com" },
+    });
+    return { authorizationId: row.authorizationId, bindingDigest: row.bindingDigest };
+  }
+
+  function authStatus(authorizationId: string): string {
+    const row = deps.db
+      .prepare("SELECT status FROM delivery_authorization WHERE authorizationId=?")
+      .get(authorizationId) as { status: string } | undefined;
+    return row?.status ?? "MISSING";
+  }
+
+  /** 第一次 getPullRequest 返回 open，merge 后返回 merged——模拟响应丢失后的观察。 */
+  function lossyApi(options: { wrongTree?: boolean } = {}): GithubLifecycleApi & { mergeCalls: number } {
+    let getCalls = 0;
+    const api = {
+      mergeCalls: 0,
+      async findPullRequest() {
+        return { number: 61, url: "https://github.com/fake-owner/fake-repo/pull/61" };
+      },
+      async createPullRequest() {
+        throw new Error("not used");
+      },
+      async getPullRequest(): Promise<GithubPullRequestDetail> {
+        getCalls += 1;
+        const merged = getCalls > 1;
+        return {
+          number: 61,
+          url: "https://github.com/fake-owner/fake-repo/pull/61",
+          state: merged ? "closed" : "open",
+          draft: false,
+          merged,
+          mergeable: true,
+          headSha: headCommit,
+          headRef: branch,
+          baseRef: "main",
+          baseSha: baseCommit,
+        };
+      },
+      async listCheckRuns() {
+        return [];
+      },
+      async listCommitStatuses() {
+        return [];
+      },
+      async mergePullRequest() {
+        api.mergeCalls += 1;
+        // GitHub 实际接受了 merge（在 canonical 里真实创建 merge commit），但响应丢失。
+        git(canonical, "merge", "--no-ff", "-q", "-m", "merge deploy pr", headCommit);
+        if (options.wrongTree) {
+          writeFileSync(join(canonical, "evil.txt"), "tampered\n", "utf8");
+          git(canonical, "add", "evil.txt");
+          git(canonical, "-c", "user.name=GrandeGPT", "-c", "user.email=grande@example.com", "commit", "--amend", "-q", "--no-edit");
+        }
+        createdMerge = git(canonical, "rev-parse", "HEAD");
+        throw new GithubApiError("simulated response loss", 500);
+      },
+    };
+    return api;
+  }
+
+  function refresher() {
+    return () => createdMerge
+      ? {
+          action: "fast-forward" as const,
+          relation: "remote_ahead" as const,
+          branch: "main",
+          before: baseCommit,
+          after: createdMerge,
+          remoteHead: createdMerge,
+        }
+      : {
+          action: "none" as const,
+          relation: "no_remote" as const,
+          branch: "main",
+          before: baseCommit,
+          after: baseCommit,
+          remoteHead: null,
+        };
+  }
+
+  function buildTool(api: GithubLifecycleApi) {
+    const canonicalRefresher = refresher();
+    const base = createPrMergeTool(deps, {
+      apiFactory: () => api,
+      readRemoteUrl: () => githubUrl,
+      canonicalRefresher,
+      deliveryReadinessDeps: readinessDeps(),
+    });
+    return wrapPrMergeToolD2(deps, base, {
+      apiFactory: () => api,
+      readRemoteUrl: () => githubUrl,
+      canonicalRefresher,
+    });
+  }
+
+  beforeEach(() => {
+    expectedTree = git(canonical, "merge-tree", "--write-tree", baseCommit, headCommit);
+    createdMerge = null;
+    saveExplicitDeliveryTarget(deps.db, taskId, "deploy");
+    attest(headCommit);
+  });
+
+  it("丢失响应后只 reconcile：exact 证据验证 + pinned release source，绝不发第二个 merge", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    const api = lossyApi();
+    const tool = buildTool(api);
+
+    const first = (await tool.handler({ taskId })).structuredContent as Record<string, any>;
+    expect(first.ok).toBe(true);
+    expect(first.data).toMatchObject({ merged: true, observedAfterWriteFailure: true, localState: "deploy-pending" });
+    expect(api.mergeCalls).toBe(1);
+    expect(createdMerge).not.toBeNull();
+
+    // reconcile 出的 merge commit 通过 parents/tree 验证，receipt 持久化，release source 钉在 mergeSha。
+    const receipt = readExactMergeReceipt(layout, authorizationId);
+    expect(receipt).toMatchObject({
+      authorizationId,
+      baseSha: baseCommit,
+      headSha: headCommit,
+      mergeSha: createdMerge,
+      mergeTree: expectedTree,
+    });
+    expect(git(receipt!.releaseSourceRealpath, "rev-parse", "HEAD")).toBe(createdMerge);
+    // deploy 未启动：authorization 仍是 EXECUTING；V2 deploy 任务保留 worktree（不写 deploy.yaml 也保留）。
+    expect(authStatus(authorizationId)).toBe("EXECUTING");
+    expect(existsSync(worktree)).toBe(true);
+    expect(getTask(deps.db, taskId)?.state).toBe("READY");
+
+    // 重复调用：只观察 + reconcile，没有第二个 merge，receipt 内容不变（幂等）。
+    const second = (await tool.handler({ taskId })).structuredContent as Record<string, any>;
+    expect(second.ok).toBe(true);
+    expect(api.mergeCalls).toBe(1);
+    expect(readExactMergeReceipt(layout, authorizationId)).toEqual(receipt);
+  });
+
+  it("reconcile 出的 merge commit 证据不符（tree 被改）→ UNCERTAIN，无 receipt，不能 deploy", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    const api = lossyApi({ wrongTree: true });
+    const tool = buildTool(api);
+
+    const envelope = (await tool.handler({ taskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(api.mergeCalls).toBe(1);
+    expect(authStatus(authorizationId)).toBe("UNCERTAIN");
+    expect(readExactMergeReceipt(layout, authorizationId)).toBeNull();
   });
 });

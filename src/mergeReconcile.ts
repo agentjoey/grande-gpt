@@ -4,6 +4,7 @@ import type { CanonicalRefreshResult } from "./canonicalRefresh.ts";
 import { safeGit } from "./gitExec.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
 import type { Layout } from "./layout.ts";
+import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
 import { getTask, updateTaskState, type TaskRow } from "./tasks.ts";
 import type { ToolDeps } from "./toolsCore.ts";
 import { removeWorktree } from "./worktree.ts";
@@ -65,6 +66,13 @@ function cleanupAfterRefresh(
       canonicalRefresh,
       `could not prove task worktree safe for cleanup: ${error instanceof Error ? error.message : String(error)}`,
     );
+  }
+
+  // Minimal V2 Task 5：explicit deploy 任务的 deploy spec 来自可信 resolver 而非
+  // 仓库内容，且 pinned release source 已与 task worktree 分离。V2 deploy 闭环
+  // （Task 6）还需要 task 活着，因此保留 worktree、不自动关闭。
+  if (getExplicitDeliveryTarget(deps.db, task.taskId) === "deploy") {
+    return { localState: "deploy-pending", cleanedUp: false, canonicalRefresh };
   }
 
   // S7 reads .grande/deploy.yaml from the task worktree after merge. Deleting

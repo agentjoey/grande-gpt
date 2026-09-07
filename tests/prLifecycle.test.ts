@@ -1,10 +1,19 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listAudit } from "../src/audit.ts";
 import { openDb } from "../src/db.ts";
+import {
+  APPROVAL_TTL_MS,
+  approveAuthorization,
+  createAuthorization,
+  rotateAuthorizationChallenge,
+  type DeliveryAuthorizationBinding,
+} from "../src/deliveryAuthorization.ts";
+import { readExactMergeReceipt } from "../src/deliveryMerge.ts";
+import type { DeliveryReadinessDeps } from "../src/deliveryReadiness.ts";
 import type {
   GithubCheckRun,
   GithubCommitStatus,
@@ -17,6 +26,7 @@ import {
   createPrStatusTool,
   summarizeCi,
 } from "../src/prLifecycle.ts";
+import { saveExplicitDeliveryTarget } from "../src/taskDeliveryTarget.ts";
 import { createTask } from "../src/tasks.ts";
 import { buildTools, type ToolDeps } from "../src/tools.ts";
 
@@ -304,5 +314,376 @@ describe("S6 PR lifecycle", () => {
       expect(envelope.ok).toBe(false);
       expect(api.mergeCalls).toEqual([]);
     }
+  });
+});
+
+/**
+ * Minimal V2 Task 5：explicit deploy 任务的 authorization-gated exact merge。
+ * 规格 §10.1/§10.2/§14.3：
+ * - 没有 APPROVED authorization（或 binding 漂移）→ 零 GitHub 调用；
+ * - APPROVED → EXECUTING 的 CAS 必须发生在 merge API 调用之前；
+ * - merge 成功后必须验证 parents/tree，并钉住 pinned release source；
+ * - 任何 exact 证据检查失败 → authorization 进 UNCERTAIN，无 receipt，不能 deploy。
+ */
+describe("minimal V2 authorized merge (Task 5)", () => {
+  const deployTaskId = "task_pr_deploy";
+  const deployBranch = "grande/pr-deploy";
+  const SPEC_DIGEST = `sha256:${"a".repeat(64)}`;
+  const POLICY_DIGEST = `sha256:${"b".repeat(64)}`;
+  const TOOLS_DIGEST = `sha256:${"c".repeat(64)}`;
+  const RUNTIME_BUILD = `git:${"e".repeat(40)}`;
+
+  let canonical: string;
+  let deployWorktree: string;
+  let baseSha: string;
+  let headSha: string;
+  let expectedTree: string;
+  let createdMergeSha: string | null;
+
+  function attestFor(task: string, commit: string): void {
+    const jobId = `job_${task}_${commit.slice(0, 8)}`;
+    const now = Date.now();
+    const toolchain = JSON.stringify({ node: "v24.0.0", pnpm: "10.0.0", lockfileSha256: "lock" });
+    deps.db.prepare(
+      `INSERT INTO job (jobId,taskId,profile,argv,state,exitCode,startedAt,endedAt,workspaceDigest,hostToolchain)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ).run(jobId, task, "unit-selfhost", "[]", "passed", 0, now - 10, now, "digest", toolchain);
+    deps.db.prepare(
+      `INSERT INTO attestation
+         (attestationId,taskId,"commit",profile,jobId,exitCode,startedAt,endedAt,hostToolchain)
+       VALUES (?,?,?,?,?,?,?,?,?)`,
+    ).run(`att_${task}_${commit.slice(0, 8)}`, task, commit, "unit-selfhost", jobId, 0, now - 10, now, toolchain);
+  }
+
+  function deployReadinessDeps(overrides: Partial<DeliveryReadinessDeps> = {}): DeliveryReadinessDeps {
+    return {
+      readPullRequest: async () => ({ number: 41, baseRef: "main", baseSha, headSha, state: "open" }),
+      readRequiredCi: async () => "success",
+      readAttestation: () => ({ commit: headSha, jobId: "job_att" }),
+      readHostVerification: () => ({ commit: headSha, jobId: "job_host", planDigest: `sha256:${"d".repeat(64)}` }),
+      computeExpectedMergeTree: () => expectedTree,
+      resolveDeployAction: () => ({
+        deployTarget: "deployment-host:demo/deploy-prod",
+        deployRef: "profile:deploy-prod",
+        verifyRef: "profile:verify-prod",
+        deploySpecDigest: SPEC_DIGEST,
+        policyDigest: POLICY_DIGEST,
+      }),
+      readWorktreeState: () => ({ headSha, clean: true, realpath: realpathSync(deployWorktree) }),
+      readRuntimeIdentity: () => ({ runtimeBuild: RUNTIME_BUILD, toolsetEpoch: 2, toolsDigest: TOOLS_DIGEST }),
+      ...overrides,
+    };
+  }
+
+  function approveDeployAuthorization(): { authorizationId: string; bindingDigest: string } {
+    const createdAt = Date.now();
+    const binding: DeliveryAuthorizationBinding = {
+      authorizationKind: "delivery",
+      taskId: deployTaskId,
+      repoId: "demo",
+      worktreeRealpath: realpathSync(deployWorktree),
+      deliveryTarget: "deploy",
+      deployTarget: "deployment-host:demo/deploy-prod",
+      deploySpecDigest: SPEC_DIGEST,
+      policyDigest: POLICY_DIGEST,
+      runtimeBuild: RUNTIME_BUILD,
+      toolsetEpoch: 2,
+      toolsDigest: TOOLS_DIGEST,
+      createdAt,
+      expiresAt: createdAt + APPROVAL_TTL_MS,
+      prNumber: 41,
+      baseRef: "main",
+      baseSha,
+      headSha,
+      mergeMethod: "merge",
+      expectedMergeTree: expectedTree,
+      deployRef: "profile:deploy-prod",
+      verifyRef: "profile:verify-prod",
+    };
+    const row = createAuthorization(deps.db, {
+      kind: "delivery",
+      taskId: deployTaskId,
+      binding,
+      stages: { merge: { state: "pending" }, deploy: { state: "pending" }, verify: { state: "pending" } },
+    });
+    const { approvalNonce } = rotateAuthorizationChallenge(deps.db, row.authorizationId, row.bindingDigest);
+    approveAuthorization(deps.db, {
+      authorizationId: row.authorizationId,
+      bindingDigest: row.bindingDigest,
+      approvalNonce,
+      identity: { sub: "owner-sub", email: "owner@example.com" },
+    });
+    return { authorizationId: row.authorizationId, bindingDigest: row.bindingDigest };
+  }
+
+  function authStatus(authorizationId: string): string {
+    const row = deps.db
+      .prepare("SELECT status FROM delivery_authorization WHERE authorizationId=?")
+      .get(authorizationId) as { status: string } | undefined;
+    return row?.status ?? "MISSING";
+  }
+
+  interface DeployApi extends GithubLifecycleApi {
+    mergeCalls: Array<{ number: number; sha: string }>;
+    /** merge 调用发生瞬间的 authorization status——CAS-before-call 的承重断言。 */
+    statusAtMergeCall: string[];
+  }
+
+  function deployApi(options: {
+    pr?: GithubPullRequestDetail;
+    /** "real"：在 canonical 里真实创建 merge commit；"single-parent"：返回 headSha 冒充 merge；"wrong-tree"：amend 改 tree。 */
+    mergeBehavior?: "real" | "single-parent" | "wrong-tree";
+  } = {}): DeployApi {
+    const mergeCalls: Array<{ number: number; sha: string }> = [];
+    const statusAtMergeCall: string[] = [];
+    const pr = options.pr ?? detail({ headSha, baseSha, headRef: deployBranch });
+    return {
+      mergeCalls,
+      statusAtMergeCall,
+      async findPullRequest() {
+        return { number: pr.number, url: pr.url };
+      },
+      async createPullRequest() {
+        throw new Error("not used");
+      },
+      async getPullRequest() {
+        return pr;
+      },
+      async listCheckRuns() {
+        return [{ id: 1, name: "unit", status: "completed", conclusion: "success", detailsUrl: null, output: null }];
+      },
+      async listCommitStatuses() {
+        return [];
+      },
+      async mergePullRequest(_owner, _repo, number, sha) {
+        mergeCalls.push({ number, sha });
+        const active = deps.db
+          .prepare("SELECT status FROM delivery_authorization WHERE taskId=? ORDER BY createdAt DESC LIMIT 1")
+          .get(deployTaskId) as { status: string } | undefined;
+        statusAtMergeCall.push(active?.status ?? "MISSING");
+        const behavior = options.mergeBehavior ?? "real";
+        if (behavior === "single-parent") {
+          createdMergeSha = headSha;
+          return { merged: true, sha: headSha, message: "merged" };
+        }
+        git(canonical, "merge", "--no-ff", "-q", "-m", "merge deploy pr", headSha);
+        if (behavior === "wrong-tree") {
+          writeFileSync(join(canonical, "evil.txt"), "tampered\n", "utf8");
+          git(canonical, "add", "evil.txt");
+          git(canonical, "-c", "user.name=GrandeGPT", "-c", "user.email=grande@example.com", "commit", "--amend", "-q", "--no-edit");
+        }
+        createdMergeSha = git(canonical, "rev-parse", "HEAD").trim();
+        return { merged: true, sha: createdMergeSha, message: "merged" };
+      },
+    };
+  }
+
+  function deployRefresher(afterOverride?: string) {
+    return () => createdMergeSha
+      ? {
+          action: "fast-forward" as const,
+          relation: "remote_ahead" as const,
+          branch: "main",
+          before: baseSha,
+          after: afterOverride ?? createdMergeSha,
+          remoteHead: afterOverride ?? createdMergeSha,
+        }
+      : {
+          action: "none" as const,
+          relation: "no_remote" as const,
+          branch: "main",
+          before: baseSha,
+          after: baseSha,
+          remoteHead: null,
+        };
+  }
+
+  beforeEach(() => {
+    canonical = join(layout.workspaceRoot, "demo");
+    baseSha = git(canonical, "rev-parse", "HEAD").trim();
+    deployWorktree = join(layout.worktreesRoot, "demo", deployTaskId);
+    git(canonical, "worktree", "add", "-q", "-b", deployBranch, deployWorktree, baseSha);
+    writeFileSync(join(deployWorktree, "feature.txt"), "deploy me\n", "utf8");
+    git(deployWorktree, "add", "feature.txt");
+    git(deployWorktree, "-c", "user.name=GrandeGPT", "-c", "user.email=grande@example.com", "commit", "-q", "-m", "feature");
+    headSha = git(deployWorktree, "rev-parse", "HEAD").trim();
+    expectedTree = git(canonical, "merge-tree", "--write-tree", baseSha, headSha).trim();
+    createdMergeSha = null;
+    createTask(deps.db, {
+      taskId: deployTaskId,
+      repoId: "demo",
+      branch: deployBranch,
+      baseCommit: baseSha,
+      worktreePath: deployWorktree,
+      state: "READY",
+    });
+    saveExplicitDeliveryTarget(deps.db, deployTaskId, "deploy");
+    attestFor(deployTaskId, headSha);
+  });
+
+  it("没有 APPROVED authorization → 零 GitHub 调用，直接拒绝", async () => {
+    let apiCreated = false;
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => {
+        apiCreated = true;
+        return deployApi();
+      },
+      readRemoteUrl: () => githubUrl,
+      deliveryReadinessDeps: deployReadinessDeps(),
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(JSON.stringify(envelope)).toMatch(/authorization|授权/i);
+    expect(apiCreated).toBe(false);
+  });
+
+  it("未接入可信 readiness reader 时 fail closed，零 GitHub 调用", async () => {
+    approveDeployAuthorization();
+    let apiCreated = false;
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => {
+        apiCreated = true;
+        return deployApi();
+      },
+      readRemoteUrl: () => githubUrl,
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(apiCreated).toBe(false);
+  });
+
+  it("head 漂移 → revalidate 置 STALE，零 GitHub 调用，零执行", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    let apiCreated = false;
+    const drifted = deployReadinessDeps({
+      readPullRequest: async () => ({ number: 41, baseRef: "main", baseSha, headSha: "1".repeat(40), state: "open" }),
+    });
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => {
+        apiCreated = true;
+        return deployApi();
+      },
+      readRemoteUrl: () => githubUrl,
+      deliveryReadinessDeps: drifted,
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(apiCreated).toBe(false);
+    expect(authStatus(authorizationId)).toBe("STALE");
+  });
+
+  it("base 漂移 → 同样置 STALE，零 GitHub 调用", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    let apiCreated = false;
+    const drifted = deployReadinessDeps({
+      readPullRequest: async () => ({ number: 41, baseRef: "main", baseSha: "2".repeat(40), headSha, state: "open" }),
+    });
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => {
+        apiCreated = true;
+        return deployApi();
+      },
+      readRemoteUrl: () => githubUrl,
+      deliveryReadinessDeps: drifted,
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(apiCreated).toBe(false);
+    expect(authStatus(authorizationId)).toBe("STALE");
+  });
+
+  it("happy path：CAS 在 merge 调用之前；sha=headSha；parents/tree 验证后持久化 receipt 并钉住 release source", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    const api = deployApi();
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => api,
+      readRemoteUrl: () => githubUrl,
+      canonicalRefresher: deployRefresher(),
+      deliveryReadinessDeps: deployReadinessDeps(),
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data.merged).toBe(true);
+    expect(createdMergeSha).not.toBeNull();
+    expect(api.mergeCalls).toEqual([{ number: 41, sha: headSha }]);
+    // CAS-before-call：merge API 被调用时 authorization 必须已经是 EXECUTING。
+    expect(api.statusAtMergeCall).toEqual(["EXECUTING"]);
+
+    const receipt = envelope.data.mergeReceipt;
+    expect(receipt).toMatchObject({
+      authorizationId,
+      baseSha,
+      headSha,
+      mergeSha: createdMergeSha,
+      mergeTree: expectedTree,
+    });
+    expect(typeof receipt.releaseSourceRealpath).toBe("string");
+    // durable receipt 落盘，pinned source 的 HEAD 钉在 mergeSha。
+    expect(readExactMergeReceipt(layout, authorizationId)).toEqual(receipt);
+    expect(git(receipt.releaseSourceRealpath, "rev-parse", "HEAD").trim()).toBe(createdMergeSha);
+    // merge stage 证据齐全但 deploy 未启动：authorization 仍是 EXECUTING。
+    expect(authStatus(authorizationId)).toBe("EXECUTING");
+  });
+
+  it("非 merge commit（unexpected parents）→ UNCERTAIN，无 receipt，不能 deploy", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    const api = deployApi({ mergeBehavior: "single-parent" });
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => api,
+      readRemoteUrl: () => githubUrl,
+      canonicalRefresher: deployRefresher(),
+      deliveryReadinessDeps: deployReadinessDeps(),
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(JSON.stringify(envelope)).toMatch(/parent|merge/i);
+    expect(authStatus(authorizationId)).toBe("UNCERTAIN");
+    expect(readExactMergeReceipt(layout, authorizationId)).toBeNull();
+  });
+
+  it("tree 与 expectedMergeTree 不符 → UNCERTAIN，无 receipt", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    const api = deployApi({ mergeBehavior: "wrong-tree" });
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => api,
+      readRemoteUrl: () => githubUrl,
+      canonicalRefresher: deployRefresher(),
+      deliveryReadinessDeps: deployReadinessDeps(),
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(JSON.stringify(envelope)).toMatch(/tree/i);
+    expect(authStatus(authorizationId)).toBe("UNCERTAIN");
+    expect(readExactMergeReceipt(layout, authorizationId)).toBeNull();
+  });
+
+  it("canonical refresh 后 HEAD 不等于 returned merge SHA → 拒绝并置 UNCERTAIN", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    const api = deployApi();
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => api,
+      readRemoteUrl: () => githubUrl,
+      canonicalRefresher: deployRefresher("f".repeat(40)),
+      deliveryReadinessDeps: deployReadinessDeps(),
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(JSON.stringify(envelope)).toMatch(/canonical|CANONICAL/i);
+    expect(authStatus(authorizationId)).toBe("UNCERTAIN");
+    expect(readExactMergeReceipt(layout, authorizationId)).toBeNull();
+  });
+
+  it("PR 已在授权执行链之外被 merged → fail closed，不发第二个 merge", async () => {
+    approveDeployAuthorization();
+    const api = deployApi({ pr: detail({ headSha, baseSha, headRef: deployBranch, merged: true, state: "closed" }) });
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => api,
+      readRemoteUrl: () => githubUrl,
+      canonicalRefresher: deployRefresher(),
+      deliveryReadinessDeps: deployReadinessDeps(),
+    });
+    const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(api.mergeCalls).toEqual([]);
   });
 });

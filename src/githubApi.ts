@@ -445,7 +445,9 @@ export function createGithubApi(token: string, fetchImpl: FetchLike = fetch): Gi
     async mergePullRequest(owner, repo, number, expectedHeadSha) {
       const value = object(await request(
         `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/merge`,
-        { method: "PUT", body: JSON.stringify({ sha: expectedHeadSha }) },
+        // V2 固定 merge method（规格 §10.2）：同时绑定 expected head SHA，绝不接受
+        // repo/Agent 动态选择 squash 或 rebase——那会改变 commit/tree identity。
+        { method: "PUT", body: JSON.stringify({ sha: expectedHeadSha, merge_method: "merge" }) },
       ), "merge response");
       if (typeof value.merged !== "boolean" || typeof value.sha !== "string" || typeof value.message !== "string") {
         throw new GithubApiError("GitHub API 返回的 merge 结构缺少 merged/sha/message。 ");
