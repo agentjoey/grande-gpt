@@ -580,10 +580,40 @@ describe("transitionAuthorization", () => {
       deploy: { state: "succeeded" as const, receiptId: "rcpt-2", jobId: "job-1" },
       verify: { state: "succeeded" as const, receiptId: "rcpt-3", jobId: "job-2" },
     };
-    const row = transitionAuthorization(db, auth.authorizationId, "EXECUTING", "SUCCEEDED", stages, "done");
+    const row = transitionAuthorization(
+      db, auth.authorizationId, auth.bindingDigest, "EXECUTING", "SUCCEEDED", stages, "done",
+    );
     expect(row.status).toBe("SUCCEEDED");
     expect(row.stages).toEqual(stages);
     expect(rawRow(db, auth.authorizationId).reason).toBe("done");
+    db.close();
+  });
+
+  it("wrong/stale bindingDigest 抛 STALE_STATE，且 status/stageJson/reason 保持不变", () => {
+    const db = openDb(loadLayout());
+    const auth = executingFixture(db, "task-transition-digest");
+    const before = rawRow(db, auth.authorizationId);
+    const wrongDigests = [
+      "sha256:" + "0".repeat(64), // 凭空错误 digest
+      `sha256:${sha256hex(JSON.stringify(makeDeliveryBinding("task-transition-digest", { headSha: "9".repeat(40) })))}`, // stale：旧 binding 的 digest
+    ];
+    for (const digest of wrongDigests) {
+      let caught: unknown;
+      try {
+        transitionAuthorization(
+          db, auth.authorizationId, digest, "EXECUTING", "SUCCEEDED",
+          { merge: { state: "succeeded" } }, "should not persist",
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(StateError);
+      expect((caught as StateError).code).toBe("STALE_STATE");
+    }
+    const after = rawRow(db, auth.authorizationId);
+    expect(after.status).toBe("EXECUTING");
+    expect(after.stageJson).toBe(before.stageJson);
+    expect(after.reason).toBe(before.reason);
     db.close();
   });
 
@@ -595,12 +625,12 @@ describe("transitionAuthorization", () => {
       binding: makeDeliveryBinding("task-bad-edge"), stages: {}, now: NOW,
     });
     expect(() =>
-      transitionAuthorization(db, auth.authorizationId, "READY", "SUCCEEDED", {}),
+      transitionAuthorization(db, auth.authorizationId, auth.bindingDigest, "READY", "SUCCEEDED", {}),
     ).toThrow(/state|transition|CAS/i);
     const done = executingFixture(db, "task-terminal-edge");
-    transitionAuthorization(db, done.authorizationId, "EXECUTING", "SUCCEEDED", {});
+    transitionAuthorization(db, done.authorizationId, done.bindingDigest, "EXECUTING", "SUCCEEDED", {});
     expect(() =>
-      transitionAuthorization(db, done.authorizationId, "SUCCEEDED", "FAILED", {}),
+      transitionAuthorization(db, done.authorizationId, done.bindingDigest, "SUCCEEDED", "FAILED", {}),
     ).toThrow(/state|transition|CAS/i);
     db.close();
   });
@@ -609,7 +639,7 @@ describe("transitionAuthorization", () => {
     const db = openDb(loadLayout());
     const auth = executingFixture(db, "task-cas");
     expect(() =>
-      transitionAuthorization(db, auth.authorizationId, "APPROVED", "REVOKED", {}),
+      transitionAuthorization(db, auth.authorizationId, auth.bindingDigest, "APPROVED", "REVOKED", {}),
     ).toThrow(/state|CAS/i);
     expect(activeAuthorizationForTask(db, "task-cas")?.status).toBe("EXECUTING");
     db.close();
@@ -619,7 +649,8 @@ describe("transitionAuthorization", () => {
     const db = openDb(loadLayout());
     const auth = executingFixture(db, "task-exec-expired");
     const row = transitionAuthorization(
-      db, auth.authorizationId, "EXECUTING", "EXPIRED", {}, "execution deadline reached",
+      db, auth.authorizationId, auth.bindingDigest, "EXECUTING", "EXPIRED", {},
+      "execution deadline reached",
     );
     expect(row.status).toBe("EXPIRED");
     expect(activeAuthorizationForTask(db, "task-exec-expired")).toBeUndefined();

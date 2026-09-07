@@ -477,11 +477,14 @@ export function beginAuthorizedExecution(
 
 /**
  * 通用前向转移（EXECUTING → SUCCEEDED/FAILED/UNCERTAIN/STALE/EXPIRED 等）。
- * 只接受规格 §8.4 状态机里的合法边，且必须携带 expected current status 做 CAS。
+ * 只接受规格 §8.4 状态机里的合法边，且必须携带 expected current status 与
+ * binding digest 做 SQLite CAS（§8.4）——digest 与 durable row 不符即 STALE_STATE，
+ * 本次请求零执行，status/stageJson/reason 均不变。
  */
 export function transitionAuthorization(
   db: DatabaseSync,
   authorizationId: string,
+  bindingDigest: string,
   from: AuthorizationStatus,
   to: AuthorizationStatus,
   stages: AuthorizationStages,
@@ -492,12 +495,15 @@ export function transitionAuthorization(
   }
   const at = Date.now();
   return inWriteTransaction(db, () => {
-    loadRow(db, authorizationId); // 不存在时抛 AUTH_NOT_FOUND
+    const row = loadRow(db, authorizationId); // 不存在时抛 AUTH_NOT_FOUND
+    if (row.bindingDigest !== bindingDigest) {
+      throw new StateError("STALE_STATE", "bindingDigest 与 durable authorization 不一致。");
+    }
     casRun(
       db,
       "UPDATE delivery_authorization SET status=?, stageJson=?, reason=?, updatedAt=? " +
-        "WHERE authorizationId=? AND status=?",
-      [to, JSON.stringify(stages), reason ?? null, at, authorizationId, from],
+        "WHERE authorizationId=? AND status=? AND bindingDigest=?",
+      [to, JSON.stringify(stages), reason ?? null, at, authorizationId, from, bindingDigest],
     );
     return publicRow(loadRow(db, authorizationId));
   });
