@@ -4,6 +4,8 @@ import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import type { Layout } from "./layout.ts";
+import { readProfileDeliveryEvidence } from "./deliveryEvidence.ts";
+import { StateError } from "./errors.ts";
 import { createJob, finishJob, type JobState } from "./jobs.ts";
 import { assertTaskId, resolveRepoPath } from "./paths.ts";
 import { getDeploymentProfile } from "./profiles.ts";
@@ -195,6 +197,9 @@ export function startDeploymentHostJob(
   const jobId = `job_${randomUUID()}`;
   const artifactDir = join(deps.layout.artifactsDir, args.taskId, jobId);
   const artifactPath = join(artifactDir, "output.log");
+  // 受控证据通道：每个 job 一个固定路径，只有 deployment-host 执行会注入该 env。
+  // 证据只从这个有界 JSON 文件读取，stdout/stderr 永远不作为证据来源。
+  const evidencePath = join(artifactDir, "delivery-evidence.json");
   mkdirSync(artifactDir, { recursive: true });
 
   const env: NodeJS.ProcessEnv = {
@@ -204,6 +209,7 @@ export function startDeploymentHostJob(
     TMPDIR: process.env.TMPDIR ?? "/tmp",
     GRANDE_WORKSPACE: deps.layout.workspaceRoot,
     GRANDE_CONTROL: deps.layout.controlRoot,
+    GRANDE_DELIVERY_EVIDENCE_FILE: evidencePath,
   };
 
   let pgid: number | null = null;
@@ -225,6 +231,16 @@ export function startDeploymentHostJob(
         : result.killedBy === "rss" ? "killed"
         : result.exitCode === 0 ? "passed"
         : "failed";
+      let evidenceField: { evidence: unknown } | { evidenceError: { code: string; message: string } };
+      try {
+        evidenceField = { evidence: readProfileDeliveryEvidence(evidencePath) };
+      } catch (error) {
+        evidenceField = {
+          evidenceError: error instanceof StateError
+            ? { code: error.code, message: error.message }
+            : { code: "EVIDENCE_INVALID", message: (error as Error).message },
+        };
+      }
       safeFinish(deps.db, jobId, {
         state,
         exitCode: result.exitCode,
@@ -235,6 +251,7 @@ export function startDeploymentHostJob(
           killedBy: result.killedBy,
           durationMs: result.durationMs,
           peakRssMb: result.peakRssMb,
+          ...evidenceField,
         },
       });
     })

@@ -302,7 +302,7 @@ describe("production Host Verifier lifecycle wiring", () => {
       hostVerifierCoordinator: coordinator,
     });
 
-    expect(TOOLSET_EPOCH).toBe(2);
+    expect(TOOLSET_EPOCH).toBe(3);
     expect(manual).toHaveLength(25);
     expect(auto).toHaveLength(25);
     expect(toolsetIdentity(auto)).toEqual(toolsetIdentity(manual));

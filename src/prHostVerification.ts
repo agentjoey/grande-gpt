@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
+import { StateError } from "./errors.ts";
 import { buildHostVerifierStaticPlan } from "./hostVerifier.ts";
 import {
   readHostVerifierFailureClass,
@@ -323,4 +324,36 @@ export function inspectCurrentHostVerification(
 
 export function manualOuterTestCommand(taskId: string): string {
   return `grande outer-test --task ${taskId} --run`;
+}
+
+/**
+ * Minimal V2 Task 3 的 readiness reader（规格 §7.2「required Host verification receipt
+ * 精确绑定 current head SHA」）。
+ *
+ * 只接受经 inspectCurrentHostVerification 全套校验（trusted job 绑定、planDigest、
+ * 时间戳、level 充分性）的 V2 receipt，且 receipt.commit 精确等于 headSha：
+ * - 无 receipt / receipt 不合格 / receipt 绑定旧 SHA → null（readiness blocked）；
+ * - V1 receipt 没有 planDigest，不能给 V2 自动交付背书 → null；
+ * - plan.level === "none" 时同样返回 null：V2 readiness 对 Host 证据 fail closed，
+ *   不把「本仓库不需要 host verification」解释成「已有可用证据」。
+ */
+export function readDeliveryHostVerification(
+  db: DatabaseSync,
+  task: TaskRow,
+  headSha: string,
+): { commit: string; jobId: string; planDigest: string } | null {
+  let current: CurrentHostVerification;
+  try {
+    current = inspectCurrentHostVerification(db, task, headSha);
+  } catch (error) {
+    // readiness dep 的契约是「证据或 null」：plan 重算失败（如 worktree HEAD 与
+    // headSha 不一致）同样表示当前没有可用证据，由 readiness 的其它门禁报出精确原因。
+    if (error instanceof StateError) return null;
+    throw error;
+  }
+  if (!current.receiptEligible) return null;
+  const receipt = getOuterTestReceipt(db, task.taskId);
+  if (!receipt || !("version" in receipt)) return null;
+  if (receipt.commit !== headSha) return null;
+  return { commit: receipt.commit, jobId: receipt.jobId, planDigest: receipt.planDigest };
 }

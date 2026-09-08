@@ -10,6 +10,7 @@ import {
   type DeliveryTarget,
 } from "../src/deliveryTarget.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
+import { saveExplicitDeliveryTarget } from "../src/taskDeliveryTarget.ts";
 import type { TaskProgress } from "../src/taskProgress.ts";
 import { createTask } from "../src/tasks.ts";
 
@@ -148,6 +149,31 @@ describe("Phase 8 delivery target", () => {
       Date.now(),
     );
     expect(resolveDeliveryTarget(db, task, { readOrigin: () => null })).toBe("deploy");
+    db.close();
+  });
+
+  it("explicit target row wins over the legacy projection (Minimal V2 Task 1)", () => {
+    const db = openDb(loadLayout());
+    const task = createTask(db, {
+      taskId: "task-delivery-explicit",
+      repoId: "demo",
+      branch: "grande/delivery-0002",
+      baseCommit: "base",
+      worktreePath: join(ws, "task-explicit"),
+      state: "READY",
+    });
+
+    // 既有 legacy 证据全部指向 deploy/pr：GitHub origin + 成功 push + deployment receipt。
+    db.prepare("INSERT INTO deployment_receipt (taskId,receiptJson,updatedAt) VALUES (?,?,?)").run(
+      task.taskId,
+      JSON.stringify({ taskId: task.taskId, deployComplete: false, verifyComplete: false }),
+      Date.now(),
+    );
+    expect(resolveDeliveryTarget(db, task, { readOrigin: () => "https://github.com/acme/demo.git" })).toBe("deploy");
+
+    // 显式行一旦存在就接管解析——legacy 投影只服务没有显式行的旧任务。
+    saveExplicitDeliveryTarget(db, task.taskId, "local");
+    expect(resolveDeliveryTarget(db, task, { readOrigin: () => "https://github.com/acme/demo.git" })).toBe("local");
     db.close();
   });
 });

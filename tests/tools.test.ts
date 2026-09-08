@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import { createJob, finishJob, getJob } from "../src/jobs.ts";
 import { awaitJobSettled } from "../src/runner.ts";
 import { listAudit } from "../src/audit.ts";
 import { RUN_BOUNDED_WAIT_MS } from "../src/flowSimplification.ts";
+import { getExplicitDeliveryTarget } from "../src/taskDeliveryTarget.ts";
 import { buildTools, TOOLSET_EPOCH, toolsetIdentity, type ToolDeps } from "../src/tools.ts";
 import { MCP_WRITE_TOOLS } from "../src/contract.ts";
 import {
@@ -190,22 +192,24 @@ describe("工具注解", () => {
     expect(haystack).toMatch(/\bok\b|\bslow\b|curl-probe|\bfail\b/);
   });
 
-  it("repo_read/repo_search 描述明确给出默认值、硬上限与搜索结果字节预算，且 epoch 仍为 2", () => {
+  it("repo_read/repo_search 描述明确给出默认值、硬上限与搜索结果字节预算，且 epoch 已为 3", () => {
     const tools = buildTools(deps);
     const read = tools.find((t) => t.name === "grande_repo_read")!;
     const search = tools.find((t) => t.name === "grande_repo_search")!;
 
     expect(read.description).toMatch(/16\s*KiB.*24\s*KiB/s);
     expect(search.description).toMatch(/20.*25.*16\s*KiB/s);
-    expect(TOOLSET_EPOCH).toBe(2);
+    // Task 7 closeout：正式 epoch 3（唯一 delta 是 grande_task_open 可选 deliveryTarget）。
+    expect(TOOLSET_EPOCH).toBe(3);
   });
 
   it("assembled tool contract 保持 GG-BL-028 stabilized contract digest", () => {
     const assembled = buildTools(deps);
-    const pinnedDigest = "sha256:7f2390e540b4311f9e3f70b890239460bf0c63e770e3c2e45f227dac41dcb7da";
+    // Minimal V2 Task 1：grande_task_open 增加可选 deliveryTarget 字段，digest 随合同变化更新。
+    const pinnedDigest = "sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496";
     expect(toolsetIdentity(assembled, "db5d020-test-build")).toEqual({
       gatewayBuild: "db5d020-test-build",
-      toolsetEpoch: 2,
+      toolsetEpoch: 3,
       toolsCount: 25,
       toolsDigest: pinnedDigest,
     });
@@ -354,6 +358,50 @@ describe("D18：repoId 参数只出现在该出现的地方（单一端点 + 任
     const tool = buildTools(deps).find((t) => t.name === "grande_task_open")!;
     expect(tool.inputSchema.properties.repoId).toBeDefined();
     expect(tool.inputSchema.required).toContain("repoId");
+  });
+
+  it("grande_task_open 暴露可选 deliveryTarget（local/pr/deploy），但不是必填——未提供时保持现有安全默认", () => {
+    const tool = buildTools(deps).find((t) => t.name === "grande_task_open")!;
+    const target = tool.inputSchema.properties.deliveryTarget as { type?: string; enum?: string[] } | undefined;
+    expect(tool.inputSchema.properties).toHaveProperty("deliveryTarget");
+    expect(tool.inputSchema.required).not.toContain("deliveryTarget");
+    expect(target?.type).toBe("string");
+    expect(target?.enum).toEqual(["local", "pr", "deploy"]);
+  });
+
+  it("grande_task_open(deliveryTarget=deploy) 持久化显式 target 并写进 task-open 审计输入", async () => {
+    const r = JSON.parse(await callTool("grande_task_open", {
+      taskId: "task_dt_deploy", slug: "dt-deploy", repoId: "demo", deliveryTarget: "deploy",
+    }));
+    expect(r.ok).toBe(true);
+    expect(getExplicitDeliveryTarget(deps.db, "task_dt_deploy")).toBe("deploy");
+
+    // 审计只落 inputDigest；用同一套稳定摘要算法证明 deliveryTarget 确实在审计输入里。
+    const stableDigest = (input: unknown) =>
+      createHash("sha256").update(
+        JSON.stringify(input, (_k, v: unknown) =>
+          v && typeof v === "object" && !Array.isArray(v)
+            ? Object.fromEntries(
+                Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+              )
+            : v,
+        ) ?? "null",
+        "utf8",
+      ).digest("hex");
+    const expected = stableDigest({ slug: "dt-deploy", repoId: "demo", deliveryTarget: "deploy" });
+    const audits = listAudit(deps.db, "task_dt_deploy", 10)
+      .filter((row) => row.tool === "grande_task_open");
+    expect(audits.some((row) => row.inputDigest === expected)).toBe(true);
+  });
+
+  it("非法 deliveryTarget 在建 worktree 之前被拒绝，文件系统上不留任何痕迹", async () => {
+    const r = JSON.parse(await callTool("grande_task_open", {
+      taskId: "task_dt_bad", slug: "dt-bad", repoId: "demo", deliveryTarget: "production",
+    }));
+    expect(r.ok).toBe(false);
+    expect(JSON.stringify(r)).toMatch(/deliveryTarget/i);
+    expect(getTask(deps.db, "task_dt_bad")).toBeUndefined();
+    expect(existsSync(join(layout.worktreesRoot, "demo", "task_dt_bad"))).toBe(false);
   });
 
   it("grande_repo_map/grande_repo_search/grande_repo_read 接受可选 repoId（无 taskId 时的浏览）", () => {

@@ -15,7 +15,7 @@ import { loadHostVerificationConfig } from "./hostVerificationConfig.ts";
 import { createProductionHostVerification } from "./hostVerificationProduction.ts";
 import { buildTools, type BuildToolsOptions, type ToolDef } from "./tools.ts";
 import { createAccessGate, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
-import { assertDistinctAudience } from "./consoleAuth.ts";
+import { assertDistinctAudience, type ConsoleAccessConfig } from "./consoleAuth.ts";
 import { mountConsoleRoutes } from "./consoleRoutes.ts";
 import {
   jsonByteLength,
@@ -34,8 +34,10 @@ export interface AppConfig {
   /**
    * 控制台的 Access 配置（`access-console.yaml`）。**可选**：不给就不挂写端点，
    * 而不是挂一组没有门禁的路由——缺配置的含义是「门禁没装」，不是「不需要门禁」。
+   * origin 是审批写端点的 CSRF 边界（规格 §9.2），与 aud 一起由
+   * loadConsoleAccessConfig() 在启动时校验。
    */
-  consoleAccessConfig?: AccessConfig;
+  consoleAccessConfig?: ConsoleAccessConfig;
   /**
    * Gateway 启动时从可信 control plane 构造一次的 Host Verifier runtime。
    * createApp() 的直接测试调用可以省略；省略时保持 manual，不会自动调度。
@@ -481,7 +483,11 @@ export function createApp(cfg: AppConfig): Hono {
   }
 
   if (cfg.consoleAccessConfig) {
-    mountConsoleRoutes(app, { db, consoleAccess: cfg.consoleAccessConfig });
+    mountConsoleRoutes(app, {
+      db,
+      consoleAccess: cfg.consoleAccessConfig,
+      consoleOrigin: cfg.consoleAccessConfig.origin,
+    });
   }
 
   app.all("/mcp", (c) => handleMcp(c, undefined));

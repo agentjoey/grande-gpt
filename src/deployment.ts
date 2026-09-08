@@ -1,12 +1,28 @@
 import { createHash } from "node:crypto";
 import { parse } from "yaml";
 import { beginAudit, type AuditHandle } from "./audit.ts";
+import {
+  activeAuthorizationForTask,
+  beginAuthorizedExecution,
+  transitionAuthorization,
+  type AuthorizationStageState,
+  type DeliveryAuthorizationBinding,
+  type DeliveryAuthorizationRow,
+  type RollbackAuthorizationBinding,
+} from "./deliveryAuthorization.ts";
+import { readExactMergeReceipt, type ExactMergeReceipt } from "./deliveryMerge.ts";
+import {
+  assertEvidenceMatchesAuthorization,
+  parseDeploymentEvidence,
+  type DeploymentEvidence,
+} from "./deliveryEvidence.ts";
 import { startDeploymentHostJob, type StartedDeploymentHostJob } from "./deploymentHostRunner.ts";
 import { err, ok } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import { getJob, TERMINAL } from "./jobs.ts";
 import { getDeploymentProfile, type RunProfile } from "./profiles.ts";
 import { MAX_REPO_READ_BYTES, repoRead } from "./repoFile.ts";
+import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
@@ -43,6 +59,14 @@ interface DeploymentReceipt {
   verifiedAt?: number;
   rollbackJobId?: string;
   rolledBackAt?: number;
+  /** V2：authorization-gated capability 部署的 durable 证据。 */
+  authorizationId?: string;
+  merge?: { baseSha: string; headSha: string; mergeSha: string; mergeTree: string };
+  deployEvidence?: DeploymentEvidence;
+  verifyEvidence?: DeploymentEvidence;
+  stages?: { deploy?: AuthorizationStageState; verify?: AuthorizationStageState; rollback?: AuthorizationStageState };
+  /** V2 rollback：独立的 rollback authorization；绝不复用 delivery authorization。 */
+  rollbackAuthorizationId?: string;
 }
 
 function invalid(message: string): never {
@@ -242,9 +266,9 @@ async function invokeCapabilityAction(
   task: TaskRow,
   action: Extract<DeploymentAction, { kind: "capability" }>,
   role: "deploy" | "verify" | "rollback",
-): Promise<void> {
+): Promise<Record<string, unknown>> {
   const invoke = toolByName(tools, "grande_capability_invoke");
-  unwrap(await invoke.handler({
+  return unwrap(await invoke.handler({
     provider: action.provider,
     name: action.name,
     taskId: task.taskId,
@@ -372,6 +396,708 @@ function uncertainDeployEnvelope(taskId: string, existing: boolean, deployRef: s
   };
 }
 
+/**
+ * Minimal V2 Task 6 slice 3：deliveryTarget="deploy" 时 capability deploy/verify 走
+ * authorization-gated 路径。legacy 路径（无显式 target 或 target!=="deploy"）完全不变。
+ */
+interface V2Context {
+  auth: DeliveryAuthorizationRow;
+  binding: DeliveryAuthorizationBinding;
+  mergeReceipt: ExactMergeReceipt;
+}
+
+/**
+ * 任何新的 capability deploy/verify side effect 之前的前置检查：
+ * 同一 task 的活跃 delivery authorization 必须处于 EXECUTING；executionDeadlineAt 从
+ * durable row 读且未过期；exact merge receipt 必须存在且 base/head/tree 与 binding
+ * 逐字段一致；当前 spec 的 deploy/verify action ref 必须等于 binding 的 ref。
+ * 任一不符都在 side effect 之前 fail closed（不改变 authorization 状态）。
+ */
+function requireV2Authorization(deps: ToolDeps, taskId: string, spec: DeploymentSpec): V2Context {
+  const auth = activeAuthorizationForTask(deps.db, taskId);
+  if (!auth || auth.kind !== "delivery" || auth.status !== "EXECUTING") {
+    throw new StateError(
+      "POLICY_DENIED",
+      `任务 ${taskId} 没有处于 EXECUTING 的活跃 delivery authorization；拒绝 deploy/verify side effect。`,
+    );
+  }
+  const row = deps.db
+    .prepare("SELECT executionDeadlineAt FROM delivery_authorization WHERE authorizationId=?")
+    .get(auth.authorizationId) as { executionDeadlineAt: number | null } | undefined;
+  if (!row || typeof row.executionDeadlineAt !== "number" || row.executionDeadlineAt <= Date.now()) {
+    throw new StateError(
+      "AUTH_EXPIRED",
+      `authorization ${auth.authorizationId} 已过 execution deadline；拒绝新的 side effect，需要新审批。`,
+    );
+  }
+  const binding = auth.binding as DeliveryAuthorizationBinding;
+  const mergeReceipt = readExactMergeReceipt(deps.layout, auth.authorizationId);
+  if (!mergeReceipt) {
+    throw new StateError(
+      "POLICY_DENIED",
+      `authorization ${auth.authorizationId} 缺少 exact merge receipt；merge 证据未落账前拒绝部署。`,
+    );
+  }
+  if (
+    mergeReceipt.baseSha !== binding.baseSha ||
+    mergeReceipt.headSha !== binding.headSha ||
+    mergeReceipt.mergeTree !== binding.expectedMergeTree
+  ) {
+    throw new StateError(
+      "POLICY_DENIED",
+      "exact merge receipt 的 base/head/tree 与 authorization binding 不一致；拒绝部署。",
+    );
+  }
+  if (actionRef(spec.deploy) !== binding.deployRef || actionRef(spec.verify) !== binding.verifyRef) {
+    throw new StateError(
+      "POLICY_DENIED",
+      "当前 .grande/deploy.yaml 的 deploy/verify action ref 与 authorization binding 不一致；拒绝执行。",
+    );
+  }
+  return { auth, binding, mergeReceipt };
+}
+
+function v2Transition(
+  deps: ToolDeps,
+  auth: DeliveryAuthorizationRow,
+  to: "SUCCEEDED" | "FAILED" | "UNCERTAIN",
+  stage: "deploy" | "verify" | "rollback",
+  state: AuthorizationStageState,
+  reason: string,
+): void {
+  transitionAuthorization(
+    deps.db,
+    auth.authorizationId,
+    auth.bindingDigest,
+    "EXECUTING",
+    to,
+    { ...auth.stages, [stage]: { state } },
+    reason,
+  );
+}
+
+/** capability 的结构化结果里取证据；schema 校验失败等价于证据缺失/非法/有歧义。 */
+function capabilityEvidence(result: Record<string, unknown>): DeploymentEvidence {
+  return parseDeploymentEvidence(result.result);
+}
+
+/** V2 profile 证据只来自 deploymentHostRunner 落账的 job.summary.evidence，绝不是 stdout/stderr。 */
+function evidenceFromJobSummary(job: { summary: Record<string, unknown> | null }): DeploymentEvidence {
+  const summary = job.summary;
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    throw new StateError("EVIDENCE_INVALID", "deployment-host job 缺少 durable summary；证据不可用。 ");
+  }
+  if (summary.evidenceError !== undefined) {
+    const detail = summary.evidenceError as { code?: unknown; message?: unknown };
+    throw new StateError(
+      "EVIDENCE_INVALID",
+      `deployment-host runner 证据错误（${typeof detail?.code === "string" ? detail.code : "unknown"}）：` +
+        `${typeof detail?.message === "string" ? detail.message : "无详情"}`,
+    );
+  }
+  return parseDeploymentEvidence(summary.evidence);
+}
+
+function assertSameAuthorization(ctx: V2Context, receipt: DeploymentReceipt): void {
+  if (ctx.auth.authorizationId !== receipt.authorizationId) {
+    throw new StateError(
+      "POLICY_DENIED",
+      "活跃 authorization 与 deployment receipt 不是同一条；拒绝继续。",
+    );
+  }
+}
+
+/**
+ * 重入早退的 fail-closed 门禁：deployment receipt 只属于其落账时的 authorization。
+ * 旧审批进终态后 Human 开了新审批时，旧 receipt（哪怕 DONE/failed/rolled-back）
+ * 绝不能给新 authorization 背书——拒绝继续，而不是复用旧 receipt 谎报状态。无活跃
+ * authorization 时（旧审批已终态、未开新审批），重入观察旧终态是合法幂等语义。
+ * rollback 早退用 boundAuthorizationId=receipt.rollbackAuthorizationId 复用同一语义；
+ * 错误消息刻意不带旧 authorization id，避免向新授权泄漏旧授权身份。
+ */
+function assertReceiptBoundToActiveAuthorization(
+  deps: ToolDeps,
+  taskId: string,
+  receipt: DeploymentReceipt,
+  boundAuthorizationId: string | undefined = receipt.authorizationId,
+): void {
+  const active = activeAuthorizationForTask(deps.db, taskId);
+  if (active && active.authorizationId !== boundAuthorizationId) {
+    throw new StateError(
+      "STALE_STATE",
+      "deployment receipt 是在另一条已终态的 authorization 下落账的，与当前活跃 authorization 不符；" +
+        "拒绝复用旧 receipt 的早退结果。请开新 Task 重新部署。",
+    );
+  }
+}
+
+/** V2 只走 deployment-host runner（有受控证据通道）；普通 grande_run job 没有证据面。 */
+function assertV2HostProfile(
+  deps: ToolDeps,
+  task: TaskRow,
+  action: DeploymentAction,
+  role: "deploy" | "verify",
+): void {
+  if (action.kind !== "profile") return;
+  const profile = assertProfileRole(deps, task, action, role);
+  if (profile?.execution !== "deployment-host") {
+    throw new StateError(
+      "INVALID_INPUT",
+      `V2 ${role} profile ${task.repoId}/${action.profile} 必须 execution: deployment-host；` +
+        "普通 job 没有受控证据通道。",
+    );
+  }
+}
+
+function startV2HostJob(
+  deps: ToolDeps,
+  task: TaskRow,
+  profileName: string,
+  options: DeploymentToolOptions,
+): string {
+  const started = options.startHostProfile
+    ? options.startHostProfile({ taskId: task.taskId, repoId: task.repoId, profileName })
+    : startDeploymentHostJob(
+        { db: deps.db, layout: deps.layout },
+        { taskId: task.taskId, repoId: task.repoId, profileName },
+      );
+  return started.jobId;
+}
+
+async function v2Deploy(
+  deps: ToolDeps,
+  tools: ToolDef[],
+  task: TaskRow,
+  spec: DeploymentSpec,
+  options: DeploymentToolOptions,
+): Promise<{ structuredContent: unknown }> {
+  const taskId = task.taskId;
+  const existing = loadReceipt(deps, taskId);
+  if (existing) {
+    ensureReceiptMatches(existing, spec);
+    assertReceiptBoundToActiveAuthorization(deps, taskId, existing);
+    if (existing.deployUncertain) return uncertainDeployEnvelope(taskId, true, existing.deployRef);
+    return {
+      structuredContent: ok({
+        taskId,
+        data: {
+          state: existing.stages?.deploy === "failed" ? "failed" : currentState(existing),
+          authorizationId: existing.authorizationId,
+          existing: true,
+          deployRef: existing.deployRef,
+          ...(existing.deployJobId ? { jobId: existing.deployJobId } : {}),
+        },
+        hint: `任务 ${taskId} 已有同一 deploy spec 的 V2 receipt，未重复部署。`,
+      }),
+    };
+  }
+
+  const ctx = requireV2Authorization(deps, taskId, spec);
+  if (spec.deploy.kind === "profile") {
+    // V2 profile deploy：恰好一个 durable job；重入只观察，绝不重启（与 legacy 的
+    // failed-job 重启语义不同——V2 的 job 失败只能由 verify 观察后把 authorization
+    // 置为 FAILED）。
+    assertV2HostProfile(deps, task, spec.deploy, "deploy");
+    const jobId = startV2HostJob(deps, task, spec.deploy.profile, options);
+    const receipt: DeploymentReceipt = {
+      ...baseReceipt(taskId, spec, { merged: true, mergeSha: ctx.mergeReceipt.mergeSha }),
+      authorizationId: ctx.auth.authorizationId,
+      merge: {
+        baseSha: ctx.mergeReceipt.baseSha,
+        headSha: ctx.mergeReceipt.headSha,
+        mergeSha: ctx.mergeReceipt.mergeSha,
+        mergeTree: ctx.mergeReceipt.mergeTree,
+      },
+      stages: { deploy: "running", verify: "pending" },
+      deployJobId: jobId,
+    };
+    saveReceipt(deps, receipt);
+    return {
+      structuredContent: ok({
+        taskId,
+        data: { state: "deploying", jobId, authorizationId: ctx.auth.authorizationId, deployRef: receipt.deployRef },
+        hint: `V2 部署 profile 已启动（job ${jobId}）；稍后调用 grande_deploy_verify 观察 job 并校验证据。`,
+      }),
+    };
+  }
+  await assertCapabilityRole(tools, spec.deploy, "deploy");
+
+  // Uncertainty-first：先落 deployUncertain 的 durable receipt 再 invoke——响应丢失
+  // 绝不导致盲目重试。证据只来自 capability schema 校验后的结构化结果。
+  const receipt: DeploymentReceipt = {
+    ...baseReceipt(taskId, spec, { merged: true, mergeSha: ctx.mergeReceipt.mergeSha }),
+    authorizationId: ctx.auth.authorizationId,
+    merge: {
+      baseSha: ctx.mergeReceipt.baseSha,
+      headSha: ctx.mergeReceipt.headSha,
+      mergeSha: ctx.mergeReceipt.mergeSha,
+      mergeTree: ctx.mergeReceipt.mergeTree,
+    },
+    stages: { deploy: "running", verify: "pending" },
+    deployUncertain: true,
+  };
+  saveReceipt(deps, receipt);
+
+  const toUncertain = (reason: string) => {
+    receipt.stages = { deploy: "uncertain", verify: "pending" };
+    saveReceipt(deps, receipt);
+    v2Transition(deps, ctx.auth, "UNCERTAIN", "deploy", "uncertain", reason);
+    return uncertainDeployEnvelope(taskId, false, receipt.deployRef);
+  };
+
+  let result: Record<string, unknown>;
+  try {
+    result = await invokeCapabilityAction(tools, task, spec.deploy, "deploy");
+  } catch (error) {
+    return toUncertain(error instanceof Error ? error.message : String(error));
+  }
+  let evidence: DeploymentEvidence;
+  try {
+    evidence = capabilityEvidence(result);
+  } catch (error) {
+    return toUncertain(error instanceof Error ? error.message : String(error));
+  }
+  try {
+    assertEvidenceMatchesAuthorization(evidence, {
+      target: ctx.binding.deployTarget,
+      sourceSha: ctx.mergeReceipt.mergeSha,
+    });
+  } catch (error) {
+    receipt.deployUncertain = false;
+    receipt.deployEvidence = evidence;
+    receipt.stages = { deploy: "failed", verify: "pending" };
+    saveReceipt(deps, receipt);
+    v2Transition(deps, ctx.auth, "FAILED", "deploy", "failed", error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+
+  receipt.deployUncertain = false;
+  receipt.deployComplete = true;
+  receipt.deployedAt = Date.now();
+  receipt.deployEvidence = evidence;
+  receipt.stages = { deploy: "succeeded", verify: "pending" };
+  saveReceipt(deps, receipt);
+  return {
+    structuredContent: ok({
+      taskId,
+      data: { state: "deployed", authorizationId: ctx.auth.authorizationId, deployRef: receipt.deployRef, deployEvidence: evidence },
+      hint: "V2 部署调用已完成且证据匹配 authorization；下一步 grande_deploy_verify。",
+    }),
+  };
+}
+
+async function v2Verify(
+  deps: ToolDeps,
+  tools: ToolDef[],
+  task: TaskRow,
+  spec: DeploymentSpec,
+  options: DeploymentToolOptions,
+): Promise<{ structuredContent: unknown }> {
+  const taskId = task.taskId;
+  const receipt = loadReceipt(deps, taskId);
+  if (!receipt?.authorizationId) {
+    throw new StateError("INVALID_INPUT", `任务 ${taskId} 没有 V2 deployment receipt；必须先 grande_deploy。`);
+  }
+  ensureReceiptMatches(receipt, spec);
+  assertReceiptBoundToActiveAuthorization(deps, taskId, receipt);
+  if (receipt.deployUncertain) return uncertainDeployEnvelope(taskId, true, receipt.deployRef);
+  if (receipt.verifyComplete) {
+    return { structuredContent: ok({ taskId, data: { state: "DONE", existing: true }, hint: `任务 ${taskId} 已部署并验证完成。` }) };
+  }
+
+  // profile deploy：观察 durable job。running 只报 pending；failed 置 FAILED 且绝不自动重启；
+  // passed 只从 job.summary.evidence 取证据并重新校验身份。
+  if (!receipt.deployComplete) {
+    if (spec.deploy.kind !== "profile" || !receipt.deployJobId) {
+      throw new StateError("INVALID_INPUT", "deployment receipt 缺少可观察的 deploy job/证据。 ");
+    }
+    const state = profileJobState(deps, task, receipt.deployJobId, spec.deploy.profile);
+    if (state === "running") {
+      return { structuredContent: ok({ taskId, data: { state: "deploying", jobId: receipt.deployJobId }, hint: "V2 部署 job 仍在运行。" }) };
+    }
+    const ctx = requireV2Authorization(deps, taskId, spec);
+    assertSameAuthorization(ctx, receipt);
+    if (state === "failed") {
+      receipt.stages = { ...receipt.stages, deploy: "failed" };
+      saveReceipt(deps, receipt);
+      v2Transition(deps, ctx.auth, "FAILED", "deploy", "failed", `部署 job ${receipt.deployJobId} 未通过。`);
+      throw new StateError("INVALID_INPUT", `V2 部署 job ${receipt.deployJobId} 未通过；authorization 已置 FAILED，绝不自动重试。`);
+    }
+    const job = getJob(deps.db, receipt.deployJobId)!;
+    let evidence: DeploymentEvidence;
+    try {
+      evidence = evidenceFromJobSummary(job);
+    } catch (error) {
+      receipt.stages = { ...receipt.stages, deploy: "uncertain" };
+      saveReceipt(deps, receipt);
+      v2Transition(deps, ctx.auth, "UNCERTAIN", "deploy", "uncertain", error instanceof Error ? error.message : String(error));
+      return uncertainDeployEnvelope(taskId, false, receipt.deployRef);
+    }
+    try {
+      assertEvidenceMatchesAuthorization(evidence, {
+        target: ctx.binding.deployTarget,
+        sourceSha: ctx.mergeReceipt.mergeSha,
+      });
+    } catch (error) {
+      receipt.deployEvidence = evidence;
+      receipt.stages = { ...receipt.stages, deploy: "failed" };
+      saveReceipt(deps, receipt);
+      v2Transition(deps, ctx.auth, "FAILED", "deploy", "failed", error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+    receipt.deployComplete = true;
+    receipt.deployedAt = Date.now();
+    receipt.deployEvidence = evidence;
+    receipt.stages = { ...receipt.stages, deploy: "succeeded" };
+    saveReceipt(deps, receipt);
+  }
+  if (!receipt.deployEvidence) {
+    throw new StateError("INVALID_INPUT", "deployment receipt 缺少 deployEvidence；不能 verify。 ");
+  }
+
+  // profile verify：同样的观察语义；证据还必须与 deployEvidence 四字段完全一致。
+  if (spec.verify.kind === "profile") {
+    if (receipt.verifyJobId) {
+      const state = profileJobState(deps, task, receipt.verifyJobId, spec.verify.profile);
+      if (state === "running") {
+        return { structuredContent: ok({ taskId, data: { state: "verifying", jobId: receipt.verifyJobId }, hint: "V2 验证 job 仍在运行。" }) };
+      }
+      const ctx = requireV2Authorization(deps, taskId, spec);
+      assertSameAuthorization(ctx, receipt);
+      if (state === "failed") {
+        receipt.stages = { ...receipt.stages, verify: "failed" };
+        saveReceipt(deps, receipt);
+        v2Transition(deps, ctx.auth, "FAILED", "verify", "failed", `验证 job ${receipt.verifyJobId} 未通过。`);
+        throw new StateError("INVALID_INPUT", `V2 验证 job ${receipt.verifyJobId} 未通过；authorization 已置 FAILED，绝不自动重试。`);
+      }
+      const job = getJob(deps.db, receipt.verifyJobId)!;
+      let evidence: DeploymentEvidence;
+      try {
+        evidence = evidenceFromJobSummary(job);
+      } catch (error) {
+        receipt.stages = { ...receipt.stages, verify: "uncertain" };
+        saveReceipt(deps, receipt);
+        v2Transition(deps, ctx.auth, "UNCERTAIN", "verify", "uncertain", error instanceof Error ? error.message : String(error));
+        return uncertainDeployEnvelope(taskId, false, receipt.verifyRef);
+      }
+      const expected = receipt.deployEvidence;
+      const identityMismatch =
+        evidence.deploymentId !== expected.deploymentId ||
+        evidence.target !== expected.target ||
+        evidence.sourceSha !== expected.sourceSha ||
+        (evidence.artifactDigest ?? null) !== (expected.artifactDigest ?? null);
+      if (identityMismatch) {
+        const error = new StateError(
+          "EVIDENCE_MISMATCH",
+          "verify evidence 的 deploymentId/target/sourceSha/artifactDigest 与 deployEvidence 不一致。",
+        );
+        receipt.verifyEvidence = evidence;
+        receipt.stages = { ...receipt.stages, verify: "failed" };
+        saveReceipt(deps, receipt);
+        v2Transition(deps, ctx.auth, "FAILED", "verify", "failed", error.message);
+        throw error;
+      }
+      receipt.verifyComplete = true;
+      receipt.verifiedAt = Date.now();
+      receipt.verifyEvidence = evidence;
+      receipt.stages = { ...receipt.stages, verify: "succeeded" };
+      saveReceipt(deps, receipt);
+      transitionAuthorization(
+        deps.db,
+        ctx.auth.authorizationId,
+        ctx.auth.bindingDigest,
+        "EXECUTING",
+        "SUCCEEDED",
+        { ...ctx.auth.stages, deploy: { state: "succeeded" }, verify: { state: "succeeded" } },
+      );
+      return { structuredContent: ok({ taskId, data: { state: "DONE", authorizationId: ctx.auth.authorizationId, verifyEvidence: evidence }, hint: `任务 ${taskId} 部署验证通过，DONE。` }) };
+    }
+
+    const ctx = requireV2Authorization(deps, taskId, spec);
+    assertSameAuthorization(ctx, receipt);
+    assertV2HostProfile(deps, task, spec.verify, "verify");
+    const jobId = startV2HostJob(deps, task, spec.verify.profile, options);
+    receipt.verifyJobId = jobId;
+    receipt.stages = { ...receipt.stages, verify: "running" };
+    saveReceipt(deps, receipt);
+    return {
+      structuredContent: ok({
+        taskId,
+        data: { state: "verifying", jobId, authorizationId: ctx.auth.authorizationId },
+        hint: `V2 验证 profile 已启动（job ${jobId}）；稍后再次调用 grande_deploy_verify。`,
+      }),
+    };
+  }
+
+  const ctx = requireV2Authorization(deps, taskId, spec);
+  assertSameAuthorization(ctx, receipt);
+  await assertCapabilityRole(tools, spec.verify, "verify");
+
+  // Uncertainty-first 重入：stages.verify==="running" 只可能是上次调用在 invoke
+  // 与结果落账之间崩溃留下的状态；远端副作用未知，置 UNCERTAIN 且绝不二次 invoke
+  //（与 capability deploy 的 deployUncertain 先落账、rollback 的 running→UNCERTAIN 一致）。
+  if (receipt.stages?.verify === "running") {
+    receipt.stages = { ...receipt.stages, verify: "uncertain" };
+    saveReceipt(deps, receipt);
+    v2Transition(
+      deps,
+      ctx.auth,
+      "UNCERTAIN",
+      "verify",
+      "uncertain",
+      "capability verify 在 running 状态重入：上次调用结果未落账，远端副作用未知，绝不二次 invoke。",
+    );
+    return uncertainDeployEnvelope(taskId, true, receipt.verifyRef);
+  }
+
+  receipt.stages = { ...receipt.stages, verify: "running" };
+  saveReceipt(deps, receipt);
+
+  const toUncertain = (reason: string) => {
+    receipt.stages = { ...receipt.stages, verify: "uncertain" };
+    saveReceipt(deps, receipt);
+    v2Transition(deps, ctx.auth, "UNCERTAIN", "verify", "uncertain", reason);
+    return uncertainDeployEnvelope(taskId, false, receipt.verifyRef);
+  };
+
+  let result: Record<string, unknown>;
+  try {
+    result = await invokeCapabilityAction(tools, task, spec.verify, "verify");
+  } catch (error) {
+    return toUncertain(error instanceof Error ? error.message : String(error));
+  }
+  let evidence: DeploymentEvidence;
+  try {
+    evidence = capabilityEvidence(result);
+  } catch (error) {
+    return toUncertain(error instanceof Error ? error.message : String(error));
+  }
+  const expected = receipt.deployEvidence;
+  const identityMismatch =
+    evidence.deploymentId !== expected.deploymentId ||
+    evidence.target !== expected.target ||
+    evidence.sourceSha !== expected.sourceSha ||
+    (evidence.artifactDigest ?? null) !== (expected.artifactDigest ?? null);
+  if (identityMismatch) {
+    const error = new StateError(
+      "EVIDENCE_MISMATCH",
+      "verify evidence 的 deploymentId/target/sourceSha/artifactDigest 与 deployEvidence 不一致。",
+    );
+    receipt.verifyEvidence = evidence;
+    receipt.stages = { ...receipt.stages, verify: "failed" };
+    saveReceipt(deps, receipt);
+    v2Transition(deps, ctx.auth, "FAILED", "verify", "failed", error.message);
+    throw error;
+  }
+
+  receipt.verifyComplete = true;
+  receipt.verifiedAt = Date.now();
+  receipt.verifyEvidence = evidence;
+  receipt.stages = { ...receipt.stages, verify: "succeeded" };
+  saveReceipt(deps, receipt);
+  transitionAuthorization(
+    deps.db,
+    ctx.auth.authorizationId,
+    ctx.auth.bindingDigest,
+    "EXECUTING",
+    "SUCCEEDED",
+    { ...ctx.auth.stages, deploy: { state: "succeeded" }, verify: { state: "succeeded" } },
+  );
+  return { structuredContent: ok({ taskId, data: { state: "DONE", authorizationId: ctx.auth.authorizationId, verifyEvidence: evidence }, hint: `任务 ${taskId} 部署验证通过，DONE。` }) };
+}
+
+/**
+ * Minimal V2 Task 6 slice 5：deliveryTarget="deploy" 时的 authorization-gated rollback。
+ * legacy rollback（无显式 target）完全不变。
+ */
+const ROLLBACK_ID_ALIASES = new Set(["previous", "prev", "latest", "current", "last", "head"]);
+const EXACT_SHA_RE = /^[0-9a-f]{40}$/;
+
+/** rollback 目标身份必须是精确值；previous/prev/latest/current/last/head 等相对别名一律拒绝。 */
+function assertExactRollbackTarget(binding: RollbackAuthorizationBinding): void {
+  const id = binding.rollbackDeploymentId;
+  if (typeof id !== "string" || id.trim() === "" || ROLLBACK_ID_ALIASES.has(id.trim().toLowerCase())) {
+    throw new StateError(
+      "INVALID_INPUT",
+      `rollbackDeploymentId ${JSON.stringify(id)} 是相对别名或空值；V2 rollback 只接受精确 deploymentId。`,
+    );
+  }
+  if (!EXACT_SHA_RE.test(binding.rollbackSourceSha)) {
+    throw new StateError(
+      "INVALID_INPUT",
+      `rollbackSourceSha ${JSON.stringify(binding.rollbackSourceSha)} 不是精确 40 位小写十六进制；拒绝别名。`,
+    );
+  }
+}
+
+function uncertainRollbackEnvelope(taskId: string, existing: boolean, rollbackRef: string) {
+  return {
+    structuredContent: ok({
+      taskId,
+      data: { state: "uncertain", existing, retryable: false, rollbackRef },
+      hint: "rollback capability 的响应未能确认。远端可能已经回滚；GrandeGPT 不会自动重试。Human Owner 必须先确认平台真实状态。",
+    }),
+  };
+}
+
+async function v2Rollback(
+  deps: ToolDeps,
+  tools: ToolDef[],
+  task: TaskRow,
+  spec: DeploymentSpec,
+): Promise<{ structuredContent: unknown }> {
+  const taskId = task.taskId;
+  if (!spec.rollback) {
+    throw new StateError("INVALID_INPUT", "repo 没有声明 rollback；不会猜一个通用回滚方案。 ");
+  }
+  const receipt = loadReceipt(deps, taskId);
+  if (!receipt?.authorizationId) {
+    throw new StateError("INVALID_INPUT", `任务 ${taskId} 没有 V2 deployment receipt；拒绝脱离真实部署记录单独 rollback。`);
+  }
+  ensureReceiptMatches(receipt, spec);
+  const rollbackRef = actionRef(spec.rollback)!;
+
+  // 终态/已有 rollback receipt 的幂等重入：只观察 durable receipt，绝不重试。
+  if (receipt.rollbackAuthorizationId !== undefined) {
+    // 与 v2Deploy/v2Verify 同源的绑定门禁：旧 rollback receipt 的早退结果
+    // （succeeded/uncertain/failed）绝不能给新活跃 authorization 背书。
+    assertReceiptBoundToActiveAuthorization(deps, taskId, receipt, receipt.rollbackAuthorizationId);
+    const stage = receipt.stages?.rollback;
+    if (stage === "succeeded") {
+      return {
+        structuredContent: ok({
+          taskId,
+          data: { state: "rolled-back", existing: true, rollbackAuthorizationId: receipt.rollbackAuthorizationId },
+          hint: "rollback 已完成；同一 receipt 幂等返回。",
+        }),
+      };
+    }
+    if (stage === "uncertain") return uncertainRollbackEnvelope(taskId, true, rollbackRef);
+    if (stage === "failed") {
+      throw new StateError("POLICY_DENIED", "rollback 已置 FAILED；绝不自动重试。 ");
+    }
+    // stage "running"：首次调用在 invoke 后响应丢失。允许 EXECUTING 重入观察同一条
+    // durable receipt，但绝不第二次 invoke——按 lost result 置 UNCERTAIN。
+    const auth = activeAuthorizationForTask(deps.db, taskId);
+    if (!auth || auth.authorizationId !== receipt.rollbackAuthorizationId || auth.status !== "EXECUTING") {
+      throw new StateError("POLICY_DENIED", "rollback receipt 处于 running，但同一条 rollback authorization 不在 EXECUTING；拒绝继续。 ");
+    }
+    const row = deps.db
+      .prepare("SELECT executionDeadlineAt FROM delivery_authorization WHERE authorizationId=?")
+      .get(auth.authorizationId) as { executionDeadlineAt: number | null } | undefined;
+    if (!row || typeof row.executionDeadlineAt !== "number" || row.executionDeadlineAt <= Date.now()) {
+      throw new StateError("AUTH_EXPIRED", `rollback authorization ${auth.authorizationId} 已过 execution deadline。`);
+    }
+    receipt.stages = { ...receipt.stages, rollback: "uncertain" };
+    saveReceipt(deps, receipt);
+    transitionAuthorization(
+      deps.db, auth.authorizationId, auth.bindingDigest, "EXECUTING", "UNCERTAIN",
+      { ...auth.stages, rollback: { state: "uncertain" } },
+      "rollback invoke 响应丢失；按 lost result 处理。",
+    );
+    return uncertainRollbackEnvelope(taskId, false, rollbackRef);
+  }
+
+  const auth = activeAuthorizationForTask(deps.db, taskId);
+  if (!auth) {
+    throw new StateError("POLICY_DENIED", `任务 ${taskId} 没有活跃 authorization；V2 rollback 需要独立审批。`);
+  }
+  if (auth.kind === "delivery") {
+    throw new StateError(
+      "POLICY_DENIED",
+      `活跃 authorization ${auth.authorizationId} 是 delivery kind；rollback 必须使用独立的 rollback authorization，绝不复用 delivery 授权。`,
+    );
+  }
+  const binding = auth.binding as RollbackAuthorizationBinding;
+
+  if (auth.status !== "APPROVED") {
+    throw new StateError(
+      "POLICY_DENIED",
+      `rollback authorization 状态 ${auth.status}；只有 APPROVED 可以启动首次 rollback，EXECUTING 仅用于重入观察同一条 receipt。`,
+    );
+  }
+  if (!receipt.deployEvidence) {
+    throw new StateError("INVALID_INPUT", "deployment receipt 缺少 deployEvidence；rollback 没有可绑定的精确当前身份。 ");
+  }
+  if (
+    binding.currentDeploymentId !== receipt.deployEvidence.deploymentId ||
+    binding.currentSourceSha !== receipt.deployEvidence.sourceSha
+  ) {
+    throw new StateError(
+      "POLICY_DENIED",
+      "binding 的 currentDeploymentId/currentSourceSha 与 durable deployEvidence 不一致；拒绝 rollback。",
+    );
+  }
+  if (rollbackRef !== binding.rollbackRef) {
+    throw new StateError(
+      "POLICY_DENIED",
+      `当前 spec rollback ref ${rollbackRef} 与 binding.rollbackRef ${binding.rollbackRef} 不一致；拒绝执行。`,
+    );
+  }
+  assertExactRollbackTarget(binding);
+  if (spec.rollback.kind !== "capability") {
+    throw new StateError("INVALID_INPUT", "V2 rollback 当前只支持 capability rollback；profile job 不在本 slice。 ");
+  }
+  await assertCapabilityRole(tools, spec.rollback, "rollback");
+
+  // 审批有效期由 beginAuthorizedExecution 内部检查；通过后立即进入 EXECUTING 并记录
+  // execution deadline，随后才发生第一个外部 rollback side effect。
+  const executing = beginAuthorizedExecution(deps.db, auth.authorizationId, "rollback", auth.bindingDigest);
+  receipt.rollbackAuthorizationId = auth.authorizationId;
+  receipt.stages = { ...receipt.stages, rollback: "running" };
+  saveReceipt(deps, receipt);
+
+  const toUncertain = (reason: string) => {
+    receipt.stages = { ...receipt.stages, rollback: "uncertain" };
+    saveReceipt(deps, receipt);
+    v2Transition(deps, executing, "UNCERTAIN", "rollback", "uncertain", reason);
+    return uncertainRollbackEnvelope(taskId, false, rollbackRef);
+  };
+
+  let result: Record<string, unknown>;
+  try {
+    result = await invokeCapabilityAction(tools, task, spec.rollback, "rollback");
+  } catch (error) {
+    return toUncertain(error instanceof Error ? error.message : String(error));
+  }
+  let evidence: DeploymentEvidence;
+  try {
+    evidence = capabilityEvidence(result);
+  } catch (error) {
+    return toUncertain(error instanceof Error ? error.message : String(error));
+  }
+  try {
+    assertEvidenceMatchesAuthorization(evidence, {
+      target: binding.deployTarget,
+      sourceSha: binding.rollbackSourceSha,
+      ...(binding.rollbackArtifactDigest !== undefined ? { artifactDigest: binding.rollbackArtifactDigest } : {}),
+    });
+    if (evidence.deploymentId !== binding.rollbackDeploymentId) {
+      throw new StateError("EVIDENCE_MISMATCH", "rollback evidence 的 deploymentId 与 binding.rollbackDeploymentId 不一致。");
+    }
+  } catch (error) {
+    receipt.stages = { ...receipt.stages, rollback: "failed" };
+    saveReceipt(deps, receipt);
+    v2Transition(deps, executing, "FAILED", "rollback", "failed", error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+
+  receipt.rolledBackAt = Date.now();
+  receipt.stages = { ...receipt.stages, rollback: "succeeded" };
+  saveReceipt(deps, receipt);
+  transitionAuthorization(
+    deps.db, auth.authorizationId, auth.bindingDigest, "EXECUTING", "SUCCEEDED",
+    { ...auth.stages, rollback: { state: "succeeded" } },
+  );
+  return {
+    structuredContent: ok({
+      taskId,
+      data: { state: "rolled-back", rollbackAuthorizationId: auth.authorizationId, rollbackEvidence: evidence },
+      hint: "V2 rollback 完成，rollback authorization 已置 SUCCEEDED。",
+    }),
+  };
+}
+
 export function createDeploymentTools(
   deps: ToolDeps,
   tools: ToolDef[],
@@ -396,6 +1122,9 @@ export function createDeploymentTools(
       try {
         const task = taskOrThrow(deps, taskId);
         const spec = loadDeploymentSpec(task.worktreePath);
+        if (getExplicitDeliveryTarget(deps.db, taskId) === "deploy") {
+          return await v2Deploy(deps, tools, task, spec, options);
+        }
         const existing = loadReceipt(deps, taskId);
         if (existing) {
           ensureReceiptMatches(existing, spec);
@@ -499,6 +1228,9 @@ export function createDeploymentTools(
       try {
         const task = taskOrThrow(deps, taskId);
         const spec = loadDeploymentSpec(task.worktreePath);
+        if (getExplicitDeliveryTarget(deps.db, taskId) === "deploy") {
+          return await v2Verify(deps, tools, task, spec, options);
+        }
         const receipt = loadReceipt(deps, taskId);
         if (!receipt) {
           throw new StateError("INVALID_INPUT", `任务 ${taskId} 没有 deployment receipt；必须先 grande_deploy。`);
@@ -587,6 +1319,9 @@ export function createDeploymentTools(
       try {
         const task = taskOrThrow(deps, taskId);
         const spec = loadDeploymentSpec(task.worktreePath);
+        if (getExplicitDeliveryTarget(deps.db, taskId) === "deploy") {
+          return await v2Rollback(deps, tools, task, spec);
+        }
         if (!spec.rollback) throw new StateError("INVALID_INPUT", "repo 没有声明 rollback；不会猜一个通用回滚方案。 ");
         const receipt = loadReceipt(deps, taskId);
         if (!receipt) throw new StateError("INVALID_INPUT", "没有 deployment receipt，拒绝脱离真实部署记录单独 rollback。 ");

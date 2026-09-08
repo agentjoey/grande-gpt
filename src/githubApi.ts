@@ -21,6 +21,12 @@ export interface GithubPullRequestDetail {
   headSha: string;
   headRef: string;
   baseRef: string;
+  /**
+   * Minimal V2 readiness 需要 PR base 的精确 SHA（规格 §7.2「current base SHA 已读取」）。
+   * 真实 GitHub 响应总是带 base.sha；类型上保持可选是为了不打破既有测试 fake——
+   * readiness 侧会对缺失/非 SHA 形状 fail closed。
+   */
+  baseSha?: string;
 }
 
 export interface GithubCheckRun {
@@ -191,6 +197,8 @@ function pullRequestDetail(value: unknown, token: string): GithubPullRequestDeta
     headSha: requiredString(head, "sha", "PR.head"),
     headRef: requiredString(head, "ref", "PR.head"),
     baseRef: requiredString(base, "ref", "PR.base"),
+    // 真实 API 恒有 base.sha；缺失时不抛错、由 readiness 的 SHA 形状校验 fail closed。
+    ...(typeof base.sha === "string" ? { baseSha: base.sha } : {}),
   };
 }
 
@@ -437,7 +445,9 @@ export function createGithubApi(token: string, fetchImpl: FetchLike = fetch): Gi
     async mergePullRequest(owner, repo, number, expectedHeadSha) {
       const value = object(await request(
         `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}/merge`,
-        { method: "PUT", body: JSON.stringify({ sha: expectedHeadSha }) },
+        // V2 固定 merge method（规格 §10.2）：同时绑定 expected head SHA，绝不接受
+        // repo/Agent 动态选择 squash 或 rebase——那会改变 commit/tree identity。
+        { method: "PUT", body: JSON.stringify({ sha: expectedHeadSha, merge_method: "merge" }) },
       ), "merge response");
       if (typeof value.merged !== "boolean" || typeof value.sha !== "string" || typeof value.message !== "string") {
         throw new GithubApiError("GitHub API 返回的 merge 结构缺少 merged/sha/message。 ");

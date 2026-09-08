@@ -2,6 +2,21 @@ import { getAttestations } from "./attestation.ts";
 import { assertTaskBranch } from "./commit.ts";
 import { beginAudit, type AuditHandle } from "./audit.ts";
 import { refreshCanonical, type CanonicalRefreshResult } from "./canonicalRefresh.ts";
+import {
+  activeAuthorizationForTask,
+  beginAuthorizedExecution,
+  type AuthorizationStages,
+  type DeliveryAuthorizationBinding,
+} from "./deliveryAuthorization.ts";
+import {
+  canonicalRepoPath,
+  ensurePinnedReleaseSource,
+  markMergeAuthorizationUncertain,
+  persistExactMergeReceipt,
+  verifyMergedCommit,
+  type ExactMergeReceipt,
+} from "./deliveryMerge.ts";
+import { revalidateDeliveryBinding, type DeliveryReadinessDeps } from "./deliveryReadiness.ts";
 import { err, ok } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import {
@@ -18,6 +33,7 @@ import type { HostVerifierCoordinator } from "./hostVerifier.ts";
 import type { Layout } from "./layout.ts";
 import { inspectCurrentHostVerification, manualOuterTestCommand } from "./prHostVerification.ts";
 import { parseGithubRemote, readGithubRemoteUrl } from "./prOpen.ts";
+import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
@@ -117,6 +133,56 @@ export interface PrLifecycleOptions {
   hostVerificationMode?: "manual" | "auto";
   /** Internal restricted verifier coordinator. It exposes no argv/cwd/env inputs. */
   hostVerifierCoordinator?: HostVerifierCoordinator;
+  /**
+   * Minimal V2 Task 5：explicit deploy 任务的可信 readiness reader 集（Task 3）。
+   * 缺失时 deploy 任务的 merge fail closed——没有可信 reader 就无法复核 binding。
+   */
+  deliveryReadinessDeps?: DeliveryReadinessDeps;
+}
+
+/** deploy 任务的 merge stage 授权上下文（CAS 前的复核结果）。 */
+interface AuthorizedMerge {
+  authorizationId: string;
+  bindingDigest: string;
+  taskId: string;
+  binding: DeliveryAuthorizationBinding;
+  stages: AuthorizationStages;
+}
+
+/**
+ * 规格 §10.1：任何外部 mutation 之前找到唯一 APPROVED authorization 并复核 binding。
+ * 本函数在【任何 GitHub API 调用之前】运行——没有 APPROVED authorization、binding
+ * 漂移或过期都直接抛错，零 GitHub 调用、零执行。
+ */
+async function reauthorizeForMerge(
+  deps: ToolDeps,
+  taskId: string,
+  options: PrLifecycleOptions,
+): Promise<AuthorizedMerge> {
+  const readinessDeps = options.deliveryReadinessDeps;
+  if (!readinessDeps) {
+    throw new StateError(
+      "POLICY_DENIED",
+      `任务 ${taskId} 是 explicit deploy 任务，但 Gateway 未接入可信 readiness reader；fail closed，拒绝 merge。`,
+    );
+  }
+  const active = activeAuthorizationForTask(deps.db, taskId);
+  if (!active || active.kind !== "delivery" || active.status !== "APPROVED") {
+    throw new StateError(
+      "STALE_STATE",
+      `任务 ${taskId} 没有 APPROVED 状态的 delivery authorization；` +
+        "deploy 任务的 merge 必须由 Console 审批启动，禁止任何 GitHub 调用。",
+    );
+  }
+  // 复核 durable binding：任何字段漂移都会在这里 CAS 置 STALE 并抛错（Task 3）。
+  const binding = await revalidateDeliveryBinding(deps.db, active.authorizationId, readinessDeps);
+  return {
+    authorizationId: active.authorizationId,
+    bindingDigest: active.bindingDigest,
+    taskId,
+    binding,
+    stages: active.stages,
+  };
 }
 
 function readHead(worktreePath: string): string {
@@ -283,10 +349,40 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
       const taskId = args.taskId as string;
       let audit: AuditHandle | undefined;
       try {
+        // Minimal V2 Task 5：explicit deploy 任务先复核 authorization（规格 §10.1），
+        // 这一步发生在【任何 GitHub API 调用之前】——没有 APPROVED authorization、
+        // binding 漂移或过期都直接抛错，零 GitHub 调用、零执行。
+        const authorized = getExplicitDeliveryTarget(deps.db, taskId) === "deploy"
+          ? await reauthorizeForMerge(deps, taskId, options)
+          : null;
         const state = await inspectLifecycle(deps, taskId, options);
         const canonicalRefresher = options.canonicalRefresher ?? refreshCanonical;
 
+        if (authorized) {
+          // merge stage 还必须再次确认 current PR head、base SHA 与 binding 一致（§10.1）。
+          const b = authorized.binding;
+          if (
+            b.prNumber !== state.pr.number ||
+            b.headSha !== state.pr.headSha ||
+            b.baseRef !== state.pr.baseRef ||
+            b.baseSha !== state.pr.baseSha ||
+            b.repoId !== state.task.repoId ||
+            b.headSha !== state.localHead
+          ) {
+            throw new StateError(
+              "STALE_STATE",
+              `任务 ${taskId} 的 authorization binding 与当前 PR/本地证据不一致；本次请求零执行。`,
+            );
+          }
+        }
+
         if (state.pr.merged) {
+          if (authorized) {
+            throw new StateError(
+              "STALE_STATE",
+              `PR #${state.pr.number} 已在授权执行链之外被合并；fail closed，需 Human 检查后再开新授权。`,
+            );
+          }
           audit = beginAudit(deps.db, {
             taskId,
             tool: "grande_pr_merge",
@@ -527,11 +623,30 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
         audit = beginAudit(deps.db, {
           taskId,
           tool: "grande_pr_merge",
-          input: { taskId, prNumber: state.pr.number, expectedHeadSha: state.pr.headSha, ciState: state.ci.state },
+          input: {
+            taskId,
+            prNumber: state.pr.number,
+            expectedHeadSha: state.pr.headSha,
+            ciState: state.ci.state,
+            ...(authorized
+              ? { authorizationId: authorized.authorizationId, bindingDigest: authorized.bindingDigest }
+              : {}),
+          },
         });
         audit.allowed();
         if (!audit.executing()) {
           throw new StateError("STALE_STATE", `任务 ${taskId} 的 merge 审计句柄无法推进到 EXECUTING。`);
+        }
+
+        // 规格 §10.1：APPROVED → EXECUTING 的原子 CAS 必须发生在任何外部 mutation 之前。
+        // CAS 失败表示另一个请求已推进状态，本次请求零执行（连 canonical fetch 都不做）。
+        if (authorized) {
+          beginAuthorizedExecution(
+            deps.db,
+            authorized.authorizationId,
+            "delivery",
+            authorized.bindingDigest,
+          );
         }
 
         // 先验证 canonical 当前就是 PR base branch、clean 且可安全追上现有 remote base。
@@ -549,21 +664,61 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
         }
 
         let canonicalRefresh: CanonicalRefreshResult;
+        let mergeReceipt: ExactMergeReceipt | undefined;
         try {
-          canonicalRefresh = canonicalRefresher(deps.layout, state.task.repoId, state.pr.baseRef);
+          try {
+            canonicalRefresh = canonicalRefresher(deps.layout, state.task.repoId, state.pr.baseRef);
+          } catch (error) {
+            const normalized = normalizedError(error);
+            throw new StateError(
+              normalized.code,
+              `PR #${state.pr.number} 已在 GitHub 成功 merge，但 local canonical refresh 失败：${normalized.message}`,
+            );
+          }
+          if (canonicalRefresh.remoteHead !== null && canonicalRefresh.after !== merged.sha) {
+            throw new StateError(
+              "CANONICAL_DIVERGED",
+              `PR #${state.pr.number} 已 merge 为 ${merged.sha}，但 refresh 后 local canonical=${canonicalRefresh.after}；` +
+                `拒绝把 release 标记为 canonical-fresh。`,
+            );
+          }
+
+          if (authorized) {
+            // 规格 §10.2：绝不凭 merged=true 推断 tree 正确。验证 merge commit 的
+            // parents（按顺序 base/head）与 tree，然后创建固定在 mergeSha 的 clean
+            // pinned release source 并把 durable receipt 落盘。任一检查失败都进入
+            // UNCERTAIN（终态），不得继续 deploy。
+            const verified = verifyMergedCommit({
+              repoPath: canonicalRepoPath(deps.layout, state.task.repoId),
+              authorizationId: authorized.authorizationId,
+              baseSha: authorized.binding.baseSha,
+              headSha: authorized.binding.headSha,
+              mergeSha: merged.sha,
+              expectedMergeTree: authorized.binding.expectedMergeTree,
+            });
+            const pinned = ensurePinnedReleaseSource({
+              layout: deps.layout,
+              repoId: state.task.repoId,
+              authorizationId: authorized.authorizationId,
+              mergeSha: merged.sha,
+              expectedTree: authorized.binding.expectedMergeTree,
+            });
+            mergeReceipt = { ...verified, releaseSourceRealpath: pinned.realpath };
+            persistExactMergeReceipt(deps.layout, mergeReceipt);
+          }
         } catch (error) {
-          const normalized = normalizedError(error);
-          throw new StateError(
-            normalized.code,
-            `PR #${state.pr.number} 已在 GitHub 成功 merge，但 local canonical refresh 失败：${normalized.message}`,
-          );
-        }
-        if (canonicalRefresh.remoteHead !== null && canonicalRefresh.after !== merged.sha) {
-          throw new StateError(
-            "CANONICAL_DIVERGED",
-            `PR #${state.pr.number} 已 merge 为 ${merged.sha}，但 refresh 后 local canonical=${canonicalRefresh.after}；` +
-              `拒绝把 release 标记为 canonical-fresh。`,
-          );
+          if (authorized) {
+            try {
+              markMergeAuthorizationUncertain(
+                deps.db,
+                authorized,
+                error instanceof Error ? error.message : String(error),
+              );
+            } catch {
+              // 状态可能已被并发请求推进；原始错误才是调用方需要的信息。
+            }
+          }
+          throw error;
         }
 
         audit.succeeded([state.task.worktreePath]);
@@ -578,6 +733,7 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
               mergeSha: merged.sha,
               ciState: state.ci.state,
               canonicalRefresh,
+              ...(mergeReceipt ? { mergeReceipt } : {}),
             },
             hint: `PR #${state.pr.number} 已合并（head ${state.pr.headSha}，CI=${state.ci.state}）；` +
               `local canonical 已验证/刷新到 merge SHA ${merged.sha}。`,
