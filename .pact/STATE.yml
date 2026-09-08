@@ -186,7 +186,7 @@ features:
         deps: [binding-a-5-budgets]
   - id: minv2-gw
     branch: feat/minv2-gateway
-    status: in_progress
+    status: shipped
     tasks:
       - id: minv2-gw-1-target
         owner: w1
