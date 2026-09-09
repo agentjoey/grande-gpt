@@ -2,7 +2,9 @@
 
 **日期**：2026-09-04
 
-**状态**：Approved for implementation planning — Human Owner 已批准最小 V2 边界；尚未实现
+**状态**：Implemented and production-activated — 2026-09-08 完成 Gateway implementation、Pactify acceptance、production activation、Production App refresh 与 fresh-conversation read probe
+
+**Closeout identity**：Gateway build `311d55f4a1651f7a560ca4c7f80371a74121b0bb`；25 tools / epoch 3 / digest `sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`
 
 **取代**：`2026-08-28-grande-gpt-human-approved-terminal-execution-v1.md` 及其后续 V2 草案
 

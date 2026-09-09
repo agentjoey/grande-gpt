@@ -2,9 +2,9 @@
 
 让用户在 **ChatGPT 普通对话**中完成端到端代码开发任务的受控执行层，定位于个人开发者、小团队和中小型/轻量项目。
 
-> **当前状态（2026-08-23）**：S0–S3、Phase 4、Phase 5、Phase 5.5、Reliability & Automated Host Verifier、Phase 6、Phase 7 Reliability Foundation 与 **Phase 8 Flow Simplification 均已完成**。Phase 8 implementation 已进入 canonical `main` 并完成 production activation/readback；**下一阶段是 Phase 9 — Tool Surface Convergence**，但公开 contract 变更仍受 `GG-BL-010` release-ready gate 约束。
+> **当前状态（2026-09-09）**：Phase 8 及以前阶段已完成；Phase 9 / `GG-BL-024` 的 Minimal V2 delivery slice 已进入 canonical `main` 并完成 production activation/readback。其余 tool-surface convergence 仍为进行中，不得把该 slice 扩大解释为整个 Phase 9 已完成。
 >
-> 当前 production public contract 仍为 **25 tools / `toolsetEpoch=2`**，tool digest 为 `sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`。Phase 8 未改变公开 tool surface。
+> 当前 production public contract 为 **25 tools / `toolsetEpoch=3`**，tool digest 为 `sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`。epoch 3 唯一 public schema 增量是 `grande_task_open.deliveryTarget`；没有 public approval、nonce、argv 或通用 terminal tool。
 
 ## 当前权威入口
 
@@ -53,7 +53,7 @@ Request
 → DONE
 ```
 
-Phase 8 在现有 tool contract 后面增加内部 delivery-target projection：`local / pr / deploy` 只显示当前目标需要的阶段。**Phase 8 没有公开 `TaskBrief.deliveryTarget` schema**；该公开字段与 tool-surface convergence 一并留给 Phase 9 的正式 Tool Epoch。
+Phase 8 先落地内部 delivery-target projection；Minimal V2 已在 epoch 3 将 `deliveryTarget: local | pr | deploy` 正式加入 `grande_task_open`。`deploy` 必须显式选择且 Task 创建后不可变；选择 `deploy` 只准备交付证据，不等于 Human 已批准 production side effect。
 
 Bug、新需求、Issue 与 PR feedback 重新创建 Task，继续走同一条闭环；不建设独立 Requirement Management、Release、Incident 或 Deployment Platform。
 
@@ -62,10 +62,10 @@ Bug、新需求、Issue 与 PR feedback 重新创建 Task，继续走同一条�
 production public MCP contract：
 
 - **25 tools**
-- `toolsetEpoch=2`
-- `toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`
+- `toolsetEpoch=3`
+- `toolsDigest=sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`
 
-相对早期 epoch 1 / 23-tool contract，正式 onboarding release 新增 `grande_repo_add_propose` 与 `grande_repo_add_apply`。Phase 7 与 Phase 8 都未改变 tool count/epoch/digest。
+epoch 3 保持 25 个工具，仅发布 Minimal V2 的 public `deliveryTarget` schema。工具合并/隐藏仍属于 `GG-BL-024` 剩余范围。
 
 当前核心工具按职责分组：
 
@@ -76,7 +76,7 @@ production public MCP contract：
 - onboarding：`grande_repo_add_propose`、`grande_repo_add_apply`；
 - cleanup：`grande_task_close`。
 
-公开 surface 收敛属于 Phase 9 / `GG-BL-024`，必须一次正式 Tool Epoch 完成，并受 `GG-BL-010` release-ready gate 约束。在该 gate 满足前，禁止为了“先试试看”零散合并/重命名工具或改变 production `tools/list`。
+公开 surface 剩余收敛属于 Phase 9 / `GG-BL-024`。不得为了“先试试看”零散合并/重命名工具或改变 production `tools/list`；任何后续 contract release 仍须明确授权并按 compatibility runbook 完成 App refresh 与 fresh-conversation read probe。
 
 ## 当前 CLI / production
 
@@ -97,7 +97,7 @@ production public MCP contract：
 - Gateway loaded restart 使用 failure-safe launchd 路径，success 前等待 endpoint readiness；
 - exact-SHA Host verification 是 merge gate 的一部分；auto verifier 在 eligible 情况下 controlled execution，manual-only 情况保留受信 Human Gate；
 - verifier failure taxonomy 为 `candidate / infrastructure / integrity`，infra retry 有界，integrity zero-retry fail closed；
-- verifier execution plane 与 ChatGPT conversation/App binding plane 分离；`GG-BL-010` 仍是 P0/MITIGATED，不能通过降低 annotations、绕过 Gateway 或增加第二执行通道规避。
+- verifier execution plane 与 ChatGPT conversation/App binding plane 分离；`GG-BL-010` 已由 Human Owner 接受剩余风险并关闭，但不能通过降低 annotations、绕过 Gateway 或增加第二执行通道规避未来复现。
 
 ## Phase 7 Reliability Foundation — 已完成
 
@@ -151,7 +151,7 @@ activation receipt 独立于 merge/deploy evidence，至少绑定：
 
 只有上述条件全部满足才持久化；build/tool identity mismatch 必须 fail closed。后续会话必须能直接从 status 读回 receipt，而不是靠聊天重建时间线。
 
-Phase 8 当前 production receipt 已读回：
+Phase 8 当时的 production receipt（历史证据）已读回：
 
 ```text
 targetBuild = runtimeBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97
@@ -172,6 +172,16 @@ readProbe = HTTP 200
 - 新增 L1/L2/L3 development-risk classifier；未知路径 fail closed 到 L3。
 
 Phase 8 implementation PR #25 exact head `e902877854e2513cfa1d6545ffb15b22cc8410f9`：`unit-selfhost` **112 files / 871 tests PASS**、`typecheck` PASS、GitHub Actions PASS、manual-only Host outer-test **10 files / 172 tests PASS**；merge SHA `217a2dadc2887046decdeb9ab3c2813060ae7d97` 已 activation，durable receipt readback PASS。
+
+## Phase 9 Minimal V2 delivery slice — 已交付
+
+- 自动 terminal 继续只运行控制平面注册的 `task-sandbox` profile；普通 `grande_run` 永远不能触达 `deployment-host`。
+- delivery readiness 精确绑定 PR head/base、expected merge tree、CI、attestation、Host receipt、deploy spec、Policy、runtime build 与 tool identity。
+- Human Owner 只在受保护 Console 审批一次；授权覆盖 exact-bound `merge → deploy → verify`，任一绑定漂移都 fail closed。
+- merge 后从固定在 exact merge SHA 的 release source 部署；durable job/receipt 允许中断恢复且不重复外部副作用。
+- uncertainty 不自动重试；rollback 必须使用独立 authorization。
+
+Closeout：Pactify `minv2-gw` 七任务 accepted；Gateway build `311d55f4a1651f7a560ca4c7f80371a74121b0bb`；25 tools / epoch 3 / digest `sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`；Production App refresh 与 fresh-conversation `grande_task_status` read probe PASS。
 
 ## 当前验证纪律
 
@@ -260,7 +270,7 @@ Phase 8 implementation PR #25 exact head `e902877854e2513cfa1d6545ffb15b22cc8410
 
 ## ChatGPT App / binding 约束
 
-`GG-BL-010` 仍未根因关闭。出现 App installed/enabled、server tools/list 正常但 conversation direct tool call 被 disabled / Resource not found 的情况时：
+`GG-BL-010` 已于 2026-08-30 由 Human Owner 接受剩余 observation 风险并关闭，但平台根因没有被 server-side 证明消除。出现 App installed/enabled、server tools/list 正常但 conversation direct tool call 被 disabled / Resource not found 的情况时：
 
 - 先区分 server runtime identity 与 client/session binding snapshot；
 - 不把 Host Verifier PASS 当作 binding 已修；
@@ -269,13 +279,13 @@ Phase 8 implementation PR #25 exact head `e902877854e2513cfa1d6545ffb15b22cc8410
 - 不通过频繁改 tools/list 试探平台；
 - 按 [`docs/chatgpt-connector-compatibility-runbook.md`](docs/chatgpt-connector-compatibility-runbook.md) Refresh/Reconnect，并用 fresh conversation 做 read probe。
 
-Phase 9 改公开 tool snapshot 前，必须满足 [`docs/BACKLOG.md`](docs/BACKLOG.md) 定义的 `GG-BL-010` release-ready gate。
+再次复现 unexplained binding failure 时，重新打开 `GG-BL-010` 或建立明确 related incident；不得把 owner closeout 倒推为平台根因已解决。
 
-## 下一阶段：Phase 9 — Tool Surface Convergence
+## 当前阶段：Phase 9 — Tool Surface Convergence
 
-Phase 9 范围以 `GG-BL-024` 为准，只在 `GG-BL-010` release-ready gate 满足后进入 public contract change。计划在一次 Tool Epoch 中完成 public `TaskBrief.deliveryTarget` 与公开 tool surface 收敛；不长期并存新旧 alias，不用多个小 epoch 反复扰动 ChatGPT App snapshot。
+Phase 9 范围以 `GG-BL-024` 为准。Minimal V2 的 public `TaskBrief.deliveryTarget` 与 epoch 3 已发布；repo registration、capability inspect、deploy verify 与正常 task close 的剩余 surface convergence 尚未完成。
 
-在 gate 满足前，继续使用 Phase 8 已 activation 的内部 flow simplification，production **25 tools / epoch 2 / current digest** 保持冻结。
+后续工作必须保持已发布的安全语义，不长期并存新旧 alias，也不用多个无必要的小 epoch 反复扰动 ChatGPT App snapshot。
 
 ## 目录约定
 

@@ -2,7 +2,7 @@
 
 > Current operational snapshot only. Backlog priority/status and roadmap state remain authoritative in [`docs/BACKLOG.md`](BACKLOG.md). Historical specs, plans and research retain their original timeline semantics.
 
-Last synchronized: **2026-08-23**
+Last synchronized: **2026-09-09**
 
 ## Executive status
 
@@ -15,52 +15,48 @@ GrandeGPT has completed:
 - Reliability & Automated Host Verifier activation;
 - Phase 6 Post-Activation Hardening;
 - Phase 7 Reliability Foundation;
-- **Phase 8 Flow Simplification**.
+- **Phase 8 Flow Simplification**;
+- **Phase 9 Minimal V2 delivery slice**: explicit delivery target, durable one-time delivery authorization, hardened Console approval routes, exact merge binding, pinned release source, and reentrant deploy/verify/rollback enforcement.
 
-**Next planned development stage: Phase 9 — Tool Surface Convergence.** Phase 9 has not entered public contract change yet. `GG-BL-010` remains the release gate, so production stays on the current 25-tool / epoch-2 contract until that gate is satisfied.
+**Current development stage: Phase 9 — Tool Surface Convergence (in progress).** The Minimal V2 slice is implemented and production-activated. Broader public-tool consolidation remains open under `GG-BL-024`; this closeout does not claim that the whole phase is complete.
 
 ## Current canonical state
 
-- Phase 8 implementation PR: **#25**
-- Phase 8 exact implementation head: `e902877854e2513cfa1d6545ffb15b22cc8410f9`
-- Phase 8 implementation merge SHA / activated runtime source: `217a2dadc2887046decdeb9ab3c2813060ae7d97`
-- Phase 8 closeout task: `task-p8-closeout-20260823-001`
+- canonical branch / remote: `main` / `origin/main`
+- Minimal V2 Pactify feature: `minv2-gw`, seven tasks accepted and feature shipped
+- Minimal V2 merge commit: `7ab13d5`
+- Minimal V2 production Gateway build / pre-docs-closeout canonical HEAD: `311d55f4a1651f7a560ca4c7f80371a74121b0bb`
+- shared contract mirror in `grande-console`: `3a4038be8eef8fe28f3f24aa2e69df4c3e1a9977`
 
-Earlier Phase 7 implementation PR #22 merged at `aec10bbdd8ce01ef7cfc1eada18cb52d692bb162`; its project-management closeout PR #23 later advanced canonical to `f796b47dcaa6649b4ae9869e35cea07466ceaf09` before subsequent work.
-
-Documentation-only commits after the Phase 8 activation may advance canonical without requiring another production Gateway activation. Do not infer runtime build from canonical HEAD alone.
+Phase 7/8 SHAs remain historical evidence in their closeout documents. Documentation-only commits after this activation may advance canonical without requiring another production Gateway activation; do not infer runtime build from canonical HEAD alone.
 
 ## Production identity
 
-The Phase 8 production activation receipt was persisted and then independently read back through the running Gateway:
+The Minimal V2 production activation receipt was persisted and independently read back through the running Gateway and a fresh ChatGPT conversation:
 
 ```text
-targetBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97
-runtimeBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97
-toolsetEpoch = 2
+targetBuild = git:311d55f4a1651f7a560ca4c7f80371a74121b0bb
+runtimeBuild = git:311d55f4a1651f7a560ca4c7f80371a74121b0bb
+toolsetEpoch = 3
 toolsCount = 25
-toolsDigest = sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815
+toolsDigest = sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496
 restart.launchAgentRunning = true
 restart.endpointReady = true
 readProbe.ok = true
 readProbe.httpStatus = 200
 ```
 
-The running Host Verifier reports `verifierBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97`.
-
-This proves production activation for the Phase 8 implementation merge. It is deliberately separate from merge evidence and from any deploy receipt.
+The fresh-conversation probe called only `grande_task_status`; it observed epoch 3 / 25 tools and performed no write action. Activation evidence remains deliberately separate from merge and deploy receipts.
 
 ## Public MCP contract
 
 Current production tool contract:
 
 - **25 tools**
-- `toolsetEpoch=2`
-- `toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`
+- `toolsetEpoch=3`
+- `toolsDigest=sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`
 
-Phase 7 and Phase 8 did not add/remove/rename public tools and did not bump the epoch. Phase 8 changed flow behavior behind the existing public contract.
-
-Public surface convergence is reserved for Phase 9 / `GG-BL-024`. That one-time Tool Epoch must not start until `GG-BL-010` reaches the roadmap's release-ready stability gate.
+Epoch 3 keeps the 25-tool surface and intentionally changes only the public `grande_task_open.deliveryTarget` schema. It adds no public approval, nonce, argv, shell, cwd, env, network, PTY, or scheduler input.
 
 ## Reliability baseline after Phase 8
 
@@ -99,10 +95,10 @@ GrandeGPT PRs use a real GitHub Actions baseline rather than relying on `CI=none
 
 Host-sensitive Seatbelt/LaunchAgent/loopback/real-host boundaries remain with the trusted Host Verifier and are not moved into ordinary CI.
 
-### Phase 8 flow simplification
+### Phase 8 flow simplification and Minimal V2 delivery
 
 - an internal `local | pr | deploy` delivery-target primitive projects only the stages relevant to the current target;
-- Phase 8 intentionally does not expose a public `TaskBrief.deliveryTarget` schema; that public contract belongs to Phase 9;
+- Phase 8 originally kept `TaskBrief.deliveryTarget` internal; Minimal V2 now exposes the immutable optional `local | pr | deploy` choice in epoch 3, with `deploy` requiring explicit selection;
 - `grande_run` observes a newly created job for a fixed short bounded-wait budget and returns a terminal result when it finishes in-budget; long/recovery jobs retain stable `jobId + grande_run_result` semantics;
 - normal PR flow can enter `grande_pr_merge` directly; `grande_pr_status` is diagnosis-on-demand rather than mandatory preflight;
 - after verifier completion, the agent may re-enter the merge gate under the same task authorization, but every merge call still re-reads current PR head, CI, attestation and Host receipt;
@@ -122,6 +118,15 @@ A restart is not considered successful activation until:
 
 A later session can read that receipt instead of reconstructing activation from chat history.
 
+### Minimal V2 delivery boundary
+
+- daily terminal automation still uses only trusted `task-sandbox` profiles through `grande_run`;
+- readiness binds the current PR head/base, expected merge tree, CI, attestation, Host receipt, deploy spec, trusted policy, runtime build and tool identity;
+- one protected Console approval authorizes the exact `merge → deploy → verify` chain;
+- any binding drift makes the authorization stale before side effects;
+- deploy/verify recover from durable job/receipt state without repeating an external side effect;
+- uncertainty never auto-retries, and rollback requires a separate authorization.
+
 ## Final Phase 8 verification evidence
 
 Final exact implementation candidate `e902877854e2513cfa1d6545ffb15b22cc8410f9`:
@@ -138,6 +143,15 @@ Final exact implementation candidate `e902877854e2513cfa1d6545ffb15b22cc8410f9`:
 
 The Phase 8 PR itself dogfooded the simplified PR continuation path: direct merge first, status only after a real CI blocker, then merge re-entry after CI and again after the real manual-only Host Gate.
 
+## Minimal V2 closeout evidence
+
+- focused integration: **8 files / 101 tests PASS**;
+- `pnpm test:selfhost-safe`: **138 files / 1172 tests PASS**;
+- `pnpm typecheck`: **PASS**;
+- `pnpm test:tool-contract`: **2 files / 15 tests PASS**;
+- exact-SHA Host gate: **11 files / 195 tests PASS**;
+- production Gateway/Console restart, public Access smoke, Production App refresh and fresh-conversation read probe: **PASS**.
+
 ## Current backlog / roadmap
 
 The following Phase 8 items are **DONE / archived**:
@@ -147,15 +161,10 @@ The following Phase 8 items are **DONE / archived**:
 - `GG-BL-022` — reduce unnecessary PR/verifier round trips while retaining exact-SHA merge authority;
 - `GG-BL-023` — formal L1/L2/L3 development risk levels.
 
-The public `TaskBrief.deliveryTarget` schema is **not** claimed as Phase 8 work. It is part of Phase 9 / `GG-BL-024` together with the one-time public tool-surface convergence.
+Current roadmap state:
 
-Next planned roadmap item:
-
-- `GG-BL-024` — Phase 9 Tool Surface Convergence, currently gated before public contract change by `GG-BL-010` release readiness.
-
-Important maintenance/release gate that remains independent:
-
-- `GG-BL-010` — ChatGPT App/session binding drift remains **P0 / MITIGATED**. It no longer blocks Phase 8 because Phase 8 is complete, but it still blocks Phase 9's public Tool Epoch.
+- `GG-BL-024` remains **in progress**: Minimal V2 and public `deliveryTarget` are delivered; repo registration consolidation, capability-list consolidation, deploy-verify consolidation, normal task-close internalization and the remaining rollback/release requirements are not claimed complete.
+- `GG-BL-010` is **DONE by Human Owner residual-risk acceptance** as of 2026-08-30. A future unexplained App/session binding failure must reopen it or create a related incident; this closeout does not claim the platform root cause was proven closed.
 
 For all live priority/status changes, use [`docs/BACKLOG.md`](BACKLOG.md), not this snapshot.
 
@@ -199,6 +208,7 @@ Use these documents by purpose:
 - **Coding-agent hard constraints:** [`../CLAUDE.md`](../CLAUDE.md)
 - **ChatGPT connector release/recovery:** [`chatgpt-connector-compatibility-runbook.md`](chatgpt-connector-compatibility-runbook.md)
 - **Phase 8 closeout evidence:** [`research/2026-08-23-phase8-flow-simplification-closeout.md`](research/2026-08-23-phase8-flow-simplification-closeout.md)
+- **Minimal V2 design / implementation closeout:** [`superpowers/specs/2026-09-04-grande-gpt-minimal-v2-automatic-terminal-delivery-design.md`](superpowers/specs/2026-09-04-grande-gpt-minimal-v2-automatic-terminal-delivery-design.md) and [`superpowers/plans/2026-09-04-grande-gpt-minimal-v2-gateway-implementation.md`](superpowers/plans/2026-09-04-grande-gpt-minimal-v2-gateway-implementation.md)
 - **Historical evidence / incident timeline:** `docs/research/**`
 - **Historical design/implementation plans:** `docs/superpowers/specs/**` and `docs/superpowers/plans/**`
 

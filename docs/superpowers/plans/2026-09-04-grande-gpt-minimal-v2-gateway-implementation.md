@@ -1,5 +1,7 @@
 # GrandeGPT Minimal V2 Gateway Implementation Plan
 
+> **Closeout（2026-09-08）**：本计划的七个 Pactify task 已全部 accepted，feature `minv2-gw` 已合入 canonical `main` 并 production-activated。Gateway build `311d55f4a1651f7a560ca4c7f80371a74121b0bb`；25 tools / epoch 3 / digest `sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`；Production App refresh 与 fresh-conversation `grande_task_status` read probe PASS。下方 checkbox 保留原执行计划形态，不作为当前状态来源。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Implement the GrandeGPT-side half of Minimal V2: explicit delivery targets, durable one-time authorization, exact merge binding, hardened Console approval APIs, and reentrant exact-SHA deploy/verify/rollback enforcement.
@@ -660,6 +662,6 @@ git commit -m "feat: integrate minimal v2 delivery flow"
 
 ## Feature completion boundary
 
-This Gateway feature is complete when all seven pact tasks are accepted and the pactify hard gate passes. It is not production-deployed yet.
+This Gateway feature is complete: all seven pact tasks were accepted, the feature gate passed, and the merged Gateway was production-activated at build `311d55f4a1651f7a560ca4c7f80371a74121b0bb`.
 
-Next, create a separate pact feature in `/Users/xtation/AgentWorks/GPT_Workspace/grande-console` from `docs/contracts/2026-09-04-minimal-v2-console-api.md`. That plan owns the T3 UI, rendered mockup approval, focused component tests, browser verification, and final screenshots. Do not let a Gateway worker edit the Console repository.
+The sibling `grande-console` shared contract was synchronized at `3a4038be8eef8fe28f3f24aa2e69df4c3e1a9977`, built, restarted and smoke-verified. Any future Console UI expansion remains a separate T3 feature; it is not implied by this Gateway closeout.

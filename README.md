@@ -4,8 +4,8 @@
 
 ChatGPT 负责理解需求、调研仓库和组织步骤；Gateway 负责授权与执行；Git worktree 隔离任务；macOS Seatbelt 沙箱执行受控 profile；Git/GitHub 与项目已有部署机制完成代码上线闭环。
 
-> **当前状态（2026-08-23）**：S0–S3、Phase 4（S4–S7）、Phase 5（S8–S10）、Phase 5.5、Reliability & Automated Host Verifier、Phase 6 Post-Activation Hardening、Phase 7 Reliability Foundation 与 **Phase 8 Flow Simplification 均已完成并进入 canonical `main`**。
-> **下一阶段：Phase 9 — Tool Surface Convergence**。Phase 9 尚未进入公开 contract 变更；必须先满足 `GG-BL-010` release-ready gate。在此之前 production contract 继续冻结为 **25 tools / toolsetEpoch=2**。
+> **当前状态（2026-09-09）**：Phase 8 及以前阶段已完成；Phase 9 / `GG-BL-024` 已交付 Minimal V2 slice。显式 `deliveryTarget`、一次 Human 审批绑定的 `merge → deploy → verify`、exact-SHA release source 与可重入交付证据已经进入 canonical `main` 并完成 production activation。
+> 当前 production contract 为 **25 tools / toolsetEpoch=3**；其余 tool-surface convergence 仍在 `GG-BL-024` 中继续，不把已交付的 Minimal V2 扩大解释为整个 Phase 9 已完成。
 > 当前开发闭环按实际 delivery target 投影必要阶段；正常 PR 路径允许直接进入 merge gate，诊断按需展开，短 job 支持 bounded wait。
 
 ## 当前权威入口
@@ -77,17 +77,27 @@ Phase 7 implementation PR #22 最终 exact head `bb9091d96ea6b0cf2197c473e0556e5
 
 Phase 8 implementation PR #25 exact head `e902877854e2513cfa1d6545ffb15b22cc8410f9`：`unit-selfhost` **112 files / 871 tests PASS**、`typecheck` PASS、GitHub Actions PASS、manual-only Host outer-test **10 files / 172 tests PASS**。canonical merge SHA：`217a2dadc2887046decdeb9ab3c2813060ae7d97`。production activation receipt 已由后续 Gateway 状态读回，且公开 tool identity 未变化。
 
+### Phase 9：Minimal V2 delivery slice（已交付）
+
+- `grande_task_open` 公开 schema 增加不可变的可选 `deliveryTarget: local | pr | deploy`；`deploy` 必须显式选择。
+- readiness 只在 PR、CI、attestation、Host verification、merge tree、deploy spec、Policy 与 runtime identity 全部精确匹配时生成可审批 proposal。
+- Human Owner 在受保护 Console 中只审批一次；授权精确绑定 `merge → deploy → verify`，任何 SHA/spec/policy/runtime 漂移均使旧授权 fail closed。
+- merge 后使用固定在 exact merge SHA 的 release source；deploy/verify 通过 durable job/receipt 可重入恢复，不重复外部副作用。
+- rollback 不复用 delivery authorization，必须另行生成并审批。
+
+Minimal V2 Gateway 已由 Pactify 七个任务全部 accepted 并合入 `main`；production App 已刷新，fresh-conversation `grande_task_status` 只读探针通过。更广的工具合并/隐藏仍属于 `GG-BL-024` 后续范围。
+
 ## 当前公开工具面
 
 当前 production contract：
 
 - **25 MCP tools**
-- `toolsetEpoch=2`
-- `toolsDigest=sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815`
+- `toolsetEpoch=3`
+- `toolsDigest=sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`
 
-相对早期 epoch 1 / 23-tool contract，正式 onboarding release 新增 `grande_repo_add_propose` 与 `grande_repo_add_apply`。Phase 7 与 Phase 8 都没有新增、删除或重命名公开工具，也没有 bump epoch。
+epoch 3 保持 25 个工具，仅正式增加 `grande_task_open.deliveryTarget` schema；没有新增 public approval、nonce、argv 或通用 terminal tool。
 
-下一次计划中的公开 tool surface 收敛属于 Phase 9 / `GG-BL-024`。Phase 9 必须先满足 `GG-BL-010` release-ready gate，然后在一次正式 Tool Epoch 中完成，不零散改 tools/list。
+`GG-BL-024` 尚未完成的工具合并/内部化继续单独规划，不因为 Minimal V2 activation 而倒推为已完成。
 
 开发期 schema 先在 GrandeGPT Dev 收敛；正式 tool-contract release 才刷新 Production App。出现 `Resource not found` / `tool disabled` 时，不允许绕过 Gateway 或降低安全注解；保留 Task，按 compatibility runbook Refresh/Reconnect，并在新聊天先执行 `grande_task_status` read probe。
 
@@ -119,13 +129,13 @@ node --disable-warning=ExperimentalWarning src/cli.ts gateway install
 
 `gatewayBuild` 默认来自运行 checkout 的精确 Git HEAD；它与 `toolsetEpoch` 独立。普通实现或文档 commit 会改变 Git HEAD，但只要 tool contract 不变，就不 bump epoch/digest，也不需要 Refresh Production App。
 
-Phase 8 production activation 的已读回 receipt 证明：
+Minimal V2 production activation 的已读回 receipt 证明：
 
 ```text
-targetBuild = runtimeBuild = git:217a2dadc2887046decdeb9ab3c2813060ae7d97
-toolsetEpoch = 2
+targetBuild = runtimeBuild = git:311d55f4a1651f7a560ca4c7f80371a74121b0bb
+toolsetEpoch = 3
 toolsCount = 25
-toolsDigest = sha256:7f9d2a32ae1f0b1982f8f462c5bfe7b994e02d88466edadd74cffd5ca1eee815
+toolsDigest = sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496
 LaunchAgent running = true
 endpointReady = true
 trusted read probe = HTTP 200
@@ -166,7 +176,7 @@ GrandeGPT 自举开发按风险分级：
 4. 所有需要 merge 的 PR 仍要求 exact-head attestation 与真实 independent GitHub CI；Host receipt 必须绑定 exact SHA。
 5. 需要 production activation 的变更必须记录 durable activation receipt，并从后续状态读取验证。
 
-Phase 8 最终 implementation 证据：`unit-selfhost` **112 files / 871 tests PASS**、`typecheck` PASS、GitHub CI PASS、Host **10 files / 172 tests PASS**、production activation readback PASS。
+Minimal V2 最终 Gateway 证据：`test:selfhost-safe` **138 files / 1172 tests PASS**、`typecheck` PASS、tool-contract **2 files / 15 tests PASS**、Host **11 files / 195 tests PASS**、production activation 与 fresh-conversation read probe PASS。
 
 ## 目录约定
 
@@ -182,9 +192,9 @@ GPT_Workspace/                    ← 可注册代码工作区根
 
 控制平面状态刻意放在工作区之外：**被审计者不能拥有审计记录或凭据的写权限。** `secrets/` 不进入普通 state backup。
 
-## 下一阶段：Phase 9 — Tool Surface Convergence
+## 当前阶段：Phase 9 — Tool Surface Convergence
 
-Phase 9 范围以 [`docs/BACKLOG.md`](docs/BACKLOG.md) 的 `GG-BL-024` 为准。它负责一次正式 Tool Epoch 中的公开 MCP surface 收敛，包括把 Phase 8 已验证的内部 delivery-target 语义正式纳入公开 TaskBrief contract。
+Phase 9 范围以 [`docs/BACKLOG.md`](docs/BACKLOG.md) 的 `GG-BL-024` 为准。Minimal V2 已完成 public `TaskBrief.deliveryTarget`、epoch 3 activation 与一次审批交付链；Phase 9 仍为进行中。
 
 计划目标包括：
 
@@ -192,9 +202,9 @@ Phase 9 范围以 [`docs/BACKLOG.md`](docs/BACKLOG.md) 的 `GG-BL-024` 为准。
 - capability inspect 合入 list filter；
 - deploy verify 合入可重入 deploy；
 - 正常完成路径将公开 `grande_task_close` 内部化；
-- public `TaskBrief.deliveryTarget` 与新的 tool identity 在同一个 epoch 一次发布，不长期保留新旧 alias。
+- 保持已经发布的 public `TaskBrief.deliveryTarget` 与 epoch 3 identity 稳定，不为剩余收敛制造无必要的小 epoch。
 
-**当前尚未满足 Phase 9 release gate。** `GG-BL-010` 仍为 P0 / MITIGATED；在其达到 backlog 定义的 release-ready 稳定门槛前，production 25-tool contract 继续冻结。
+`GG-BL-010` 已由 Human Owner 接受剩余风险并关闭；若再次出现 unexplained App/session binding failure，应重新打开该项或建立独立 incident。剩余 Phase 9 工作仍须分别获得明确范围与发布授权。
 
 ## 历史文档
 

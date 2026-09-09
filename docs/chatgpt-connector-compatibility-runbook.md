@@ -24,10 +24,10 @@ Gateway 通过现有 `grande_task_status` 暴露以下字段，不新增额外 i
 
 - `gatewayBuild`：优先使用显式 `GRANDE_GATEWAY_BUILD`；否则为运行 checkout 的 `git:<40-char HEAD>`；没有 Git metadata 时才退化为 `dev`。
 - `toolsetEpoch`：ChatGPT tool-contract compatibility epoch。**只有 tool contract 改变时才递增。**
-- `toolsCount`：当前正式 onboarding contract 基线为 25。
+- `toolsCount`：当前 production contract 基线为 25。
 - `toolsDigest`：`sha256:` digest，只覆盖稳定排序后的 tool `name + input schema + annotations`。
 
-当前正式 contract 是 **epoch 2**（`toolsetEpoch=2`）/ **25 tools**。相对 epoch 1 的 23-tool baseline，只新增本地 `grande_repo_add_propose` 与 `grande_repo_add_apply`；前者 read-only proposal，后者是 Human Owner 明确确认后才调用的 write action。该 release 没有新增 open-world 或 destructive 工具。
+当前正式 contract 是 **epoch 3**（`toolsetEpoch=3`）/ **25 tools** / digest `sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`。相对 epoch 2，工具数量不变，唯一 intentional schema delta 是 `grande_task_open.deliveryTarget`；没有新增 public approval、nonce、argv、open-world 或 destructive 工具。epoch 2 onboarding release 保留为下文历史案例。
 
 `gatewayBuild` 与 `toolsetEpoch` 是两条不同的轴。实现代码可以变、build 可以变，而 tool contract 完全不变；这种情况下 epoch 必须保持不变，digest 也应保持不变。
 
@@ -86,7 +86,7 @@ Release A 收紧现有 `grande_repo_read.maxBytes` 与 `grande_repo_search.maxMa
 5. **新建聊天**，先执行 read probe：调用 `grande_task_status`（无参数即可）。
 6. read probe 必须成功返回，并与 server-side 的 `toolsetEpoch / toolsCount / toolsDigest` 对得上，再继续写操作。
 
-本次 onboarding release 的具体预期为：`toolsetEpoch=2`、`toolsCount=25`、`toolsDigest` 不等于 epoch-1 23-tool digest；新聊天 read probe 通过后，才开始使用 `grande_repo_add_propose`，并在 Human Owner 确认后调用 `grande_repo_add_apply`。
+历史 onboarding release 的具体预期为：`toolsetEpoch=2`、`toolsCount=25`、`toolsDigest` 不等于 epoch-1 23-tool digest；该段只保存当时的 release evidence，不是当前 production identity。
 
 Production App 只在这种正式 tool-contract release 时更新工具 snapshot。
 
@@ -129,7 +129,7 @@ Production App 只在这种正式 tool-contract release 时更新工具 snapshot
 - 确认是否真实改变 tool contract。
 - 如果没有：确认 `TOOLSET_EPOCH` 没被改。
 - 如果有：确认 epoch 已 bump，deterministic digest / tools-list 测试已通过。
-- 本次 onboarding release：确认 production buildTools 精确为 25 tools、epoch 2，并且只新增 `grande_repo_add_propose` / `grande_repo_add_apply`。
+- 历史 onboarding release：当时确认 production buildTools 精确为 25 tools、epoch 2，并且只新增 `grande_repo_add_propose` / `grande_repo_add_apply`；当前 release 应使用实时 candidate/production identity。
 - 运行 `unit-selfhost + typecheck`；涉及 selfhost 排除区域时，再运行 host `outer-test`。
 
 ### Release A 切换前 abort gate
@@ -164,11 +164,11 @@ finally { db.close(); }
 - `doctor --repo grande-gpt`：`Connector Compatibility` 中 Gateway reachable 与 Server toolset identity 可读。
 - contract 未变：到此结束，不 Refresh App。
 - contract 已变：Scan/Refresh Tools → 新聊天 → `grande_task_status` read probe → 再恢复写操作。
-- onboarding release 的 read probe 必须看到 `toolsetEpoch=2`、`toolsCount=25` 与新的 `toolsDigest`；只有随后才对真实 repo 执行 propose/confirm/apply。
+- 当前 production read probe 必须看到 `toolsetEpoch=3`、`toolsCount=25` 与 digest `sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496`；任何未来正式 contract release 则以该次已批准并实测的 identity 为准。
 
-## 7. GG-BL-010 release-ready gate / Release A evidence
+## 7. GG-BL-010 closeout / Release A evidence
 
-`GG-BL-010` 当前状态是 **P0 / MITIGATED**。server-controlled 风险已经通过 toolset identity、32 KiB result budget、bounded result、safe correlation telemetry 与兼容性 runbook 降低，但 ChatGPT conversation/App binding 的根因没有被 server-side 证明关闭。
+`GG-BL-010` 已于 2026-08-30 由 Human Owner 接受剩余 observation 风险并关闭为 **DONE**。server-controlled 风险已经通过 toolset identity、32 KiB result budget、bounded result、safe correlation telemetry 与兼容性 runbook 降低，但 ChatGPT conversation/App binding 的根因没有被 server-side 证明关闭；再次出现 unexplained failure 时必须重新打开该项或建立 related incident。
 
 ### 7.1 目标客户端 capability 规则
 
@@ -208,17 +208,19 @@ Task A / Task B 应使用两个 disposable development tasks，覆盖真实 insp
 
 这些 50 calls / 1 MiB / 32 KiB 是**验收预算**，不是对 ChatGPT 平台隐藏配额的推断。禁止建立“达到 magic call count 就应该失败”的测试。
 
-**2026-08-23 formal matrix result: 3/3 PASS (`C-Web-1 + C-iOS + C-Web-2`)。** 这只完成 §7.2；`GG-BL-010` 仍保持 `MITIGATED`，并进入 §7.3 的 7-day ordinary-use observation。
+**2026-08-23 formal matrix result: 3/3 PASS (`C-Web-1 + C-iOS + C-Web-2`)。** 在当时这只完成 §7.2，`GG-BL-010` 随后进入 §7.3 的 7-day ordinary-use observation。
 
-### 7.3 7-day observation 与关闭条件
+### 7.3 7-day observation 与最终关闭决定
 
-Formal matrix 三次全部通过后，`GG-BL-010` 仍保持 `MITIGATED`，进入 7 天 ordinary-use observation：
+Formal matrix 三次全部通过后，原计划要求 `GG-BL-010` 保持 `MITIGATED` 并进入 7 天 ordinary-use observation：
 
 - 至少 5 个普通 conversation；
 - 每个 conversation 完成至少 2 个真实用户任务；
 - Web 必须覆盖；当前 iOS 因为已确认属于实际 release target，也必须在观察窗口中覆盖；若窗口开始前 capability 已消失，按 7.1 记录并 rebaseline；
 - 只保留 redacted summary：conversation correlation、成功调用数、累计 input/output bytes、tool distribution、401/auth failure、Gateway restart、pre-Gateway disable report；不保存内容正文或 token；
 - 7 天内没有 unexplained disablement，且 formal matrix / frozen tool identity 仍成立，才可把 `GG-BL-010` 从 `MITIGATED` 转为 `DONE`。
+
+该 observation 没有形成满足上述原始 frozen-identity 条件的完整 evidence ledger。Human Owner 于 2026-08-30 明确接受这一剩余风险并授权关闭，因此当前 `DONE` 是 residual-risk acceptance，不得被描述为 §7.3 已补做 PASS。
 
 ### 7.4 再次复现时何时停止修改 server
 
@@ -259,4 +261,4 @@ result，否则记 `outputBytes=unknown`，绝不记 `0`。correlation 只记录
 
 C-Web-2 的完整 35-call window（含 3 个 preflight 与最终 2 个 probes）为 99,830 B，最大单 result 18,928 B；Task A → Task B 间隔 10.747 秒。最初 Host reconciliation 把最终 `grande_repo_read` 误报为 `MISSING`，原因是脚本错误假定 `POST /mcp` 出现在 `[tool]` 之后。Human Owner 随后提供 exact Host slice，确认真实日志顺序为 `[rpc] 12:25:37.827 → [gw] 12:25:37.828 POST /mcp → 200 → [tool] 12:25:37.830 grande_repo_read ... result=ok outputBytes=3650`，因此最后 boundary 已闭合。
 
-截至 2026-08-23，§7.2 formal matrix 已 **3/3 PASS**。本地行为回归仍覆盖真实 built handlers 产生的 `repo_read`、`repo_search`、`run_result` 与 error envelopes，并通过 canonical `toMcpTextResult` 计算完整编码大小；exact candidate host boundary tests 在 code commit `7b98f7dce2f0b10723b29be64ca28e1438f1a779` 为 5 files / 160 tests PASS。`GG-BL-010` 当前准确状态仍为 **MITIGATED**；剩余关闭条件是 §7.3 的 7-day ordinary-use observation，而不是新的 formal matrix run。
+截至 2026-08-23，§7.2 formal matrix 已 **3/3 PASS**。本地行为回归仍覆盖真实 built handlers 产生的 `repo_read`、`repo_search`、`run_result` 与 error envelopes，并通过 canonical `toMcpTextResult` 计算完整编码大小；exact candidate host boundary tests 在 code commit `7b98f7dce2f0b10723b29be64ca28e1438f1a779` 为 5 files / 160 tests PASS。该历史阶段状态为 **MITIGATED**；2026-08-30 的最终 `DONE` 来自 Human Owner residual-risk acceptance，不是把 §7.3 倒推为 PASS。
