@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { CanonicalRefreshResult } from "./canonicalRefresh.ts";
 import { assertTaskBranch } from "./commit.ts";
@@ -90,14 +90,58 @@ function cleanupAfterRefresh(
     return stale(canonicalRefresh, `task still has non-terminal job ${activeJob.jobId}`);
   }
 
+  const taskExpected = { expectedBranch: task.branch, expectedHead: expectedTaskHead };
+  let cleanupError: unknown = null;
+  let headLockFd: number | null = null;
+  let headLockPath: string | null = null;
   try {
-    // Bind the destructive operation itself to the task worktree identity. Running the
-    // remove via `-C <canonical>` keeps Git's worktree command in the canonical repo,
-    // while safeGit re-checks this task worktree's branch + exact HEAD immediately before
-    // spawning that command. A concurrent clean commit or detach therefore fails closed.
-    const taskExpected = { expectedBranch: task.branch, expectedHead: expectedTaskHead };
+    // Resolve the linked worktree's own Git admin dir while still bound to the expected
+    // task identity. The subsequent HEAD.lock closes the check→remove TOCTOU window.
+    const gitAdminDir = safeGit.local(
+      task.worktreePath,
+      ["rev-parse", "--absolute-git-dir"],
+      taskExpected,
+    ).trim();
+    if (gitAdminDir.length === 0) {
+      throw new Error("task worktree Git admin dir is empty");
+    }
+    headLockPath = join(gitAdminDir, "HEAD.lock");
+    headLockFd = openSync(headLockPath, "wx", 0o600);
+
+    // Re-prove exact identity only after acquiring HEAD.lock. Git commit/switch/detach
+    // cannot update HEAD while this lock exists; ordinary non-force worktree removal can.
+    const lockedHead = assertTaskBranch(task.worktreePath, task.branch);
+    if (lockedHead !== expectedTaskHead) {
+      throw new Error(`task HEAD drifted before locked cleanup: expected ${expectedTaskHead}, observed ${lockedHead}`);
+    }
+
+    // Dirty/untracked changes remain Git's responsibility here: non-force removal refuses
+    // them. Do not use --force and do not rely on later branch deletion as a safety net.
+    safeGit.local(task.worktreePath, ["-C", repoRoot, "worktree", "remove", task.worktreePath]);
+  } catch (error) {
+    cleanupError = error;
+  } finally {
+    if (headLockFd !== null) {
+      try {
+        closeSync(headLockFd);
+        if (headLockPath !== null) {
+          try {
+            unlinkSync(headLockPath);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          }
+        }
+      } catch (error) {
+        cleanupError ??= error;
+      }
+    }
+  }
+  if (cleanupError !== null) {
+    return stale(canonicalRefresh, cleanupError instanceof Error ? cleanupError.message : String(cleanupError));
+  }
+
+  try {
     const canonicalExpected = { expectedBranch: canonicalRefresh.branch, expectedHead: canonicalRefresh.after };
-    safeGit.local(task.worktreePath, ["-C", repoRoot, "worktree", "remove", task.worktreePath], taskExpected);
     safeGit.local(repoRoot, ["branch", "-d", task.branch], canonicalExpected);
     const current = getTask(deps.db, task.taskId);
     if (!current) return stale(canonicalRefresh, "task disappeared after worktree cleanup");

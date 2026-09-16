@@ -13,6 +13,52 @@ import { saveExplicitDeliveryTarget } from "../src/taskDeliveryTarget.ts";
 import { recordTaskPrMerged } from "../src/taskPrReceipt.ts";
 import { createTask, getTask, type TaskRow } from "../src/tasks.ts";
 
+const cleanupRace = vi.hoisted(() => ({
+  mode: null as "commit" | "detach-commit" | null,
+  worktree: "",
+  headChecks: 0,
+}));
+
+vi.mock("node:child_process", async () => {
+  const actual = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+  const actualExec = actual.execFileSync as (...args: any[]) => any;
+  const wrapped = ((file: unknown, args?: unknown, options?: unknown) => {
+    const result = actualExec(file, args, options);
+    const argv = Array.isArray(args) ? args.map(String) : [];
+    const cwd = options && typeof options === "object" && "cwd" in options
+      ? String((options as { cwd?: unknown }).cwd ?? "")
+      : "";
+    const isHeadCheck = file === "git"
+      && cwd === cleanupRace.worktree
+      && argv.includes("rev-parse")
+      && argv.at(-1) === "HEAD";
+    if (cleanupRace.mode !== null && isHeadCheck) {
+      cleanupRace.headChecks += 1;
+      if (cleanupRace.headChecks === 2) {
+        if (cleanupRace.mode === "detach-commit") {
+          actualExec("git", ["-c", "core.hooksPath=/dev/null", "-C", cleanupRace.worktree, "switch", "--detach", "-q"], {
+            encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+          });
+        }
+        const name = cleanupRace.mode === "commit" ? "human-race-commit.txt" : "human-detached-commit.txt";
+        writeFileSync(join(cleanupRace.worktree, name), "concurrent clean commit\n");
+        actualExec("git", ["-c", "core.hooksPath=/dev/null", "-C", cleanupRace.worktree, "add", name], {
+          encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+        });
+        actualExec("git", [
+          "-c", "core.hooksPath=/dev/null",
+          "-c", "user.name=GrandeGPT Race",
+          "-c", "user.email=race@example.com",
+          "-C", cleanupRace.worktree,
+          "commit", "-q", "-m", "concurrent clean commit",
+        ], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      }
+    }
+    return result;
+  }) as typeof actual.execFileSync;
+  return { ...actual, execFileSync: wrapped };
+});
+
 const TASK = "task_receipt_cleanup";
 const BRANCH = "grande/receipt-cleanup";
 const git = (cwd: string, ...args: string[]) => execFileSync("git", [
@@ -39,7 +85,16 @@ function isWorktreeRemove(args: readonly string[]): boolean {
   return args.includes("worktree") && args.includes("remove");
 }
 
+function injectRaceAfterSafeGitHeadCheck(mode: "commit" | "detach-commit"): void {
+  cleanupRace.mode = mode;
+  cleanupRace.worktree = worktree;
+  cleanupRace.headChecks = 0;
+}
+
 beforeEach(() => {
+  cleanupRace.mode = null;
+  cleanupRace.worktree = "";
+  cleanupRace.headChecks = 0;
   root = mkdtempSync(join(tmpdir(), "receipt-cleanup-"));
   mkdirSync(join(root, "workspace"));
   mkdirSync(join(root, "control"));
@@ -60,6 +115,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanupRace.mode = null;
   db.close();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
@@ -155,40 +211,28 @@ describe("exact merge evidence before automatic cleanup", () => {
     expect(existsSync(join(worktree, "human-race.txt"))).toBe(true);
   });
 
-  it("retains a new clean commit created after the clean check but before Git removal", () => {
+  it("retains a new clean commit created after safeGit branch/head checks have passed", () => {
     const mergeSha = merge();
-    const local = safeGit.local;
-    let injected = false;
-    vi.spyOn(safeGit, "local").mockImplementation((cwd, args, options) => {
-      if (!injected && isWorktreeRemove(args)) {
-        injected = true;
-        commit(worktree, "human-race-commit.txt");
-      }
-      return local(cwd, args, options);
-    });
-    expect(reconcile(mergeSha).cleanedUp).toBe(false);
+    injectRaceAfterSafeGitHeadCheck("commit");
+    const result = reconcile(mergeSha);
+    expect(result.cleanedUp).toBe(false);
     expect(existsSync(worktree)).toBe(true);
     expect(getTask(db, TASK)?.state).toBe("READY");
     const concurrentHead = git(worktree, "rev-parse", "HEAD");
     expect(concurrentHead).not.toBe(headSha);
-    expect(git(canonical, "rev-parse", BRANCH)).toBe(concurrentHead);
+    expect(existsSync(join(worktree, "human-race-commit.txt"))).toBe(true);
   });
 
-  it("retains a clean detached HEAD created after the clean check but before Git removal", () => {
+  it("retains a clean detached HEAD created after safeGit branch/head checks have passed", () => {
     const mergeSha = merge();
-    const local = safeGit.local;
-    let injected = false;
-    vi.spyOn(safeGit, "local").mockImplementation((cwd, args, options) => {
-      if (!injected && isWorktreeRemove(args)) {
-        injected = true;
-        git(worktree, "switch", "--detach", "-q");
-        commit(worktree, "human-detached-commit.txt");
-      }
-      return local(cwd, args, options);
-    });
-    expect(reconcile(mergeSha).cleanedUp).toBe(false);
-    expectRetained();
+    injectRaceAfterSafeGitHeadCheck("detach-commit");
+    const result = reconcile(mergeSha);
+    expect(result.cleanedUp).toBe(false);
+    expect(existsSync(worktree)).toBe(true);
+    expect(getTask(db, TASK)?.state).toBe("READY");
+    expect(git(worktree, "rev-parse", "--abbrev-ref", "HEAD")).toBe("HEAD");
     expect(git(worktree, "rev-parse", "HEAD")).not.toBe(headSha);
+    expect(existsSync(join(worktree, "human-detached-commit.txt"))).toBe(true);
   });
 
   it("retains an unresolved explicit deployment", () => {
