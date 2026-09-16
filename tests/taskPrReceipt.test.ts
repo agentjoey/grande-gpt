@@ -112,6 +112,21 @@ describe("task PR durable receipt", () => {
     expect(readTaskPrReceipt(db, TASK)?.mergedAt).toBe(300);
   });
 
+  it("allows merged baseSha null to be filled once by exact recovery evidence", () => {
+    const unknownBase = { ...opened(), baseSha: null };
+    recordTaskPrOpened(db, unknownBase, 100);
+    recordTaskPrMerged(db, { ...unknownBase, mergeSha: MERGE }, 300);
+    expect(readTaskPrReceipt(db, TASK)).toMatchObject({ baseSha: null, mergeSha: MERGE, mergedAt: 300 });
+
+    recordTaskPrMerged(db, { ...opened(), mergeSha: MERGE }, 400);
+    expect(readTaskPrReceipt(db, TASK)).toMatchObject({ baseSha: BASE, mergeSha: MERGE, mergedAt: 300 });
+
+    const conflictingBase = "9".repeat(40);
+    expect(() => recordTaskPrMerged(db, { ...opened(), baseSha: conflictingBase, mergeSha: MERGE }, 500))
+      .toThrow(/merged|baseSha|不可变/i);
+    expect(readTaskPrReceipt(db, TASK)?.baseSha).toBe(BASE);
+  });
+
   it("locks exact head/base/merge evidence after merged", () => {
     recordTaskPrMerged(db, { ...opened(), mergeSha: MERGE }, 300);
     expect(() => recordTaskPrOpened(db, { ...opened(), headSha: "4".repeat(40) }, 400))

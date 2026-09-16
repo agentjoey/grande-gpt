@@ -68,14 +68,27 @@ function identityMismatch(existing: TaskPrReceipt, input: TaskPrOpenedInput): st
   return null;
 }
 
-function mergedEvidenceMismatch(existing: TaskPrReceipt, input: TaskPrOpenedInput): string | null {
+function mergedEvidenceMismatch(
+  existing: TaskPrReceipt,
+  input: TaskPrOpenedInput,
+  allowBaseShaFill: boolean,
+): string | null {
   if (input.headSha !== null && existing.headSha !== input.headSha) return "headSha";
   if (input.baseRef !== null && existing.baseRef !== input.baseRef) return "baseRef";
-  if (input.baseSha !== null && existing.baseSha !== input.baseSha) return "baseSha";
+  if (
+    input.baseSha !== null &&
+    existing.baseSha !== input.baseSha &&
+    !(allowBaseShaFill && existing.baseSha === null)
+  ) return "baseSha";
   return null;
 }
 
-function upsertOpened(db: DatabaseSync, input: TaskPrOpenedInput, now: number): TaskPrReceipt {
+function upsertOpened(
+  db: DatabaseSync,
+  input: TaskPrOpenedInput,
+  now: number,
+  allowMergedBaseShaFill = false,
+): TaskPrReceipt {
   validateOpened(input);
   const existing = load(db, input.taskId);
   if (!existing) {
@@ -105,12 +118,18 @@ function upsertOpened(db: DatabaseSync, input: TaskPrOpenedInput, now: number): 
   }
 
   if (existing.mergeSha !== null) {
-    const mismatch = mergedEvidenceMismatch(existing, input);
+    const mismatch = mergedEvidenceMismatch(existing, input, allowMergedBaseShaFill);
     if (mismatch) {
       throw new StateError(
         "STALE_STATE",
         `task ${input.taskId} 已 merged；exact ${mismatch} 证据不可变。`,
       );
+    }
+    if (allowMergedBaseShaFill && existing.baseSha === null && input.baseSha !== null) {
+      db.prepare(
+        "UPDATE task_pr_receipt SET baseSha=?, updatedAt=? WHERE taskId=? AND mergeSha IS NOT NULL AND baseSha IS NULL",
+      ).run(input.baseSha, now, input.taskId);
+      return load(db, input.taskId)!;
     }
     return existing;
   }
@@ -169,7 +188,7 @@ export function recordTaskPrMerged(
   }
   assertSha(input.mergeSha, "mergeSha");
   return transaction(db, () => {
-    const opened = upsertOpened(db, input, now);
+    const opened = upsertOpened(db, input, now, true);
     if (opened.mergeSha !== null) {
       if (opened.mergeSha !== input.mergeSha) {
         throw new StateError(

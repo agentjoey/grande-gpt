@@ -91,11 +91,14 @@ function cleanupAfterRefresh(
   }
 
   try {
-    // This automatic path deliberately does not use removeWorktree's explicit force-close
-    // contract. Git must refuse if dirty content appeared after the last clean check.
-    const expected = { expectedBranch: canonicalRefresh.branch, expectedHead: canonicalRefresh.after };
-    safeGit.local(repoRoot, ["worktree", "remove", task.worktreePath], expected);
-    safeGit.local(repoRoot, ["branch", "-d", task.branch], expected);
+    // Bind the destructive operation itself to the task worktree identity. Running the
+    // remove via `-C <canonical>` keeps Git's worktree command in the canonical repo,
+    // while safeGit re-checks this task worktree's branch + exact HEAD immediately before
+    // spawning that command. A concurrent clean commit or detach therefore fails closed.
+    const taskExpected = { expectedBranch: task.branch, expectedHead: expectedTaskHead };
+    const canonicalExpected = { expectedBranch: canonicalRefresh.branch, expectedHead: canonicalRefresh.after };
+    safeGit.local(task.worktreePath, ["-C", repoRoot, "worktree", "remove", task.worktreePath], taskExpected);
+    safeGit.local(repoRoot, ["branch", "-d", task.branch], canonicalExpected);
     const current = getTask(deps.db, task.taskId);
     if (!current) return stale(canonicalRefresh, "task disappeared after worktree cleanup");
     updateTaskState(deps.db, task.taskId, "CLOSED", current.stateVersion);

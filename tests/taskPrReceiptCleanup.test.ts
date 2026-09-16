@@ -35,6 +35,10 @@ function commit(cwd: string, name: string): string {
   return git(cwd, "rev-parse", "HEAD");
 }
 
+function isWorktreeRemove(args: readonly string[]): boolean {
+  return args.includes("worktree") && args.includes("remove");
+}
+
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "receipt-cleanup-"));
   mkdirSync(join(root, "workspace"));
@@ -141,7 +145,7 @@ describe("exact merge evidence before automatic cleanup", () => {
     const mergeSha = merge();
     const local = safeGit.local;
     vi.spyOn(safeGit, "local").mockImplementation((cwd, args, options) => {
-      if (args[0] === "worktree" && args[1] === "remove") {
+      if (isWorktreeRemove(args)) {
         writeFileSync(join(worktree, "human-race.txt"), "preserve concurrent work\n");
       }
       return local(cwd, args, options);
@@ -149,6 +153,42 @@ describe("exact merge evidence before automatic cleanup", () => {
     expect(reconcile(mergeSha).cleanedUp).toBe(false);
     expectRetained();
     expect(existsSync(join(worktree, "human-race.txt"))).toBe(true);
+  });
+
+  it("retains a new clean commit created after the clean check but before Git removal", () => {
+    const mergeSha = merge();
+    const local = safeGit.local;
+    let injected = false;
+    vi.spyOn(safeGit, "local").mockImplementation((cwd, args, options) => {
+      if (!injected && isWorktreeRemove(args)) {
+        injected = true;
+        commit(worktree, "human-race-commit.txt");
+      }
+      return local(cwd, args, options);
+    });
+    expect(reconcile(mergeSha).cleanedUp).toBe(false);
+    expect(existsSync(worktree)).toBe(true);
+    expect(getTask(db, TASK)?.state).toBe("READY");
+    const concurrentHead = git(worktree, "rev-parse", "HEAD");
+    expect(concurrentHead).not.toBe(headSha);
+    expect(git(canonical, "rev-parse", BRANCH)).toBe(concurrentHead);
+  });
+
+  it("retains a clean detached HEAD created after the clean check but before Git removal", () => {
+    const mergeSha = merge();
+    const local = safeGit.local;
+    let injected = false;
+    vi.spyOn(safeGit, "local").mockImplementation((cwd, args, options) => {
+      if (!injected && isWorktreeRemove(args)) {
+        injected = true;
+        git(worktree, "switch", "--detach", "-q");
+        commit(worktree, "human-detached-commit.txt");
+      }
+      return local(cwd, args, options);
+    });
+    expect(reconcile(mergeSha).cleanedUp).toBe(false);
+    expectRetained();
+    expect(git(worktree, "rev-parse", "HEAD")).not.toBe(headSha);
   });
 
   it("retains an unresolved explicit deployment", () => {
