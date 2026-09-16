@@ -10,6 +10,7 @@ import { createJob } from "../src/jobs.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { saveExplicitDeliveryTarget } from "../src/taskDeliveryTarget.ts";
 import { projectTaskProgress } from "../src/taskProgress.ts";
+import { recordTaskPrMerged } from "../src/taskPrReceipt.ts";
 import { createTask } from "../src/tasks.ts";
 
 let ws: string;
@@ -145,16 +146,22 @@ describe("task lifecycle projection", () => {
     db.close();
   });
 
-  it("无 deploy 配置时，merge gate + 当前 SHA attestation 足以投影 DONE，但 cleanup 仍必须显式 task_close", () => {
+  it("durable merge receipt 投影 PR 交付完成；cleanup 必须重新经过受控 reconciliation", () => {
     const layout = loadLayout();
     const db = openDb(layout);
     const t = task(db);
-    addPassedAttestation(db);
+    const head = "1".repeat(40);
+    addPassedAttestation(db, head);
     succeeded(db, "grande_pr_open");
     succeeded(db, "grande_pr_merge");
+    recordTaskPrMerged(db, {
+      taskId: t.taskId, prNumber: 9, prUrl: "https://github.com/example/demo/pull/9",
+      headSha: head, baseRef: "main", baseSha: "2".repeat(40), mergeSha: "3".repeat(40),
+    });
 
     const progress = projectTaskProgress(db, t, {
       ...baseOptions,
+      readHead: () => head,
       deployConfigured: () => false,
     });
 
@@ -162,14 +169,15 @@ describe("task lifecycle projection", () => {
       code: { state: "done" },
       tests: { state: "done" },
       pr: { state: "done" },
-      ci: { state: "done" },
+      ci: { state: "unknown" },
       merged: { state: "done" },
       deploy: { state: "not-applicable" },
       verify: { state: "not-applicable" },
     });
     expect(progress.completed).toBe(true);
     expect(progress.cleanupRequired).toBe(true);
-    expect(progress.nextAction).toContain("grande_task_close");
+    expect(progress.nextAction).toContain("grande_pr_merge");
+    expect(progress.nextAction).not.toContain("grande_task_close");
     db.close();
   });
 

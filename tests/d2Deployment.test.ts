@@ -25,7 +25,7 @@ import type { ToolDef, ToolDeps } from "../src/tools.ts";
 
 const git = (cwd: string, ...args: string[]) => execFileSync(
   "git",
-  ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", ...args],
+  ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "user.name=GrandeGPT Test", "-c", "user.email=grande-test@example.com", ...args],
   { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 ).trim();
 
@@ -181,6 +181,7 @@ describe("D2 deployment response-loss and merge cleanup compatibility", () => {
       headSha: headCommit,
       headRef: branch,
       baseRef: "main",
+      baseSha: baseCommit,
     };
     const api: GithubLifecycleApi = {
       async findPullRequest() { return { number: pr.number, url: pr.url }; },
@@ -188,12 +189,18 @@ describe("D2 deployment response-loss and merge cleanup compatibility", () => {
       async getPullRequest() { return pr; },
       async listCheckRuns() { return []; },
       async listCommitStatuses() { return []; },
-      async mergePullRequest() { return { merged: true, sha: "merge-sha", message: "merged" }; },
+      async mergePullRequest() {
+        git(canonical, "merge", "--no-ff", "-q", "-m", "merge deploy spec", headCommit);
+        const sha = git(canonical, "rev-parse", "HEAD");
+        Object.assign(pr, { state: "closed", merged: true, mergeCommitSha: sha });
+        return { merged: true, sha, message: "merged" };
+      },
     };
     let refreshCalls = 0;
     const canonicalRefresher = () => {
       refreshCalls += 1;
-      return { action: "fast-forward" as const, relation: "remote_ahead" as const, branch: "main", before: baseCommit, after: "merge-sha", remoteHead: "merge-sha" };
+      const after = git(canonical, "rev-parse", "HEAD");
+      return { action: "fast-forward" as const, relation: "remote_ahead" as const, branch: "main", before: baseCommit, after, remoteHead: after };
     };
     const base = createPrMergeTool(deps, {
       apiFactory: () => api,
@@ -294,11 +301,12 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
     return row?.status ?? "MISSING";
   }
 
-  /** 第一次 getPullRequest 返回 open，merge 后返回 merged——模拟响应丢失后的观察。 */
-  function lossyApi(options: { wrongTree?: boolean } = {}): GithubLifecycleApi & { mergeCalls: number } {
+  /** A response can be lost after a real merge; observation keeps that exact merge SHA. */
+  function lossyApi(options: { wrongTree?: boolean; advanceCanonical?: boolean } = {}): GithubLifecycleApi & { mergeCalls: number; readonly getCalls: number } {
     let getCalls = 0;
     const api = {
       mergeCalls: 0,
+      get getCalls() { return getCalls; },
       async findPullRequest() {
         return { number: 61, url: "https://github.com/fake-owner/fake-repo/pull/61" };
       },
@@ -307,7 +315,7 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
       },
       async getPullRequest(): Promise<GithubPullRequestDetail> {
         getCalls += 1;
-        const merged = getCalls > 1;
+        const merged = createdMerge !== null;
         return {
           number: 61,
           url: "https://github.com/fake-owner/fake-repo/pull/61",
@@ -319,6 +327,7 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
           headRef: branch,
           baseRef: "main",
           baseSha: baseCommit,
+          ...(createdMerge ? { mergeCommitSha: createdMerge } : {}),
         };
       },
       async listCheckRuns() {
@@ -329,7 +338,6 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
       },
       async mergePullRequest() {
         api.mergeCalls += 1;
-        // GitHub 实际接受了 merge（在 canonical 里真实创建 merge commit），但响应丢失。
         git(canonical, "merge", "--no-ff", "-q", "-m", "merge deploy pr", headCommit);
         if (options.wrongTree) {
           writeFileSync(join(canonical, "evil.txt"), "tampered\n", "utf8");
@@ -337,6 +345,11 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
           git(canonical, "-c", "user.name=GrandeGPT", "-c", "user.email=grande@example.com", "commit", "--amend", "-q", "--no-edit");
         }
         createdMerge = git(canonical, "rev-parse", "HEAD");
+        if (options.advanceCanonical) {
+          writeFileSync(join(canonical, "later.txt"), "another task\n");
+          git(canonical, "add", "later.txt");
+          git(canonical, "commit", "-q", "-m", "later canonical work");
+        }
         throw new GithubApiError("simulated response loss", 500);
       },
     };
@@ -344,23 +357,13 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
   }
 
   function refresher() {
-    return () => createdMerge
-      ? {
-          action: "fast-forward" as const,
-          relation: "remote_ahead" as const,
-          branch: "main",
-          before: baseCommit,
-          after: createdMerge,
-          remoteHead: createdMerge,
-        }
-      : {
-          action: "none" as const,
-          relation: "no_remote" as const,
-          branch: "main",
-          before: baseCommit,
-          after: baseCommit,
-          remoteHead: null,
-        };
+    return () => {
+      const after = git(canonical, "rev-parse", "HEAD");
+      return {
+        action: "none" as const, relation: "equal" as const,
+        branch: "main", before: baseCommit, after, remoteHead: after,
+      };
+    };
   }
 
   function buildTool(api: GithubLifecycleApi) {
@@ -396,7 +399,6 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
     expect(api.mergeCalls).toBe(1);
     expect(createdMerge).not.toBeNull();
 
-    // reconcile 出的 merge commit 通过 parents/tree 验证，receipt 持久化，release source 钉在 mergeSha。
     const receipt = readExactMergeReceipt(layout, authorizationId);
     expect(receipt).toMatchObject({
       authorizationId,
@@ -406,12 +408,10 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
       mergeTree: expectedTree,
     });
     expect(git(receipt!.releaseSourceRealpath, "rev-parse", "HEAD")).toBe(createdMerge);
-    // deploy 未启动：authorization 仍是 EXECUTING；V2 deploy 任务保留 worktree（不写 deploy.yaml 也保留）。
     expect(authStatus(authorizationId)).toBe("EXECUTING");
     expect(existsSync(worktree)).toBe(true);
     expect(getTask(deps.db, taskId)?.state).toBe("READY");
 
-    // 重复调用：只观察 + reconcile，没有第二个 merge，receipt 内容不变（幂等）。
     const second = (await tool.handler({ taskId })).structuredContent as Record<string, any>;
     expect(second.ok).toBe(true);
     expect(api.mergeCalls).toBe(1);
@@ -428,5 +428,26 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
     expect(api.mergeCalls).toBe(1);
     expect(authStatus(authorizationId)).toBe("UNCERTAIN");
     expect(readExactMergeReceipt(layout, authorizationId)).toBeNull();
+  });
+
+  it("reconciliation does not make GitHub calls after a missing-authorization rejection", async () => {
+    const api = lossyApi();
+    const envelope = (await buildTool(api).handler({ taskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(false);
+    expect(api.getCalls).toBe(0);
+    expect(api.mergeCalls).toBe(0);
+    expect(existsSync(worktree)).toBe(true);
+  });
+
+  it("pins the observed merge SHA rather than a later canonical HEAD on response-loss recovery", async () => {
+    const { authorizationId } = approveDeployAuthorization();
+    const api = lossyApi({ advanceCanonical: true });
+    const envelope = (await buildTool(api).handler({ taskId })).structuredContent as Record<string, any>;
+    expect(envelope.ok).toBe(true);
+    expect(createdMerge).not.toBe(git(canonical, "rev-parse", "HEAD"));
+    expect(readExactMergeReceipt(layout, authorizationId)?.mergeSha).toBe(createdMerge);
+    expect(authStatus(authorizationId)).toBe("EXECUTING");
+    expect(api.mergeCalls).toBe(1);
+    expect(existsSync(worktree)).toBe(true);
   });
 });

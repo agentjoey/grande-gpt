@@ -1,13 +1,15 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { CanonicalRefreshResult } from "./canonicalRefresh.ts";
+import { assertTaskBranch } from "./commit.ts";
+import { canonicalRepoPath } from "./deliveryMerge.ts";
 import { safeGit } from "./gitExec.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
 import type { Layout } from "./layout.ts";
 import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
+import { readTaskPrReceipt } from "./taskPrReceipt.ts";
 import { getTask, updateTaskState, type TaskRow } from "./tasks.ts";
 import type { ToolDeps } from "./toolsCore.ts";
-import { removeWorktree } from "./worktree.ts";
 
 export type MergedLocalState = "clean" | "deploy-pending" | "merged-but-local-stale";
 
@@ -19,6 +21,7 @@ export interface MergeReconcileResult {
 }
 
 type CanonicalRefresher = (layout: Layout, repoId: string, expectedBranch?: string) => CanonicalRefreshResult;
+const SHA_RE = /^[0-9a-f]{40}$/u;
 
 function stale(canonicalRefresh: CanonicalRefreshResult, error: string): MergeReconcileResult {
   return { localState: "merged-but-local-stale", cleanedUp: false, canonicalRefresh, error };
@@ -31,53 +34,54 @@ function cleanupAfterRefresh(
   expectedMergeSha: string | null,
   expectedTaskHead: string | null,
 ): MergeReconcileResult {
-  if (
-    expectedMergeSha !== null &&
-    canonicalRefresh.remoteHead !== null &&
-    canonicalRefresh.after !== expectedMergeSha
-  ) {
-    return stale(
-      canonicalRefresh,
-      `canonical HEAD ${canonicalRefresh.after} does not match confirmed merge SHA ${expectedMergeSha}`,
-    );
+  if (expectedMergeSha === null || !SHA_RE.test(expectedMergeSha)) {
+    return stale(canonicalRefresh, "confirmed merged PR did not provide an exact merge SHA");
   }
-
-  if (expectedTaskHead === null || !/^[0-9a-f]{40}$/u.test(expectedTaskHead)) {
+  if (expectedTaskHead === null || !SHA_RE.test(expectedTaskHead)) {
     return stale(canonicalRefresh, "confirmed merged PR did not provide an exact task head SHA");
   }
+  const receipt = readTaskPrReceipt(deps.db, task.taskId);
+  if (!receipt || receipt.mergeSha !== expectedMergeSha || receipt.headSha !== expectedTaskHead
+      || receipt.baseRef !== canonicalRefresh.branch) {
+    return stale(canonicalRefresh, "cleanup requires a matching durable PR/head/base/merge receipt");
+  }
+  if (canonicalRefresh.remoteHead === null || !SHA_RE.test(canonicalRefresh.remoteHead)
+      || canonicalRefresh.after !== canonicalRefresh.remoteHead) {
+    return stale(canonicalRefresh, "cleanup requires an exact published remote canonical snapshot");
+  }
 
-  // Cleanup is automatic, unlike explicit grande_task_close. Never use the latter's
-  // force-delete semantics until we have re-proved that no Human/candidate content
-  // appeared after the remote merge decision.
+  let repoRoot: string;
   try {
+    repoRoot = canonicalRepoPath(deps.layout, task.repoId);
+    const canonicalHead = assertTaskBranch(repoRoot, canonicalRefresh.branch);
+    if (canonicalHead !== canonicalRefresh.after) {
+      return stale(canonicalRefresh, "canonical changed after refresh; repeat reconciliation before cleanup");
+    }
+    if (safeGit.local(repoRoot, ["status", "--porcelain=v1", "--untracked-files=all"]).length > 0) {
+      return stale(canonicalRefresh, "canonical is dirty; automatic cleanup refused");
+    }
+    // The canonical branch may already contain later work. Prove inclusion instead of
+    // relabelling its moving HEAD as this task's merge commit. Squash/rebase without
+    // head ancestry remains uncertain and requires manual inspection, never force deletion.
+    if (!safeGit.tryRelation(repoRoot, expectedMergeSha, canonicalHead)
+        || !safeGit.tryRelation(repoRoot, expectedTaskHead, expectedMergeSha)) {
+      return stale(canonicalRefresh, "exact task head/merge is not included in published canonical history");
+    }
+    const currentHead = assertTaskBranch(task.worktreePath, task.branch);
+    if (currentHead !== expectedTaskHead) {
+      return stale(canonicalRefresh, `task HEAD drifted after merge: expected ${expectedTaskHead}, observed ${currentHead}`);
+    }
     const dirty = safeGit.local(task.worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]);
-    if (dirty.trim().length > 0) {
+    if (dirty.length > 0) {
       return stale(canonicalRefresh, "task worktree became dirty/uncommitted after merge; automatic cleanup refused");
     }
-    const currentHead = safeGit.local(task.worktreePath, ["rev-parse", "HEAD"]).trim();
-    if (currentHead !== expectedTaskHead) {
-      return stale(
-        canonicalRefresh,
-        `task HEAD drifted after merge: expected ${expectedTaskHead}, observed ${currentHead}`,
-      );
-    }
   } catch (error) {
-    return stale(
-      canonicalRefresh,
-      `could not prove task worktree safe for cleanup: ${error instanceof Error ? error.message : String(error)}`,
-    );
+    return stale(canonicalRefresh, `could not prove task worktree safe for cleanup: ${error instanceof Error ? error.message : String(error)}`);
   }
 
-  // Minimal V2 Task 5：explicit deploy 任务的 deploy spec 来自可信 resolver 而非
-  // 仓库内容，且 pinned release source 已与 task worktree 分离。V2 deploy 闭环
-  // （Task 6）还需要 task 活着，因此保留 worktree、不自动关闭。
-  if (getExplicitDeliveryTarget(deps.db, task.taskId) === "deploy") {
-    return { localState: "deploy-pending", cleanedUp: false, canonicalRefresh };
-  }
-
-  // S7 reads .grande/deploy.yaml from the task worktree after merge. Deleting
-  // it here would break the already-approved deploy -> verify -> DONE loop.
-  if (existsSync(join(task.worktreePath, ".grande", "deploy.yaml"))) {
+  // V2 delivery still needs the task, and legacy deployment reads its worktree spec.
+  if (getExplicitDeliveryTarget(deps.db, task.taskId) === "deploy"
+      || existsSync(join(task.worktreePath, ".grande", "deploy.yaml"))) {
     return { localState: "deploy-pending", cleanedUp: false, canonicalRefresh };
   }
 
@@ -87,15 +91,13 @@ function cleanupAfterRefresh(
   }
 
   try {
-    removeWorktree(deps.layout, {
-      repoId: task.repoId,
-      worktreePath: task.worktreePath,
-      branch: task.branch,
-    });
+    // This automatic path deliberately does not use removeWorktree's explicit force-close
+    // contract. Git must refuse if dirty content appeared after the last clean check.
+    const expected = { expectedBranch: canonicalRefresh.branch, expectedHead: canonicalRefresh.after };
+    safeGit.local(repoRoot, ["worktree", "remove", task.worktreePath], expected);
+    safeGit.local(repoRoot, ["branch", "-d", task.branch], expected);
     const current = getTask(deps.db, task.taskId);
-    if (!current) {
-      return stale(canonicalRefresh, "task disappeared after worktree cleanup");
-    }
+    if (!current) return stale(canonicalRefresh, "task disappeared after worktree cleanup");
     updateTaskState(deps.db, task.taskId, "CLOSED", current.stateVersion);
     return { localState: "clean", cleanedUp: true, canonicalRefresh };
   } catch (error) {
@@ -114,10 +116,7 @@ export function reconcileMergedTaskFromRefresh(
   return cleanupAfterRefresh(deps, task, canonicalRefresh, expectedMergeSha, expectedTaskHead);
 }
 
-/**
- * Reconcile local state after the remote merge is independently observed.
- * It performs exactly one fixed-origin canonical refresh, then delegates cleanup.
- */
+/** Reconcile a confirmed remote merge using one fixed-origin canonical refresh. */
 export function reconcileObservedMergedTask(
   deps: ToolDeps,
   task: TaskRow,

@@ -28,10 +28,10 @@ import { canMigrate, migrateDb } from "./dbMigrations.ts";
  * 更老或更新的未知版本继续 fail closed，不能“猜着升”。
  *
  * S4 的 `task_brief`、S7 的 `deployment_receipt`、S18 的 `outer_test_receipt` 与
- * Minimal V2 的 `task_delivery_target`、`delivery_authorization` 都是
- * 【向后兼容的附属表】：旧代码完全忽略它们，新代码可用 `CREATE TABLE IF NOT EXISTS`
- * 在已匹配版本的库上安全补齐，因此不增加 user_version。它们都不改变既有表/列，
- * 也不扩张 Task 状态机。
+ * Minimal V2 的 `task_delivery_target`、`delivery_authorization`，以及 lifecycle governance
+ * 的 `task_pr_receipt` 都是【向后兼容的附属表】：旧代码完全忽略它们，新代码可用
+ * `CREATE TABLE IF NOT EXISTS` 在已匹配版本的库上安全补齐，因此不增加 user_version。
+ * 它们都不改变既有表/列，也不扩张 Task 状态机。
  *
  * 导出是为了让测试断言跟着它走。**不要在测试里写死版本号**——那只会让每次升版
  * 多一道手改杂活，而真正的门禁是运行时那道。
@@ -103,6 +103,21 @@ export function openDb(layout: Layout): DatabaseSync {
       taskId    TEXT PRIMARY KEY REFERENCES task(taskId),
       target    TEXT NOT NULL CHECK (target IN ('local','pr','deploy')),
       createdAt INTEGER NOT NULL
+    );
+
+    -- Lifecycle governance：task ↔ PR durable milestone。PR number/url 是 immutable identity；
+    -- head/base 在 merge 前可随同一 PR 的最新观测刷新，mergeSha 写入后 exact evidence 锁死。
+    CREATE TABLE IF NOT EXISTS task_pr_receipt (
+      taskId    TEXT PRIMARY KEY REFERENCES task(taskId),
+      prNumber  INTEGER NOT NULL,
+      prUrl     TEXT NOT NULL,
+      headSha   TEXT,
+      baseRef   TEXT,
+      baseSha   TEXT,
+      mergeSha  TEXT,
+      openedAt  INTEGER NOT NULL,
+      mergedAt  INTEGER,
+      updatedAt INTEGER NOT NULL
     );
 
     -- Minimal V2 Task 2：durable delivery authorization（附属表，不升 user_version）。
