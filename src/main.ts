@@ -7,7 +7,8 @@ import { loadAccessConfig, AccessConfigError } from "./accessGate.ts";
 import { loadConsoleAccessConfig, type ConsoleAccessConfig } from "./consoleAuth.ts";
 import { awaitAllDeploymentHostJobsSettled } from "./deploymentHostRunner.ts";
 import { awaitAllJobsSettled } from "./runner.ts";
-import { planGc, applyGcWithRepoWriteLocks } from "./worktreeGc.ts";
+import { startTaskLifecycleReconciler } from "./taskLifecycleScheduler.ts";
+import { planGc } from "./worktreeGc.ts";
 
 /**
  * Gateway 的进程入口。
@@ -44,6 +45,27 @@ async function main(): Promise<void> {
   }
   const db = openDb(layout);
 
+  // Task 2：只对 durable CREATING / close intent 做 startup + periodic recovery。
+  // 没有证据的 READY ghost、普通 orphan 与 CLOSED residual 仍然只报告，绝不借机扩张成通用 GC。
+  const lifecycleReconciler = await startTaskLifecycleReconciler(db, layout, {
+    onResult: (phase, result) => {
+      const recovered = result.creatingReady + result.creatingClosed + result.closingClosed;
+      if (recovered > 0 || result.unresolved > 0) {
+        console.log(
+          `[gateway] ${phase === "startup" ? "启动" : "周期"} lifecycle 对账：` +
+            `CREATING→READY ${result.creatingReady}，CREATING→CLOSED ${result.creatingClosed}，` +
+            `closing→CLOSED ${result.closingClosed}，未能安全证明 ${result.unresolved}`,
+        );
+      }
+    },
+    onError: (phase, error) => {
+      console.error(
+        `[gateway] ${phase === "startup" ? "启动" : "周期"} lifecycle 对账失败，已 fail closed：` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    },
+  });
+
   const gw = await startGateway({ issuer, layout, db, accessConfig, consoleAccessConfig });
   const port = Number(process.env.PORT || "8787");
   // 打印【实际】绑定地址而不是硬编码的 127.0.0.1——上一版那行字是假的，
@@ -52,31 +74,24 @@ async function main(): Promise<void> {
   console.log(`[gateway] workspace=${layout.workspaceRoot}`);
   console.log(`[gateway] control=${layout.controlRoot}`);
 
-  // 方向 B：幽灵 task → CLOSED（纯数据修复，零风险——worktree 目录已经不存在，
-  // 没有东西可删）。Gateway 已经开始监听，因此即使这是启动对账，也必须和正常写工具
-  // 共用 repo write lock，不能与同 repo 的 task_open/close 等写操作重叠。
+  // 通用 GC 保持显式人工边界。Task 2 的自动恢复只认 durable lifecycle evidence；
+  // 其余 orphan / ghost / CLOSED residual 即使看起来“显然”，也不在 Gateway 启动时删除或关库状态。
   const gcPlan = planGc(db, layout);
   if (gcPlan.ghostTasks.length > 0) {
-    const { closed } = await applyGcWithRepoWriteLocks(db, layout, {
-      orphanWorktrees: [],
-      ghostTasks: gcPlan.ghostTasks,
-      closedResidualWorktrees: [],
-    });
-    console.log(`[gateway] 启动对账：关闭了 ${closed} 个幽灵 task（worktree 已不存在的 task 记录）`);
+    console.log(
+      `[gateway] 发现 ${gcPlan.ghostTasks.length} 个缺少 durable lifecycle evidence 的幽灵 task；` +
+        "自动恢复拒绝猜测，建议运行 grande gc 查看详情",
+    );
   }
-
-  // 方向 A：孤儿 worktree（磁盘有、库里没有）绝不在启动时自动删除——删文件必须是
-  // 人显式 `grande gc --apply` 的动作。只提示有 N 个孤儿、建议跑 grande gc。
   if (gcPlan.orphanWorktrees.length > 0) {
-    console.log(`[gateway] 发现 ${gcPlan.orphanWorktrees.length} 个孤儿 worktree（磁盘上有但没有对应 task 记录），建议运行 \`grande gc\` 查看详情`);
+    console.log(`[gateway] 发现 ${gcPlan.orphanWorktrees.length} 个孤儿 worktree（磁盘上有但没有对应 task 记录），建议运行 grande gc 查看详情`);
   }
-  // 第三类同样涉及删除真实 worktree：启动时只提示，绝不自动清理。
   if (gcPlan.closedResidualWorktrees.length > 0) {
-    console.log(`[gateway] 发现 ${gcPlan.closedResidualWorktrees.length} 个 CLOSED task 残留 worktree，建议运行 \`grande gc\` 查看详情`);
+    console.log(`[gateway] 发现 ${gcPlan.closedResidualWorktrees.length} 个 CLOSED task 残留 worktree，建议运行 grande gc 查看详情`);
   }
 
-  // 优雅关停：先停止接受新连接，**再等在途的后台 job 收尾写完 artifact**，最后才
-  // 关库退出。硬杀会让 runner 的 .then 链在 db.close() 之后落地——那正是 S0-C 修过的
+  // 优雅关停：先停 lifecycle timer，再停止接受新连接，**再等在途的后台 job 收尾写完 artifact**，
+  // 最后才关库退出。硬杀会让 runner 的 .then 链在 db.close() 之后落地——那正是 S0-C 修过的
   // unhandled rejection 形态。deployment-host 也是 detached async job，因此必须和普通
   // sandbox job 一起等待，不能因为它“可信”就假装数据库生命周期也可信。
   //
@@ -91,6 +106,7 @@ async function main(): Promise<void> {
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.once(sig, () => {
       console.log(`\n[gateway] 收到 ${sig}，正在关停…`);
+      lifecycleReconciler.stop();
       void (async () => {
         await gw.close();
         const [sandboxJobs, deploymentHostJobs] = await Promise.all([

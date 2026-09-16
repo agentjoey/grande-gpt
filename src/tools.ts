@@ -16,6 +16,7 @@ import { addPrMergeD2Reconciliation } from "./prMergeD2.ts";
 import { registeredIds } from "./registry.ts";
 import { withRepoWriteLock } from "./repoWriteLock.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
+import { addTaskLifecycleCrashRecovery } from "./taskLifecycleToolWiring.ts";
 import { getTask } from "./tasks.ts";
 import { stableToolDefinitions, toolsetIdentity } from "./toolsetIdentity.ts";
 import {
@@ -78,7 +79,7 @@ function withTaskRepoWriteLocks(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
 
 /**
  * 生产工具列表的唯一组装点。Task 始终是中心：
- * core → local loop → Phase 8 flow projection → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
+ * core → lifecycle crash recovery → local loop → Phase 8 flow projection → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
  *
  * S7 的 handler 运行时需要复用 S5 capability tools，而 S5 的 native discovery 又应该
  * 看见 S7 deployment tools。这里用一个共享的 `deploymentDeps` 数组解决这个接线顺序：
@@ -89,7 +90,7 @@ function withTaskRepoWriteLocks(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
  * 没有 workflow engine；每层只在已有 Task 上补一个垂直缺口。
  */
 export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): ToolDef[] {
-  const tools = buildCoreTools(deps);
+  const tools = addTaskLifecycleCrashRecovery(deps, buildCoreTools(deps));
   const taskOpen = tools.find((tool) => tool.name === "grande_task_open");
   if (taskOpen) {
     const coreHandler = taskOpen.handler;
