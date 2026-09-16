@@ -254,10 +254,6 @@ Closeout：Pactify `minv2-gw` 七任务 accepted；Gateway build `311d55f4a1651f
 - 修复轮新增代码后要复审，不因为“前一轮已经 review 过”跳过；
 - 多 agent 时先看真实依赖图；无文件重叠且无顺序依赖的任务可以隔离 worktree 并行，不能机械串行，也不能让多个 agent 在同一写工作区互踩。
 
-## 前端工作
-
-任何涉及前端 UI 的任务遵循 `/Users/xtation/AgentWorks/FRONTEND-DESIGN-WORKFLOW.md`。需要 rendered mockup / Human Gate / 独立 review 的等级不得由 agent 为了省流程自行降级。S2.5 类新页面 + destructive/auth 组合仍属于高门槛前端任务。
-
 ## 已接受的风险
 
 不要在实现中“顺手修掉”而改变架构：

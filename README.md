@@ -127,6 +127,29 @@ GRANDE_ISSUER=https://grande.agentjoey.ai \
 node --disable-warning=ExperimentalWarning src/cli.ts gateway install
 ```
 
+### `.grande-work/tmp` 14 天保留策略
+
+本机另有一个独立的用户级 LaunchAgent 清理 Grande 派生的临时 Job：
+
+- label：`ai.agentjoey.grande-tmp-retention`
+- 配置：`~/Library/LaunchAgents/ai.agentjoey.grande-tmp-retention.plist`
+- 调度：登录加载时执行一次，此后每天 `04:10` 执行
+- 范围：只匹配 `GPT_Workspace/.grande-work/tmp` 的一级 `job_*` 目录
+- 期限：目录修改时间满 14 天（`-mmin +20160`）后永久删除
+- 日志：`~/.grande-control/logs/tmp-retention.{stdout,stderr}.log`
+
+LaunchAgent 直接执行 `/usr/bin/find`，不经过 shell，也不遍历、删除
+`.grande-work` 下的 worktree、dependency cache 或其他非 `job_*` 内容。安装或更新后使用：
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.agentjoey.grande-tmp-retention.plist
+launchctl kickstart -k gui/$(id -u)/ai.agentjoey.grande-tmp-retention
+launchctl print gui/$(id -u)/ai.agentjoey.grande-tmp-retention
+```
+
+若已注册旧版本，先执行
+`launchctl bootout gui/$(id -u)/ai.agentjoey.grande-tmp-retention`，再重新 `bootstrap`。
+
 `gatewayBuild` 默认来自运行 checkout 的精确 Git HEAD；它与 `toolsetEpoch` 独立。普通实现或文档 commit 会改变 Git HEAD，但只要 tool contract 不变，就不 bump epoch/digest，也不需要 Refresh Production App。
 
 Minimal V2 production activation 的已读回 receipt 证明：
