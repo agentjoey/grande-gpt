@@ -6,7 +6,7 @@ import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { wrapPrMergeToolD2 } from "../src/prMergeD2.ts";
 import { readTaskPrReceipt, recordTaskPrMerged, recordTaskPrOpened, type TaskPrMergedInput } from "../src/taskPrReceipt.ts";
-import { createTask } from "../src/tasks.ts";
+import { createTask, getTask, updateTaskState } from "../src/tasks.ts";
 import type { ToolDef, ToolDeps } from "../src/toolsCore.ts";
 
 const TASK = "task_receipt_guardrails";
@@ -89,5 +89,36 @@ describe("merge response identity binding", () => {
     const result = (await tool.handler({ taskId: TASK })).structuredContent as { data: { cleanedUp: boolean } };
     expect(result.data.cleanedUp).toBe(false);
     expect(readTaskPrReceipt(db, TASK)?.mergeSha).toBeNull();
+  });
+
+  it("persists exact merge receipt when the base merge path has already CLOSED the task", async () => {
+    recordTaskPrOpened(db, evidence());
+    const deps: ToolDeps = { db, layout, defaultRepoId: "demo" };
+    const base: ToolDef = {
+      name: "grande_pr_merge", description: "base merge closes task fixture",
+      inputSchema: { type: "object", properties: {} },
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+      handler: async () => {
+        const current = getTask(db, TASK)!;
+        updateTaskState(db, TASK, "CLOSED", current.stateVersion);
+        return { structuredContent: {
+          ok: true, data: { merged: true, prNumber: 42, headSha: HEAD, mergeSha: MERGE,
+            canonicalRefresh: { action: "none", relation: "equal", branch: "main",
+              before: MERGE, after: MERGE, remoteHead: MERGE },
+            localState: "clean", cleanedUp: true },
+        } };
+      },
+    };
+    const tool = wrapPrMergeToolD2(deps, base, {
+      apiFactory: () => { throw new Error("closed success path must not need remote fallback"); },
+      canonicalRefresher: () => { throw new Error("closed success path must not reconcile twice"); },
+    });
+
+    const result = (await tool.handler({ taskId: TASK })).structuredContent as { data: { cleanedUp: boolean } };
+    expect(getTask(db, TASK)?.state).toBe("CLOSED");
+    expect(result.data.cleanedUp).toBe(true);
+    expect(readTaskPrReceipt(db, TASK)).toMatchObject({
+      prNumber: 42, headSha: HEAD, baseRef: "main", baseSha: BASE, mergeSha: MERGE,
+    });
   });
 });
