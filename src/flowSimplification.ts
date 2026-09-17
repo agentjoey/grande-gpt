@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { classifyDevelopmentRisk, type DevelopmentRiskLevel } from "./developmentRisk.ts";
 import {
   projectDeliveryTargetProgress,
@@ -8,6 +9,7 @@ import { waitForTerminalJob } from "./jobWait.ts";
 import { TERMINAL } from "./jobs.ts";
 import { jobReport } from "./runner.ts";
 import { compactTaskProgress, type TaskProgress } from "./taskProgress.ts";
+import { readTaskPrReceipt } from "./taskPrReceipt.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 import { listChangedFiles } from "./worktree.ts";
@@ -105,14 +107,21 @@ function wrapTaskStatus(deps: ToolDeps, tools: ToolDef[]): void {
 
     const taskId = typeof args.taskId === "string" ? args.taskId : null;
     if (taskId) {
-      // Ghost/missing-worktree recovery is more important than flow simplification. Preserve the
-      // established `grande gc` recovery hint rather than hiding it behind a synthetic target.
-      if (typeof envelope.hint === "string" && envelope.hint.includes("grande gc")) return response;
+      const task = getTask(deps.db, taskId);
+      const source = envelope.data.progress as TaskProgress | undefined;
+      const archived = task?.state === "CLOSED" && !existsSync(task.worktreePath)
+        && source?.completed === true && source.blocker === null && !source.cleanupRequired
+        && readTaskPrReceipt(deps.db, taskId)?.mergeSha != null;
+      // Preserve genuine ghost/recovery warnings; successful, evidenced cleanup is not a ghost.
+      if (typeof envelope.hint === "string" && envelope.hint.includes("grande gc") && !archived) return response;
       const projected = projectFlowProgress(deps, taskId, envelope.data.progress);
       if (!projected) return response;
       envelope.data.progress = projected;
       envelope.data.deliveryTarget = projected.deliveryTarget;
       envelope.data.developmentRisk = projected.developmentRisk;
+      if (archived && projected.completed && projected.blocker === null) {
+        envelope.data.base = { relation: "archived", detail: "Task 已关闭，worktree 已清理；不再比较本地 HEAD" };
+      }
       envelope.hint = `deliveryTarget=${projected.deliveryTarget}；developmentRisk=${projected.developmentRisk}；` +
         `${compactTaskProgress(projected)}；下一步：${projected.nextAction}`;
       return response;

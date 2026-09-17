@@ -1,5 +1,10 @@
 import type { DatabaseSync } from "node:sqlite";
+import { getAttestations } from "./attestation.ts";
+import { beginAudit } from "./audit.ts";
 import { StateError } from "./errors.ts";
+import { getJob, listJobs, TERMINAL } from "./jobs.ts";
+import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
+import { getTask } from "./tasks.ts";
 
 const SHA_RE = /^[0-9a-f]{40}$/u;
 
@@ -175,32 +180,94 @@ export function recordTaskPrOpened(
   return transaction(db, () => upsertOpened(db, input, now));
 }
 
-export function recordTaskPrMerged(
-  db: DatabaseSync,
-  input: TaskPrMergedInput,
-  now = Date.now(),
-): TaskPrReceipt {
+function validateMerged(input: TaskPrMergedInput): void {
   validateOpened(input);
-  // Types do not validate runtime inputs: a merge milestone cannot contain unknown head/base.
   assertSha(input.headSha, "headSha");
   if (typeof input.baseRef !== "string" || input.baseRef.trim().length === 0) {
     throw new StateError("INVALID_INPUT", "merged receipt 必须包含非空 baseRef。");
   }
   assertSha(input.mergeSha, "mergeSha");
-  return transaction(db, () => {
-    const opened = upsertOpened(db, input, now, true);
-    if (opened.mergeSha !== null) {
-      if (opened.mergeSha !== input.mergeSha) {
-        throw new StateError(
-          "STALE_STATE",
-          `task ${input.taskId} 的 merge evidence 不可变；已有 mergeSha=${opened.mergeSha}。`,
-        );
-      }
-      return opened;
+}
+
+/** Caller owns the write transaction. */
+function upsertMerged(db: DatabaseSync, input: TaskPrMergedInput, now: number): TaskPrReceipt {
+  const opened = upsertOpened(db, input, now, true);
+  if (opened.mergeSha !== null) {
+    if (opened.mergeSha !== input.mergeSha) {
+      throw new StateError(
+        "STALE_STATE",
+        `task ${input.taskId} 的 merge evidence 不可变；已有 mergeSha=${opened.mergeSha}。`,
+      );
     }
-    db.prepare(
-      "UPDATE task_pr_receipt SET mergeSha=?, mergedAt=?, updatedAt=? WHERE taskId=? AND mergeSha IS NULL",
-    ).run(input.mergeSha, now, now, input.taskId);
-    return load(db, input.taskId)!;
+    return opened;
+  }
+  db.prepare(
+    "UPDATE task_pr_receipt SET mergeSha=?, mergedAt=?, updatedAt=? WHERE taskId=? AND mergeSha IS NULL",
+  ).run(input.mergeSha, now, now, input.taskId);
+  return load(db, input.taskId)!;
+}
+
+export function recordTaskPrMerged(
+  db: DatabaseSync,
+  input: TaskPrMergedInput,
+  now = Date.now(),
+): TaskPrReceipt {
+  validateMerged(input);
+  return transaction(db, () => upsertMerged(db, input, now));
+}
+
+/** Preconditions shared by historical readback and the final SQLite write transaction. */
+export function assertClosedTaskReconcileState(db: DatabaseSync, taskId: string, expectedVersion: number): string {
+  const task = getTask(db, taskId);
+  if (!task || task.state !== "CLOSED" || task.stateVersion !== expectedVersion) {
+    throw new StateError("STALE_STATE", "历史 task 已变化，不能补写 merge evidence。");
+  }
+  const target = getExplicitDeliveryTarget(db, taskId);
+  if (target === "deploy" || target === "local"
+      || db.prepare("SELECT 1 FROM delivery_authorization WHERE taskId=? LIMIT 1").get(taskId)
+      || db.prepare("SELECT 1 FROM deployment_receipt WHERE taskId=?").get(taskId)) {
+    throw new StateError("POLICY_DENIED", "仅支持无 deployment/authorization 待办的历史 PR task 对账。");
+  }
+  if (listJobs(db, taskId).some((job) => !TERMINAL.has(job.state))) {
+    throw new StateError("STALE_STATE", "历史 task 仍有非终态 job，拒绝补写。");
+  }
+  const latest = getAttestations(db, taskId)[0];
+  const job = latest ? getJob(db, latest.jobId) : undefined;
+  if (!latest || latest.exitCode !== 0 || !SHA_RE.test(latest.commit)
+      || !job || job.taskId !== taskId || job.state !== "passed" || job.exitCode !== 0) {
+    throw new StateError("STALE_STATE", "缺少可信的 latest exact-head attestation，不能仅凭 legacy audit 恢复 merge。");
+  }
+  return latest.commit;
+}
+
+/** Evidence-only recovery. Receipt and its successful audit commit together or neither does. */
+export function recordClosedTaskPrMerged(
+  db: DatabaseSync,
+  input: TaskPrMergedInput,
+  expectedVersion: number,
+  now = Date.now(),
+): TaskPrReceipt {
+  validateMerged(input);
+  return transaction(db, () => {
+    if (assertClosedTaskReconcileState(db, input.taskId, expectedVersion) !== input.headSha) {
+      throw new StateError("STALE_STATE", "最新可信 task head 与历史 PR head 不一致。");
+    }
+    const previous = load(db, input.taskId);
+    if (previous && ((previous.headSha !== null && previous.headSha !== input.headSha)
+        || (previous.baseRef !== null && previous.baseRef !== input.baseRef)
+        || (previous.baseSha !== null && previous.baseSha !== input.baseSha))) {
+      throw new StateError("STALE_STATE", "历史 PR receipt 与重新核验的 exact evidence 冲突。");
+    }
+    const result = upsertMerged(db, input, now);
+    // Do not rewrite timestamps or create a duplicate success event for an identical replay.
+    if (previous && previous.mergeSha === result.mergeSha && previous.baseSha === result.baseSha) return result;
+    const audit = beginAudit(db, {
+      taskId: input.taskId, tool: "grande_pr_merge",
+      input: { ...input, phase: "closed_task_reconcile", evidenceOnly: true },
+    });
+    if (!audit.allowed() || !audit.executing() || !audit.succeeded([])) {
+      throw new StateError("STALE_STATE", "历史 merge evidence 的 audit 无法完成；本次补写回滚。");
+    }
+    return result;
   });
 }
