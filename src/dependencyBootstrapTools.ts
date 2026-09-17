@@ -17,16 +17,10 @@ import {
   type DependencyBootstrapIdentity,
 } from "./dependencyBootstrap.ts";
 import { StateError } from "./errors.ts";
-import {
-  createJob,
-  finishJob,
-  listJobs,
-  setRunningJobPgid,
-  setRunningJobSummary,
-  TERMINAL,
-} from "./jobs.ts";
+import { finishJob, listJobs, setRunningJobPgid, setRunningJobSummary, TERMINAL } from "./jobs.ts";
 import type { Layout } from "./layout.ts";
 import { getProfile } from "./profiles.ts";
+import { markManagedJobLaunching, reserveManagedJob } from "./resourceAdmission.ts";
 import { trackJobSettlement } from "./runner.ts";
 import type { TaskRow } from "./tasks.ts";
 
@@ -83,15 +77,18 @@ function materializeCacheWithAudit(
   const audit = beginAudit(deps.db, {
     taskId: task.taskId,
     tool: "grande_run",
-    input: {
-      profile: requestedProfile,
-      prerequisite: "dependency-cache-materialize",
-      dependencyIdentityKey: identity.key,
-    },
+    input: { profile: requestedProfile, prerequisite: "dependency-cache-materialize", dependencyIdentityKey: identity.key },
   });
   audit.allowed();
   if (!audit.executing()) throw new Error("dependency cache materialization audit could not enter EXECUTING");
+  const jobId = `job_${randomUUID()}`;
+  let reserved = false;
   try {
+    reserveManagedJob(deps.db, deps.layout, { jobId, taskId: task.taskId,
+      profile: "dependency-cache-materialize", argv: [], kind: "dependency-cache-materialize" }, [task.worktreePath]);
+    reserved = true;
+    setRunningJobSummary(deps.db, jobId, { kind: "dependency-cache-materialize", requestedProfile, ...identitySummary(identity) });
+    markManagedJobLaunching(deps.db, jobId);
     const materialized = materializePreparedDependencies(deps.layout, identity, task.worktreePath);
     if (!materialized) throw new Error("prepared dependency cache disappeared before materialization");
     const currentIdentity = captureDependencyBootstrapIdentity(task.repoId, task.worktreePath);
@@ -100,8 +97,12 @@ function materializeCacheWithAudit(
       throw new DependencyBootstrapIdentityDrift(identity, currentIdentity);
     }
     audit.succeeded([task.worktreePath]);
+    finishJob(deps.db, jobId, { state: "passed", exitCode: 0, artifactPath: null,
+      summary: { kind: "dependency-cache-materialize", requestedProfile, ...identitySummary(identity) } });
     return true;
   } catch (error) {
+    if (reserved) finishJob(deps.db, jobId, { state: "failed", exitCode: null, artifactPath: null,
+      summary: { kind: "dependency-cache-materialize", reason: "materialization_failed" } });
     audit.failed(error instanceof Error ? error.message : String(error), [task.worktreePath]);
     throw error;
   }
@@ -134,33 +135,26 @@ function launchBootstrap(
   const audit = beginAudit(deps.db, {
     taskId: task.taskId,
     tool: "grande_run",
-    input: {
-      profile: requestedProfile,
-      prerequisite: BOOTSTRAP_PROFILE,
-      dependencyIdentityKey: identity.key,
-    },
+    input: { profile: requestedProfile, prerequisite: BOOTSTRAP_PROFILE, dependencyIdentityKey: identity.key },
   });
   audit.allowed();
   if (!audit.executing()) throw new Error("dependency bootstrap audit could not enter EXECUTING");
-
   const jobId = `job_${randomUUID()}`;
   const argv = dependencyInstallArgv(identity.packageManager);
+  let reserved = false;
   try {
-    createJob(deps.db, {
-      jobId,
-      taskId: task.taskId,
-      profile: BOOTSTRAP_PROFILE,
-      argv,
-      pgid: null,
-    });
+    reserveManagedJob(deps.db, deps.layout, {
+      jobId, taskId: task.taskId, profile: BOOTSTRAP_PROFILE, argv, kind: "dependency-bootstrap",
+    }, [task.worktreePath]);
+    reserved = true;
     setRunningJobSummary(deps.db, jobId, {
-      kind: BOOTSTRAP_PROFILE,
-      phase: "preparing",
-      requestedProfile,
-      ...identitySummary(identity),
+      kind: BOOTSTRAP_PROFILE, phase: "preparing", requestedProfile, ...identitySummary(identity),
     });
+    markManagedJobLaunching(deps.db, jobId);
     audit.succeeded([task.worktreePath]);
   } catch (error) {
+    if (reserved) finishJob(deps.db, jobId, { state: "failed", exitCode: null, artifactPath: null,
+      summary: { kind: BOOTSTRAP_PROFILE, reason: "preparation_failed" } });
     audit.failed(error instanceof Error ? error.message : String(error));
     throw error;
   }
@@ -173,32 +167,27 @@ function launchBootstrap(
     jobTmp,
     sandboxRunner: deps.dependencyBootstrapSandboxRunner,
     onSpawn: (pgid) => {
-      try { setRunningJobPgid(deps.db, jobId, pgid); } catch { /* terminal reconciliation already won */ }
+      try {
+        if (!setRunningJobPgid(deps.db, jobId, pgid)) throw new Error("bootstrap reservation is no longer running");
+      } catch (error) {
+        if (Number.isInteger(pgid) && pgid > 0) {
+          try { process.kill(-pgid, "SIGKILL"); } catch { /* already exited */ }
+        }
+        throw error;
+      }
     },
   }).then((prepared) => {
     const run = prepared.runResult;
-    const artifact = writeBootstrapArtifact(
-      deps,
-      task.taskId,
-      jobId,
-      run
-        ? `${run.stdout}${run.stderr ? `\n--- stderr ---\n${run.stderr}` : ""}`
-        : `dependency bootstrap satisfied from ${prepared.source}\n`,
-    );
+    const artifact = writeBootstrapArtifact(deps, task.taskId, jobId, run
+      ? `${run.stdout}${run.stderr ? `\n--- stderr ---\n${run.stderr}` : ""}`
+      : `dependency bootstrap satisfied from ${prepared.source}\n`);
     finishJob(deps.db, jobId, {
-      state: "passed",
-      exitCode: 0,
-      artifactPath: artifact,
+      state: "passed", exitCode: 0, artifactPath: artifact,
       summary: {
-        kind: BOOTSTRAP_PROFILE,
-        phase: "ready",
-        requestedProfile,
-        source: prepared.source,
-        cacheDir: prepared.cacheDir,
-        truncated: run?.truncated ?? false,
-        killedBy: run?.killedBy ?? null,
-        durationMs: run?.durationMs ?? 0,
-        peakRssMb: run?.peakRssMb ?? 0,
+        kind: BOOTSTRAP_PROFILE, phase: "ready", requestedProfile,
+        source: prepared.source, cacheDir: prepared.cacheDir,
+        truncated: run?.truncated ?? false, killedBy: run?.killedBy ?? null,
+        durationMs: run?.durationMs ?? 0, peakRssMb: run?.peakRssMb ?? 0,
         ...identitySummary(prepared.identity),
       },
     });
@@ -206,39 +195,20 @@ function launchBootstrap(
     const failure = error instanceof DependencyBootstrapFailure ? error : null;
     const drift = error instanceof DependencyBootstrapIdentityDrift ? error : null;
     const run = failure?.result;
-    const reason = run?.killedBy === "timeout"
-      ? "bootstrap_timeout"
-      : run?.killedBy === "rss"
-        ? "bootstrap_resource_exhausted"
-        : drift
-          ? "identity_drift"
-          : failure
-            ? "install_failed"
-            : "preparation_failed";
-    const artifact = writeBootstrapArtifact(
-      deps,
-      task.taskId,
-      jobId,
-      failure
-        ? `${failure.message}\n${run!.stdout}${run!.stderr ? `\n--- stderr ---\n${run!.stderr}` : ""}`
-        : `${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
-    );
+    const reason = run?.killedBy === "timeout" ? "bootstrap_timeout"
+      : run?.killedBy === "rss" ? "bootstrap_resource_exhausted"
+      : drift ? "identity_drift" : failure ? "install_failed" : "preparation_failed";
+    const artifact = writeBootstrapArtifact(deps, task.taskId, jobId, failure
+      ? `${failure.message}\n${run!.stdout}${run!.stderr ? `\n--- stderr ---\n${run!.stderr}` : ""}`
+      : `${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
     const state = run?.killedBy === "timeout" ? "timeout" : run?.killedBy === "rss" ? "killed" : "failed";
     try {
       finishJob(deps.db, jobId, {
-        state,
-        exitCode: run?.exitCode ?? null,
-        artifactPath: artifact,
+        state, exitCode: run?.exitCode ?? null, artifactPath: artifact,
         summary: {
-          kind: BOOTSTRAP_PROFILE,
-          phase: "failed",
-          failureClass: "dependency-bootstrap",
-          reason,
-          requestedProfile,
-          truncated: run?.truncated ?? false,
-          killedBy: run?.killedBy ?? null,
-          durationMs: run?.durationMs ?? null,
-          peakRssMb: run?.peakRssMb ?? null,
+          kind: BOOTSTRAP_PROFILE, phase: "failed", failureClass: "dependency-bootstrap",
+          reason, requestedProfile, truncated: run?.truncated ?? false,
+          killedBy: run?.killedBy ?? null, durationMs: run?.durationMs ?? null, peakRssMb: run?.peakRssMb ?? null,
           ...identitySummary(failure?.identity ?? drift?.expected ?? identity),
           ...(drift ? { actualDependencyIdentityKey: drift.actual.key } : {}),
         },
@@ -247,14 +217,10 @@ function launchBootstrap(
       // A shutdown/reconciler terminal CAS may already have won. Never create an unhandled rejection.
     }
   }).finally(() => {
-    try {
-      rmSync(jobTmp, { recursive: true, force: true });
-    } catch (error) {
-      console.error(`[dependency-bootstrap] ${jobId} 临时目录清理失败：${error instanceof Error ? error.message : String(error)}`);
-    }
+    try { rmSync(jobTmp, { recursive: true, force: true }); }
+    catch (error) { console.error(`[dependency-bootstrap] ${jobId} 临时目录清理失败：${error instanceof Error ? error.message : String(error)}`); }
   });
   trackJobSettlement(jobId, settlement);
-
   return { jobId, state: "running", pollAfterSeconds: BOOTSTRAP_POLL_SECONDS };
 }
 
@@ -271,35 +237,21 @@ export function prepareDependencyPrerequisite(
 ): DependencyPrerequisite | null {
   const profile = getProfile(deps.layout, task.repoId, requestedProfile);
   if (!profileRequiresDependencyBootstrap(deps.layout, task.repoId, task.worktreePath, profile.argv)) return null;
-
   const identity = captureDependencyBootstrapIdentity(task.repoId, task.worktreePath);
   const existing = runningBootstrap(deps, task, identity);
   if (existing) {
     return {
-      data: {
-        jobId: existing.jobId,
-        state: existing.state,
-        pollAfterSeconds: BOOTSTRAP_POLL_SECONDS,
-        prerequisite: BOOTSTRAP_PROFILE,
-        requestedProfile,
-        reused: true,
-      },
+      data: { jobId: existing.jobId, state: existing.state, pollAfterSeconds: BOOTSTRAP_POLL_SECONDS,
+        prerequisite: BOOTSTRAP_PROFILE, requestedProfile, reused: true },
       hint: `依赖准备仍在运行（${existing.jobId}）；先取得该 job 终态，通过后重试 profile ${requestedProfile}。`,
     };
   }
-
   if (preparedDependenciesPresent(task.worktreePath, identity)) return null;
   if (materializeCacheWithAudit(deps, task, identity, requestedProfile)) return null;
-
   const started = launchBootstrap(deps, task, requestedProfile, identity);
   return {
-    data: {
-      ...started,
-      prerequisite: BOOTSTRAP_PROFILE,
-      requestedProfile,
-      dependencyIdentityKey: identity.key,
-      packageManager: identity.packageManager,
-    },
+    data: { ...started, prerequisite: BOOTSTRAP_PROFILE, requestedProfile,
+      dependencyIdentityKey: identity.key, packageManager: identity.packageManager },
     hint: `fresh worktree 缺少与当前 lockfile/runtime 匹配的依赖；已启动受控 ${identity.packageManager} bootstrap。` +
       `该 job 通过后重试 profile ${requestedProfile}，不会把 bootstrap 失败误报为产品测试失败。`,
   };

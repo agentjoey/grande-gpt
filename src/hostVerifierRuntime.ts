@@ -1,14 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  realpathSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { dirname, isAbsolute, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -16,32 +7,20 @@ import { prepareDependenciesInWorktree } from "./dependencyBootstrap.ts";
 import {
   assertDisposableVerifierRoot,
   buildTrustedVitestConfig,
-  type HostVerifierLaunchResult,
   type HostVerifierRequest,
   type HostVerifierStaticPlan,
 } from "./hostVerifier.ts";
 import { buildHostVerifierSandboxPlan } from "./hostVerifierSandbox.ts";
-import {
-  createJob,
-  finishJob,
-  getJob,
-  setRunningJobPgid,
-  setRunningJobSummary,
-  TERMINAL,
-  type JobState,
-} from "./jobs.ts";
 import type { Layout } from "./layout.ts";
-import {
-  persistTrustedOuterTestPassV2,
-  type HostToolchainIdentity,
-  type TrustedHostVerifierSummary,
-} from "./outerTestReceipt.ts";
+import type { HostToolchainIdentity } from "./outerTestReceipt.ts";
 import { capturePackageManagerIdentity } from "./packageManagerIdentity.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { loadDepDirs } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
 import { safeGit } from "./gitExec.ts";
 import { getTask } from "./tasks.ts";
+
+export { createHostVerifierLauncher, type HostVerifierLauncherOptions } from "./hostVerifierLauncher.ts";
 
 export interface HostVerifierPreparedRun {
   disposableRoot: string;
@@ -79,239 +58,6 @@ export interface HostVerifierRuntimeAdapter {
 export interface HostVerifierRuntimeDeps {
   db: DatabaseSync;
   layout: Layout;
-}
-
-/** Trusted launcher policy selected only by control-plane code, never by HostVerifierRequest. */
-export interface HostVerifierLauncherOptions {
-  receiptMode?: "auto" | "manual";
-  requirePrHead?: boolean;
-}
-
-function executionState(result: HostVerifierExecutionResult): Exclude<JobState, "running"> {
-  if (result.killedBy === "timeout") return "timeout";
-  if (result.killedBy === "rss") return "killed";
-  return result.exitCode === 0 ? "passed" : "failed";
-}
-
-function artifactBody(result: HostVerifierExecutionResult): string {
-  return `${result.stdout}\n--- stderr ---\n${result.stderr}\n`;
-}
-
-function failureSummary(
-  request: HostVerifierRequest,
-  prepared: HostVerifierPreparedRun | undefined,
-  detail: Record<string, unknown>,
-): Record<string, unknown> {
-  return {
-    kind: "host-verifier-failure",
-    repoId: request.repoId,
-    commit: request.commit,
-    level: request.level,
-    disposableRoot: prepared?.disposableRoot ?? null,
-    ...detail,
-  };
-}
-
-function trustedSummary(
-  request: HostVerifierRequest,
-  plan: HostVerifierStaticPlan,
-  prepared: HostVerifierPreparedRun,
-  mode: "auto" | "manual",
-): TrustedHostVerifierSummary {
-  return {
-    kind: "host-verifier-v2",
-    mode,
-    repoId: request.repoId,
-    commit: request.commit,
-    level: request.level,
-    files: [...plan.files],
-    policyVersion: plan.policyVersion,
-    resourceLimits: { ...plan.resourceLimits },
-    loopbackPorts: [...prepared.loopbackPorts],
-    hostToolchain: { ...prepared.hostToolchain },
-  };
-}
-
-/**
- * Trusted one-shot launcher. Its caller can choose only task/repo/exact-SHA/level;
- * argv/cwd/env/Seatbelt/receipt fields remain behind the runtime adapter boundary.
- * The optional receipt policy is also trusted control-plane configuration, not request data.
- */
-export function createHostVerifierLauncher(
-  deps: HostVerifierRuntimeDeps,
-  adapter: HostVerifierRuntimeAdapter,
-  options: HostVerifierLauncherOptions = {},
-): (request: HostVerifierRequest, plan: HostVerifierStaticPlan) => HostVerifierLaunchResult {
-  const receiptMode = options.receiptMode ?? "auto";
-  const requirePrHead = options.requirePrHead ?? true;
-  return (request, plan) => {
-    if (request.repoId !== "grande-gpt") {
-      throw new Error(`host verifier is scoped to grande-gpt, received repo ${request.repoId}`);
-    }
-    if (!/^[0-9a-f]{40}$/u.test(request.commit)) throw new Error("host verifier requires an exact 40-hex commit");
-    const task = getTask(deps.db, request.taskId);
-    if (!task) throw new Error(`host verifier task does not exist: ${request.taskId}`);
-    if (task.repoId !== request.repoId) throw new Error("host verifier task/repo binding mismatch");
-
-    const disposableRoot = realpathSync(mkdtempSync(join(tmpdir(), "grande-host-verifier-")));
-    assertDisposableVerifierRoot(disposableRoot, {
-      workspaceRoot: deps.layout.workspaceRoot,
-      controlRoot: deps.layout.controlRoot,
-      taskWorktree: task.worktreePath,
-    });
-
-    const jobId = `job_${randomUUID()}`;
-    try {
-      createJob(deps.db, {
-        jobId,
-        taskId: request.taskId,
-        profile: "host-verifier",
-        argv: ["trusted-host-verifier", request.level, request.commit],
-        pgid: null,
-      });
-      setRunningJobSummary(deps.db, jobId, {
-        kind: "host-verifier-preparing",
-        repoId: request.repoId,
-        commit: request.commit,
-        level: request.level,
-        receiptMode,
-        staticPlanDigest: plan.staticPlanDigest,
-        disposableRoot,
-      });
-    } catch (error) {
-      rmSync(disposableRoot, { recursive: true, force: true });
-      throw error;
-    }
-
-    const artifactDir = join(deps.layout.artifactsDir, request.taskId, jobId);
-    const artifactPath = join(artifactDir, "output.log");
-    mkdirSync(artifactDir, { recursive: true });
-
-    const settled = (async () => {
-      let prepared: HostVerifierPreparedRun | undefined;
-      let cleaned = false;
-      let result: HostVerifierExecutionResult | undefined;
-      let phase: "prepare" | "execute" | "cleanup" | "head_check" = "prepare";
-      try {
-        prepared = await adapter.prepare({ request, plan, jobId, disposableRoot });
-        if (prepared.disposableRoot !== disposableRoot) {
-          throw new Error("runtime adapter changed the trusted disposable root");
-        }
-        assertDisposableVerifierRoot(prepared.disposableRoot, {
-          workspaceRoot: deps.layout.workspaceRoot,
-          controlRoot: deps.layout.controlRoot,
-          taskWorktree: task.worktreePath,
-        });
-        setRunningJobSummary(deps.db, jobId, {
-          kind: "host-verifier-running",
-          repoId: request.repoId,
-          commit: request.commit,
-          level: request.level,
-          receiptMode,
-          staticPlanDigest: plan.staticPlanDigest,
-          disposableRoot,
-          loopbackPorts: [...prepared.loopbackPorts],
-        });
-
-        phase = "execute";
-        result = await adapter.execute(prepared, (pgid) => {
-          if (!setRunningJobPgid(deps.db, jobId, pgid)) {
-            throw new Error("verifier pgid arrived after job stopped or was already attached");
-          }
-        });
-        writeFileSync(artifactPath, artifactBody(result), "utf8");
-
-        phase = "cleanup";
-        await adapter.cleanup(prepared);
-        cleaned = true;
-
-        const state = executionState(result);
-        if (state !== "passed") {
-          const failureClass = state === "failed" ? "candidate" : "infrastructure";
-          const reason = state === "failed"
-            ? "test_failed"
-            : result.killedBy === "timeout" ? "timeout" : "rss_limit";
-          finishJob(deps.db, jobId, {
-            state,
-            exitCode: result.exitCode,
-            artifactPath,
-            summary: failureSummary(request, prepared, {
-              failureClass,
-              reason,
-              testFailure: state === "failed",
-              infrastructureFailure: state !== "failed",
-              killedBy: result.killedBy,
-              truncated: result.truncated,
-              durationMs: result.durationMs,
-              peakRssMb: result.peakRssMb,
-              cleaned: true,
-            }),
-          });
-          return;
-        }
-
-        phase = "head_check";
-        const heads = await adapter.readCurrentHeads(request);
-        const exactHeadStillCurrent = heads.taskHead === request.commit
-          && (!requirePrHead || heads.prHead === request.commit);
-        const baseSummary = trustedSummary(request, plan, prepared, receiptMode);
-        const summary = exactHeadStillCurrent
-          ? baseSummary
-          : {
-              ...baseSummary,
-              kind: "host-verifier-v2-stale",
-              staleReason: requirePrHead ? "task-or-pr-sha-drift" : "task-sha-drift",
-              observedTaskHead: heads.taskHead,
-              observedPrHead: heads.prHead,
-            };
-        finishJob(deps.db, jobId, {
-          state: "passed",
-          exitCode: 0,
-          artifactPath,
-          summary,
-        });
-        if (exactHeadStillCurrent) persistTrustedOuterTestPassV2(deps.db, request.taskId, jobId);
-      } catch (error) {
-        if (prepared && !cleaned) {
-          try {
-            await adapter.cleanup(prepared);
-            cleaned = true;
-          } catch {
-            cleaned = false;
-          }
-        } else if (!prepared) {
-          try {
-            rmSync(disposableRoot, { recursive: true, force: true });
-            cleaned = true;
-          } catch {
-            cleaned = false;
-          }
-        }
-        const current = getJob(deps.db, jobId);
-        if (current && !TERMINAL.has(current.state)) {
-          try {
-            writeFileSync(artifactPath, `host verifier infrastructure error: ${(error as Error).message}\n`, "utf8");
-          } catch {
-            // Artifact failure must not leave the job forever running.
-          }
-          finishJob(deps.db, jobId, {
-            state: "failed",
-            exitCode: result?.exitCode ?? null,
-            artifactPath,
-            summary: failureSummary(request, prepared, {
-              failureClass: "infrastructure",
-              reason: `${phase}_failed`,
-              infrastructureFailure: true,
-              error: error instanceof Error ? error.message : String(error),
-              cleaned,
-            }),
-          });
-        }
-      }
-    })();
-
-    return { jobId, settled };
-  };
 }
 
 interface DefaultPreparedDetails {
@@ -513,22 +259,10 @@ async function executePreparedVerifier(
   clearInterval(rssPoll);
   if (hardKillTimer) clearTimeout(hardKillTimer);
 
-  return {
-    exitCode,
-    stdout,
-    stderr,
-    truncated,
-    killedBy,
-    durationMs: Date.now() - started,
-    peakRssMb,
-  };
+  return { exitCode, stdout, stderr, truncated, killedBy, durationMs: Date.now() - started, peakRssMb };
 }
 
-/**
- * Real host adapter. The only variable request is task/repo/exact SHA/level; all
- * filesystem targets, executable files, Vitest argv, environment and Seatbelt
- * policy are derived by trusted parent code.
- */
+/** Real host adapter. All executable and filesystem choices remain behind the trusted boundary. */
 export function createDefaultHostVerifierRuntimeAdapter(
   deps: HostVerifierRuntimeDeps,
   options: DefaultHostVerifierAdapterOptions,
@@ -566,11 +300,7 @@ export function createDefaultHostVerifierRuntimeAdapter(
           mkdirSync(dir, { recursive: true });
         }
         const dependencyRoots = await prepareTrustedDependencies(
-          deps.layout,
-          request.repoId,
-          canonicalRepo,
-          sourceRoot,
-          jobTmp,
+          deps.layout, request.repoId, canonicalRepo, sourceRoot, jobTmp,
         );
         const canonicalSource = realpathSync(sourceRoot);
         const canonicalJobTmp = realpathSync(jobTmp);
@@ -583,17 +313,11 @@ export function createDefaultHostVerifierRuntimeAdapter(
         const vitestEntry = realpathSync(join(canonicalSource, "node_modules", "vitest", "vitest.mjs"));
         const hookPath = join(canonicalJobTmp, "tmp", "git-hook-probe", "repo", ".git", "hooks", "pre-commit");
         const executableFiles = [...new Set([
-          nodePath,
-          gitPath,
-          shPath,
-          bashPath,
+          nodePath, gitPath, shPath, bashPath,
           ...(plan.files.includes("tests/host/git-hook.host.test.ts") ? [hookPath] : []),
         ])];
         const toolchainReadRoots = [...new Set([
-          dirname(nodePath),
-          dirname(gitPath),
-          realpathSync("/usr/bin"),
-          realpathSync("/bin"),
+          dirname(nodePath), dirname(gitPath), realpathSync("/usr/bin"), realpathSync("/bin"),
         ])];
         const policy = buildHostVerifierSandboxPlan({
           verifierWorktree: canonicalSource,
@@ -614,30 +338,16 @@ export function createDefaultHostVerifierRuntimeAdapter(
         writeFileSync(configPath, buildTrustedVitestConfig(plan.files), "utf8");
         writeFileSync(profilePath, policy.profile, "utf8");
         const hostToolchain = captureHostToolchain(canonicalSource);
-        const prepared: HostVerifierPreparedRun = {
-          disposableRoot: root,
-          sourceRoot: canonicalSource,
-          jobTmp: canonicalJobTmp,
-          loopbackPorts,
-          hostToolchain,
-        };
-        detailsByRoot.set(root, {
-          request,
-          plan,
-          canonicalRepo: realpathSync(canonicalRepo),
-          taskWorktree,
-          sourceRoot: canonicalSource,
-          jobTmp: canonicalJobTmp,
-          profilePath,
-          configPath,
-          nodePath,
-          vitestEntry,
-          env: policy.env,
-        });
+        const prepared: HostVerifierPreparedRun = { disposableRoot: root, sourceRoot: canonicalSource,
+          jobTmp: canonicalJobTmp, loopbackPorts, hostToolchain };
+        detailsByRoot.set(root, { request, plan, canonicalRepo: realpathSync(canonicalRepo), taskWorktree,
+          sourceRoot: canonicalSource, jobTmp: canonicalJobTmp, profilePath, configPath,
+          nodePath, vitestEntry, env: policy.env });
         return prepared;
       } catch (error) {
         if (worktreeAdded) {
-          try { safeGit.local(canonicalRepo, ["worktree", "remove", "--force", sourceRoot]); } catch { /* surfaced by original error */ }
+          try { safeGit.local(canonicalRepo, ["worktree", "remove", "--force", sourceRoot]); }
+          catch { /* surfaced by original error */ }
         }
         throw error;
       }
@@ -661,11 +371,8 @@ export function createDefaultHostVerifierRuntimeAdapter(
     async cleanup(prepared) {
       const details = detailsByRoot.get(prepared.disposableRoot);
       if (!details) throw new Error("unknown trusted prepared verifier cleanup");
-      assertDisposableVerifierRoot(prepared.disposableRoot, {
-        workspaceRoot: deps.layout.workspaceRoot,
-        controlRoot: deps.layout.controlRoot,
-        taskWorktree: details.taskWorktree,
-      });
+      assertDisposableVerifierRoot(prepared.disposableRoot, { workspaceRoot: deps.layout.workspaceRoot,
+        controlRoot: deps.layout.controlRoot, taskWorktree: details.taskWorktree });
       safeGit.local(details.canonicalRepo, ["worktree", "remove", "--force", details.sourceRoot]);
       rmSync(prepared.disposableRoot, { recursive: true, force: true });
       detailsByRoot.delete(prepared.disposableRoot);

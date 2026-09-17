@@ -240,9 +240,13 @@ describe("GG-BL-031 grande_run dependency prerequisite", () => {
   }, 30_000);
 
   it("settles successfully when the optional bootstrap artifact cannot be written", async () => {
-    rmSync(layout.artifactsDir, { recursive: true, force: true });
-    writeFileSync(layout.artifactsDir, "artifact path intentionally blocked\n", "utf8");
-
+    // Fail the optional writer after valid disk admission, not before its destination can be inspected.
+    deps!.dependencyBootstrapSandboxRunner = async (options) => {
+      options.onSpawn?.(12_345);
+      rmSync(layout.artifactsDir, { recursive: true, force: true });
+      writeFileSync(layout.artifactsDir, "artifact path intentionally blocked\n", "utf8");
+      return sandboxResult();
+    };
     const started = await callCoreRun();
     expect(started.ok).toBe(true);
     expect(await awaitAllJobsSettled(10_000)).toBeGreaterThanOrEqual(1);

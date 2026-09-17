@@ -3,6 +3,7 @@ import { err, ok } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
 import { registeredIds } from "./registry.ts";
+import { assertDiskHeadroom } from "./resourcePolicy.ts";
 import { clearTaskCloseIntent } from "./taskCloseIntent.ts";
 import { parseDeliveryTarget } from "./taskDeliveryTarget.ts";
 import {
@@ -45,6 +46,7 @@ export function addTaskLifecycleCrashRecovery(deps: ToolDeps, tools: ToolDef[]):
         deliveryTarget = args.deliveryTarget === undefined
           ? undefined
           : parseDeliveryTarget(args.deliveryTarget);
+        assertDiskHeadroom(deps.layout);
       } catch (error) {
         return failure(deps, taskId, error);
       }
@@ -140,10 +142,7 @@ export function addTaskLifecycleCrashRecovery(deps: ToolDeps, tools: ToolDef[]):
       }
 
       try {
-        // Durable exact-head intent is written only after proving a clean worktree.
         const intent = prepareTaskCloseIntent(deps.db, task);
-        // Re-prove exact identity under HEAD.lock and use non-force removal. A crash after
-        // any Git step leaves the durable intent for startup/periodic reconciliation.
         removeTaskWorktreeForClose(deps.layout, task, intent.headSha);
         updateTaskState(deps.db, taskId, "CLOSED", task.stateVersion);
         clearTaskCloseIntent(deps.db, taskId);
