@@ -11,17 +11,17 @@ describe("ChatGPT connector compatibility operational contract", () => {
     expect(text).toContain("tool-contract release");
     expect(text).toContain("频繁");
     expect(text).toContain("25 tools");
-    expect(text).toContain("toolsetEpoch=2");
+    expect(text).toContain("toolsetEpoch=3");
     expect(text).toContain("grande_repo_add_propose");
     expect(text).toContain("grande_repo_add_apply");
   });
 
-  it("runbook encodes current 25-tool/epoch-2 baseline plus refresh/bump/recovery rules without bypassing the Gateway", () => {
+  it("runbook encodes current 25-tool/epoch-3 baseline plus refresh/bump/recovery rules without bypassing the Gateway", () => {
     const text = read("docs/chatgpt-connector-compatibility-runbook.md");
     expect(text).toContain("toolsetEpoch");
     expect(text).toContain("toolsDigest");
     expect(text).toContain("25");
-    expect(text).toContain("epoch 2");
+    expect(text).toContain("epoch 3");
     expect(text).toContain("grande_repo_add_propose");
     expect(text).toContain("grande_repo_add_apply");
     expect(text).toContain("patch release");

@@ -10,6 +10,7 @@ import type { HostVerificationLevel } from "./hostVerification.ts";
 import { listJobs, TERMINAL } from "./jobs.ts";
 import { inspectCurrentHostVerification, type CurrentHostVerification } from "./prHostVerification.ts";
 import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
+import { readTaskPrReceipt } from "./taskPrReceipt.ts";
 import type { TaskRow } from "./tasks.ts";
 
 export type ProgressState = "done" | "pending" | "running" | "blocked" | "unknown" | "not-applicable";
@@ -458,7 +459,7 @@ function latestMeaningfulProgressAt(
 
 /**
  * S10/D3: project daily lifecycle + host-verification status only from existing trusted
- * Task/job/audit/attestation/receipt state. No database writes or new lifecycle table.
+ * Task/job/audit/attestation/receipt state. No database writes or new lifecycle state machine.
  */
 export function projectTaskProgress(
   db: DatabaseSync,
@@ -487,11 +488,23 @@ export function projectTaskProgress(
   const jobs = listJobs(db, task.taskId);
   const latestJob = jobs[0];
   const audits = listAudit(db, task.taskId, 500);
-  const prOpened = audits.some((row) => row.tool === "grande_pr_open" && row.state === "SUCCEEDED");
-  const merged = audits.some((row) => row.tool === "grande_pr_merge" && row.state === "SUCCEEDED");
-  const latestMergeAudit = audits.find((row) => row.tool === "grande_pr_merge");
-  const mergedLocalStale = merged
-    && latestMergeAudit?.state === "FAILED"
+  const prReceipt = readTaskPrReceipt(db, task.taskId);
+  const durablePrOpened = prReceipt !== null;
+  const durableMerged = prReceipt?.mergeSha !== null && prReceipt?.mergeSha !== undefined;
+  // Legacy events are hints to reconcile, never proof of current merged/CI state.
+  // Query the relevant event directly so unrelated audit traffic cannot erase that hint.
+  const auditPrOpened = !durablePrOpened && db.prepare(
+    "SELECT 1 FROM audit WHERE taskId=? AND tool='grande_pr_open' AND state='SUCCEEDED' LIMIT 1",
+  ).get(task.taskId) !== undefined;
+  const auditMerged = !durableMerged && db.prepare(
+    "SELECT 1 FROM audit WHERE taskId=? AND tool='grande_pr_merge' AND state='SUCCEEDED' LIMIT 1",
+  ).get(task.taskId) !== undefined;
+  const prOpened = durablePrOpened || auditPrOpened || auditMerged;
+  const legacyMergedAudit = auditMerged && !durableMerged;
+  const latestMergeAudit = db.prepare(
+    "SELECT state,reason FROM audit WHERE taskId=? AND tool='grande_pr_merge' ORDER BY at DESC,rowid DESC LIMIT 1",
+  ).get(task.taskId) as { state: string; reason: string | null } | undefined;
+  const mergedLocalStale = task.state !== "CLOSED" && latestMergeAudit?.state === "FAILED"
     && /^merged-but-local-stale:/u.test(latestMergeAudit.reason ?? "");
 
   const hostVerificationApplicable = isHostVerificationApplicable(task.repoId);
@@ -528,19 +541,28 @@ export function projectTaskProgress(
     tests = { state: "pending", detail: "当前 HEAD 尚无 attestation；需要通过验证并 commit" };
   }
 
-  const pr: ProgressStage = merged || prOpened
-    ? { state: "done", detail: merged ? "已有成功 merge 记录" : "PR 已由 GrandeGPT 打开" }
-    : { state: "pending", detail: "尚无成功 grande_pr_open 记录" };
-  const ci: ProgressStage = merged
-    ? { state: "done", detail: "成功 grande_pr_merge 证明当时 exact-head CI gate 已通过或 CI=none" }
-    : prOpened
-      ? { state: "unknown", detail: "live CI 不缓存；调用 grande_pr_status 读取当前 PR head" }
-      : { state: "pending", detail: "PR 尚未打开" };
-  const mergedStage: ProgressStage = merged
-    ? { state: "done", detail: "PR 已通过 GrandeGPT merge gate" }
-    : { state: "pending", detail: "尚未 merge" };
+  const pr: ProgressStage = prOpened
+    ? {
+        state: "done",
+        detail: durableMerged
+          ? "已有 durable exact merge receipt"
+          : durablePrOpened
+            ? "已有 durable PR identity"
+            : "PR 已由 legacy audit 观察到",
+      }
+    : { state: "pending", detail: "尚无 PR lifecycle evidence" };
+  const ci: ProgressStage = prOpened
+    ? { state: "unknown", detail: durableMerged
+        ? "PR 已合并；merge receipt 不证明历史 CI 通过，不据此补造 CI evidence"
+        : "live CI 不缓存；调用 grande_pr_status 读取当前 PR head" }
+    : { state: "pending", detail: "PR 尚未打开" };
+  const mergedStage: ProgressStage = durableMerged
+    ? { state: "done", detail: `PR 已有 durable exact merge receipt (${prReceipt!.mergeSha})` }
+    : legacyMergedAudit
+      ? { state: "unknown", detail: "仅有 legacy merge audit；缺 durable exact merge receipt，需重新 reconciliation" }
+      : { state: "pending", detail: "尚未确认 exact merge evidence" };
 
-  const hasDeploy = deployConfigured(task.worktreePath);
+  const hasDeploy = getExplicitDeliveryTarget(db, task.taskId) === "deploy" || deployConfigured(task.worktreePath);
   const receipt = hasDeploy ? loadReceipt(db, task.taskId) : null;
   let deploy: ProgressStage;
   let verify: ProgressStage;
@@ -566,20 +588,26 @@ export function projectTaskProgress(
   }
 
   const stages = { code, tests, pr, ci, merged: mergedStage, deploy, verify };
-  const completed = merged && (deploy.state === "not-applicable" || verify.state === "done");
+  const completed = durableMerged && (deploy.state === "not-applicable" || verify.state === "done");
   const cleanupRequired = mergedLocalStale || (completed && task.state !== "CLOSED" && worktreeExists(task.worktreePath));
   const localState: TaskProgress["localState"] = mergedLocalStale
     ? "merged-local-stale"
     : completed && !cleanupRequired
       ? "completed"
       : "active";
+  const archived = completed && task.state === "CLOSED" && !worktreeExists(task.worktreePath);
 
-  let blocker = firstBlocked(stages);
+  let blocker = archived ? null : firstBlocked(stages);
   let nextAction = "无待处理动作";
-  const hostGateActive = prOpened || HOST_ACTIVE.has(hostVerification.state) || hostVerification.jobId !== null;
+  const hostGateActive = !durableMerged && !legacyMergedAudit
+    && (prOpened || HOST_ACTIVE.has(hostVerification.state) || hostVerification.jobId !== null);
   const hostFailure = hostGateActive ? hostBlocker(hostVerification, task.taskId) : null;
 
-  if (mergedLocalStale) {
+  if (archived) {
+    // Removed worktrees cannot be re-tested. Keep unavailable stages honest, but do not
+    // turn their missing files into new work after durable delivery and Task closure.
+    blocker = null;
+  } else if (mergedLocalStale) {
     blocker = "cleanup: remote merged but local reconciliation is stale";
     nextAction = "再次调用 grande_pr_merge；只重试本地 reconciliation，不会重复 remote merge";
   } else if (hostFailure) {
@@ -588,7 +616,14 @@ export function projectTaskProgress(
   } else if (blocker) {
     nextAction = `先处理阻塞：${blocker}`;
   } else if (cleanupRequired) {
-    nextAction = "闭环证据已完成，但 worktree/task 仍保留；Human 确认后显式 grande_task_close";
+    nextAction = "调用 grande_pr_merge 进行受控 reconciliation；重新确认 exact evidence、clean worktree 与无运行 job 后才允许 cleanup";
+  } else if (legacyMergedAudit) {
+    nextAction = "再次调用 grande_pr_merge；观察 remote merged 状态并固化 durable exact merge receipt";
+  } else if (durableMerged) {
+    if (deploy.state === "pending") nextAction = "调用 grande_deploy";
+    else if (ACTIVE_PROGRESS.has(deploy.state) || ACTIVE_PROGRESS.has(verify.state)) {
+      nextAction = "等待当前 deployment job 结束后重入 grande_deploy_verify";
+    } else if (verify.state === "pending") nextAction = "调用 grande_deploy_verify";
   } else if (tests.state !== "done") {
     nextAction = "运行合适的验证 profile；通过后 grande_commit 生成当前 SHA attestation";
   } else if (pr.state !== "done") {
@@ -605,16 +640,15 @@ export function projectTaskProgress(
     nextAction = `运行 grande outer-test --task ${task.taskId} --run`;
   } else if (mergedStage.state !== "done") {
     nextAction = "CI/attestation/host-verification 门禁满足后 grande_pr_merge";
-  } else if (deploy.state === "pending") {
-    nextAction = "调用 grande_deploy";
-  } else if (ACTIVE_PROGRESS.has(deploy.state) || ACTIVE_PROGRESS.has(verify.state)) {
-    nextAction = "等待当前 deployment job 结束后重入 grande_deploy_verify";
-  } else if (verify.state === "pending") {
-    nextAction = "调用 grande_deploy_verify";
   }
 
   let phase: TaskProgressPhase;
-  if (mergedLocalStale || cleanupRequired) phase = "cleanup";
+  if (archived) phase = "completed";
+  else if (mergedLocalStale || cleanupRequired) phase = "cleanup";
+  else if (completed) phase = "completed";
+  else if (durableMerged && DEPLOY_UNSETTLED.has(deploy.state)) phase = "deploy";
+  else if (durableMerged && DEPLOY_UNSETTLED.has(verify.state)) phase = "verify";
+  else if (legacyMergedAudit) phase = "merge";
   else if (code.state !== "done") phase = "code";
   else if (tests.state !== "done") phase = "tests";
   else if (pr.state !== "done") phase = "pr";
@@ -626,7 +660,7 @@ export function projectTaskProgress(
   else if (DEPLOY_UNSETTLED.has(verify.state)) phase = "verify";
   else phase = "completed";
 
-  const progressAt = latestMeaningfulProgressAt(task, jobs, audits);
+  const progressAt = Math.max(latestMeaningfulProgressAt(task, jobs, audits), prReceipt?.updatedAt ?? 0);
   const deliveryAuthorization = projectDeliveryAuthorization(db, task.taskId);
   const now = options.now?.() ?? Date.now();
   const stallAfterMs = options.stallAfterMs ?? DEFAULT_TASK_STALL_AFTER_MS;

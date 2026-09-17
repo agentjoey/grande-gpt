@@ -7,6 +7,7 @@ import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import type { CurrentHostVerification } from "../src/prHostVerification.ts";
 import { projectHostVerificationProgress, projectTaskProgress } from "../src/taskProgress.ts";
+import { recordTaskPrMerged } from "../src/taskPrReceipt.ts";
 import { createTask } from "../src/tasks.ts";
 
 function current(overrides: Partial<CurrentHostVerification> = {}): CurrentHostVerification {
@@ -92,13 +93,13 @@ afterEach(() => {
   rmSync(ctrl, { recursive: true, force: true });
 });
 
-function addAttestation(db: ReturnType<typeof openDb>): void {
+function addAttestation(db: ReturnType<typeof openDb>, commit = "head1"): void {
   db.prepare(`INSERT INTO job (jobId,taskId,profile,argv,state,pgid,exitCode,startedAt,endedAt,artifactPath,summary,workspaceDigest,hostToolchain)
     VALUES ('job-pass','task-d3','typecheck','[]','passed',NULL,0,1,2,NULL,NULL,'digest',?)`)
     .run(JSON.stringify({ node: "v24", pnpm: "10", lockfileSha256: "abc" }));
   db.prepare(`INSERT INTO attestation (attestationId,taskId,"commit",profile,jobId,exitCode,startedAt,endedAt,hostToolchain)
-    VALUES ('att-pass','task-d3','head1','typecheck','job-pass',0,1,2,?)`)
-    .run(JSON.stringify({ node: "v24", pnpm: "10", lockfileSha256: "abc" }));
+    VALUES ('att-pass','task-d3',?,'typecheck','job-pass',0,1,2,?)`)
+    .run(commit, JSON.stringify({ node: "v24", pnpm: "10", lockfileSha256: "abc" }));
 }
 
 function succeeded(db: ReturnType<typeof openDb>, tool: string): void {
@@ -123,6 +124,14 @@ const progressOptions = {
   workingTreeDirty: () => false,
   deployConfigured: () => false,
 };
+
+const MERGED_HEAD = "1".repeat(40);
+function mergedReceipt(db: ReturnType<typeof openDb>): void {
+  recordTaskPrMerged(db, {
+    taskId: "task-d3", prNumber: 3, prUrl: "https://github.com/example/demo/pull/3",
+    headSha: MERGED_HEAD, baseRef: "main", baseSha: "2".repeat(40), mergeSha: "3".repeat(40),
+  });
+}
 
 describe("D3 task progress projection", () => {
   it("projects exact HEAD, verifier retry exhaustion, blocker, and one unique Human next action", () => {
@@ -182,12 +191,14 @@ describe("D3 task progress projection", () => {
   it("projects remote-merged/local-stale truth and reconciliation as the only next action", () => {
     const db = openDb(loadLayout());
     const task = makeTask(db);
-    addAttestation(db);
+    addAttestation(db, MERGED_HEAD);
     succeeded(db, "grande_pr_open");
     succeeded(db, "grande_pr_merge");
+    mergedReceipt(db);
     staleReconcile(db);
     const progress = projectTaskProgress(db, task, {
       ...progressOptions,
+      readHead: () => MERGED_HEAD,
       worktreeExists: () => true,
       inspectHostVerification: () => current({ receiptEligible: true }),
     });
@@ -200,11 +211,13 @@ describe("D3 task progress projection", () => {
   it("projects a fully merged and cleaned task as completed with no invented action", () => {
     const db = openDb(loadLayout());
     const task = makeTask(db, "CLOSED");
-    addAttestation(db);
+    addAttestation(db, MERGED_HEAD);
     succeeded(db, "grande_pr_open");
     succeeded(db, "grande_pr_merge");
+    mergedReceipt(db);
     const progress = projectTaskProgress(db, task, {
       ...progressOptions,
+      readHead: () => MERGED_HEAD,
       worktreeExists: () => false,
       inspectHostVerification: () => current({ receiptEligible: true }),
     });

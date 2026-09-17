@@ -6,6 +6,7 @@ import { createGithubApi, GithubApiError, type GithubApi } from "./githubApi.ts"
 import { GithubAuthError, loadGithubToken, redactToken } from "./githubAuth.ts";
 import { safeGit } from "./gitExec.ts";
 import { assertTaskBranch } from "./commit.ts";
+import { recordTaskPrOpened } from "./taskPrReceipt.ts";
 import { getTask } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
@@ -145,7 +146,7 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
       try {
         const task = getTask(deps.db, taskId);
         if (!task) throw new StateError("TASK_NOT_FOUND", `任务 ${taskId} 不存在。`);
-        assertTaskBranch(task.worktreePath, task.branch);
+        const localHead = assertTaskBranch(task.worktreePath, task.branch);
         try {
           token = loadGithubToken(deps.layout).token;
         } catch (error) {
@@ -162,6 +163,16 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
 
         const existing = await api.findPullRequest(owner, repo, task.branch);
         if (existing) {
+          // find endpoint 只证明 task↔PR identity，不证明 remote PR 当前 head；
+          // 不把 local HEAD 冒充成 remote head，exact head 在 lifecycle observe/merge 时补齐。
+          recordTaskPrOpened(deps.db, {
+            taskId,
+            prNumber: existing.number,
+            prUrl: existing.url,
+            headSha: null,
+            baseRef: null,
+            baseSha: null,
+          });
           return {
             structuredContent: ok({
               taskId,
@@ -183,6 +194,12 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
         }
 
         const remote = inspectRemoteState(task.worktreePath, token);
+        if (remote.commit !== localHead) {
+          throw new StateError(
+            "STALE_STATE",
+            `任务 ${taskId} 在 PR 创建前 HEAD 已漂移：开始时=${localHead}，当前=${remote.commit}。`,
+          );
+        }
         const attestationId = getAttestations(deps.db, taskId)
           .find((candidate) => candidate.commit === remote.commit)?.attestationId ?? "none";
         const trustedBody = buildPullRequestBody(body, taskId, attestationId, remote.commit);
@@ -213,6 +230,14 @@ export function createPrOpenTool(deps: ToolDeps, options: PrOpenToolOptions = {}
           observedAfterWriteFailure = true;
         }
 
+        recordTaskPrOpened(deps.db, {
+          taskId,
+          prNumber: created.number,
+          prUrl: created.url,
+          headSha: remote.commit,
+          baseRef: remote.defaultBranch,
+          baseSha: null,
+        });
         audit.succeeded([task.worktreePath]);
         return {
           structuredContent: ok({

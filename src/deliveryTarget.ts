@@ -1,8 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
-import { listAudit } from "./audit.ts";
 import { safeGit } from "./gitExec.ts";
 import { getExplicitDeliveryTarget, type DeliveryTarget } from "./taskDeliveryTarget.ts";
 import type { DeliveryAuthorizationProjection, TaskProgress, TaskProgressPhase } from "./taskProgress.ts";
+import { readTaskPrReceipt } from "./taskPrReceipt.ts";
 import type { TaskRow } from "./tasks.ts";
 
 // 单一真相源在 taskDeliveryTarget.ts（V2 起 target 可以显式持久化）；
@@ -44,9 +44,9 @@ function isGitHubOrigin(value: string | null): boolean {
  * 不可变，不从 repo 内容推断。
  *
  * 没有显式行的旧任务保留 Phase 8 的纯证据投影（仅影响 status 展示，不能凭它
- * 创建 V2 authorization）：有 durable deployment evidence 才算 deploy；repo 有
- * GitHub origin 默认 PR；否则 local。这个默认方向是保守的——legacy 投影永远
- * 不会把一个普通任务升级出新的 production side effect。
+ * 创建 V2 authorization）：有 durable deployment evidence 才算 deploy；有 durable
+ * task↔PR receipt 则算 pr；更老任务才回退到 audit / GitHub origin。这个默认方向仍是
+ * 保守的——legacy 投影永远不会把普通任务升级出新的 production side effect。
  */
 export function resolveDeliveryTarget(
   db: DatabaseSync,
@@ -59,10 +59,13 @@ export function resolveDeliveryTarget(
   const deploymentReceipt = db.prepare("SELECT 1 AS present FROM deployment_receipt WHERE taskId=?").get(task.taskId);
   if (deploymentReceipt) return "deploy";
 
-  const audits = listAudit(db, task.taskId, 500);
-  if (audits.some((row) => row.state === "SUCCEEDED" && ["grande_push", "grande_pr_open", "grande_pr_merge"].includes(row.tool))) {
-    return "pr";
-  }
+  if (readTaskPrReceipt(db, task.taskId)) return "pr";
+
+  const legacyPrEvent = db.prepare(
+    "SELECT 1 FROM audit WHERE taskId=? AND state='SUCCEEDED' " +
+      "AND tool IN ('grande_push','grande_pr_open','grande_pr_merge') LIMIT 1",
+  ).get(task.taskId);
+  if (legacyPrEvent) return "pr";
 
   const readOrigin = options.readOrigin ?? defaultReadOrigin;
   return isGitHubOrigin(readOrigin(task)) ? "pr" : "local";
@@ -95,6 +98,9 @@ function nextForPr(progress: TaskProgress, taskId: string | null): string {
   if (progress.localState === "merged-local-stale") {
     return "再次调用 grande_pr_merge；只重试本地 reconciliation，不会重复 remote merge";
   }
+  if (progress.stages.merged.state === "unknown") {
+    return "再次调用 grande_pr_merge；观察 remote merged 状态并固化 durable exact merge receipt";
+  }
   if (progress.stages.tests.state !== "done") {
     return "运行合适的验证 profile；通过后 grande_commit 生成当前 SHA attestation";
   }
@@ -119,6 +125,7 @@ function nextForPr(progress: TaskProgress, taskId: string | null): string {
 
 function phaseForPr(progress: TaskProgress): TaskProgressPhase {
   if (progress.localState === "merged-local-stale" || progress.cleanupRequired) return "cleanup";
+  if (progress.stages.merged.state === "unknown") return "merge";
   if (progress.stages.code.state !== "done") return "code";
   if (progress.stages.tests.state !== "done") return "tests";
   if (progress.stages.pr.state !== "done") return "pr";
@@ -217,9 +224,11 @@ export function projectDeliveryTargetProgress(
       || (progress.completed && progress.localState !== "completed");
     if (progress.completed && !progress.cleanupRequired) progress.localState = "completed";
 
-    progress.blocker = progress.localState === "merged-local-stale"
-      ? "cleanup: remote merged but local reconciliation is stale"
-      : hostBlocker(progress, target) ?? firstBlocked(progress, target);
+    const archived = source.completed && source.localState === "completed" && source.blocker === null;
+    progress.blocker = archived && progress.completed ? null
+      : progress.localState === "merged-local-stale"
+        ? "cleanup: remote merged but local reconciliation is stale"
+        : hostBlocker(progress, target) ?? firstBlocked(progress, target);
 
     if (progress.blocker) {
       progress.nextAction = progress.localState === "merged-local-stale"
@@ -228,7 +237,7 @@ export function projectDeliveryTargetProgress(
           ? source.nextAction
           : `先处理阻塞：${progress.blocker}`;
     } else if (progress.cleanupRequired) {
-      progress.nextAction = "闭环证据已完成，但 worktree/task 仍保留；显式 grande_task_close 完成 cleanup";
+      progress.nextAction = "调用 grande_pr_merge 进行受控 reconciliation；重新确认 exact evidence、clean worktree 与无运行 job 后才允许 cleanup";
     } else if (!merged) {
       progress.nextAction = nextForPr(progress, taskId);
     } else if (target === "deploy") {

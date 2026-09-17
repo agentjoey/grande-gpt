@@ -19,6 +19,7 @@ import { reconcileMergedTaskFromRefresh, reconcileObservedMergedTask, type Merge
 import { parseGithubRemote, readGithubRemoteUrl } from "./prOpen.ts";
 import { assertTaskBranch } from "./commit.ts";
 import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
+import { readTaskPrReceipt, recordTaskPrMerged } from "./taskPrReceipt.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 import type { Layout } from "./layout.ts";
@@ -37,6 +38,12 @@ export interface PrMergeD2Options {
   apiFactory?: ApiFactory;
   readRemoteUrl?: RemoteReader;
   canonicalRefresher?: CanonicalRefresher;
+}
+
+const SHA_RE = /^[0-9a-f]{40}$/u;
+
+function exactSha(value: unknown): string | null {
+  return typeof value === "string" && SHA_RE.test(value) ? value : null;
 }
 
 function asCanonicalRefresh(value: unknown): CanonicalRefreshResult | null {
@@ -134,6 +141,58 @@ async function observeRemoteMerged(
   }
 }
 
+function recordMergeFromExistingReceipt(
+  deps: ToolDeps,
+  taskId: string,
+  taskHead: string | null,
+  mergeSha: string | null,
+  prNumber: unknown,
+  baseRef: string,
+): boolean {
+  if (!taskHead || !mergeSha) return false;
+  const receipt = readTaskPrReceipt(deps.db, taskId);
+  if (!receipt) return false;
+  if (receipt.prNumber !== prNumber || (receipt.baseRef !== null && receipt.baseRef !== baseRef)) {
+    throw new StateError("STALE_STATE", "merge response 的 PR number/base 与 durable receipt 不一致，拒绝绑定。");
+  }
+  if (receipt.baseRef === null || receipt.headSha !== taskHead) return false;
+  recordTaskPrMerged(deps.db, {
+    taskId,
+    prNumber: receipt.prNumber,
+    prUrl: receipt.prUrl,
+    headSha: receipt.headSha,
+    baseRef: receipt.baseRef,
+    baseSha: receipt.baseSha,
+    mergeSha,
+  });
+  return true;
+}
+
+function recordMergeFromObserved(
+  deps: ToolDeps,
+  observed: NonNullable<Awaited<ReturnType<typeof observeRemoteMerged>>>,
+  expectedMergeSha: string | null = null,
+): string | null {
+  const observedMergeSha = exactSha(observed.pr.mergeCommitSha);
+  if (!observedMergeSha) return null;
+  if (expectedMergeSha !== null && expectedMergeSha !== observedMergeSha) {
+    throw new StateError(
+      "STALE_STATE",
+      `merge response SHA ${expectedMergeSha} 与 GitHub PR merge_commit_sha ${observedMergeSha} 不一致。`,
+    );
+  }
+  recordTaskPrMerged(deps.db, {
+    taskId: observed.task.taskId,
+    prNumber: observed.pr.number,
+    prUrl: observed.pr.url,
+    headSha: observed.pr.headSha,
+    baseRef: observed.pr.baseRef,
+    baseSha: observed.pr.baseSha ?? null,
+    mergeSha: observedMergeSha,
+  });
+  return observedMergeSha;
+}
+
 /**
  * Minimal V2 Task 5：丢失响应后的 reconcile 路径同样要过 exact 证据检查
  * （规格 §10.2/§14.3）——reconcile 出的 merge commit 必须验证 parents/tree 并钉住
@@ -144,6 +203,7 @@ function reconcileAuthorizedDeployEvidence(
   deps: ToolDeps,
   task: TaskRow,
   result: MergeReconcileResult,
+  mergeSha: string | null,
 ): StateError | null {
   if (getExplicitDeliveryTarget(deps.db, task.taskId) !== "deploy") return null;
   // 本地对账没收尾时只重试 reconcile，不定罪——remote merged 本身已经确认。
@@ -151,9 +211,8 @@ function reconcileAuthorizedDeployEvidence(
   const active = activeAuthorizationForTask(deps.db, task.taskId);
   if (!active || active.kind !== "delivery" || active.status !== "EXECUTING") return null;
   const binding = active.binding as DeliveryAuthorizationBinding;
-  const mergeSha = result.canonicalRefresh?.after ?? null;
   try {
-    if (!mergeSha || !/^[0-9a-f]{40}$/u.test(mergeSha)) {
+    if (!mergeSha || !SHA_RE.test(mergeSha)) {
       throw new StateError("STALE_STATE", "reconcile 未给出精确 merge SHA，无法确认交付证据。");
     }
     const verified = verifyMergedCommit({
@@ -191,7 +250,8 @@ function reconcileAuthorizedDeployEvidence(
  * D2 wrapper around the existing C3 merge gate. It never issues a merge itself.
  * The base tool owns all CI/attestation/receipt/expected-SHA gates and the single
  * remote merge attempt. This layer only observes ambiguous outcomes and reconciles
- * confirmed remote merges locally.
+ * confirmed remote merges locally. Task-level durable merge evidence is persisted
+ * here before any automatic cleanup is allowed.
  */
 export function wrapPrMergeToolD2(
   deps: ToolDeps,
@@ -211,42 +271,101 @@ export function wrapPrMergeToolD2(
         if (!task || task.state === "CLOSED") return response;
         const canonicalRefresh = asCanonicalRefresh(envelope.data.canonicalRefresh);
         if (!canonicalRefresh) return response;
-        const expectedMergeSha = typeof envelope.data.mergeSha === "string" ? envelope.data.mergeSha : null;
-        const expectedTaskHead = typeof envelope.data.headSha === "string" ? envelope.data.headSha : null;
+        const expectedTaskHead = exactSha(envelope.data.headSha);
+        let expectedMergeSha = exactSha(envelope.data.mergeSha);
+
+        let durableRecorded = false;
+        try {
+          durableRecorded = recordMergeFromExistingReceipt(
+            deps, taskId, expectedTaskHead, expectedMergeSha, envelope.data.prNumber, canonicalRefresh.branch,
+          );
+          if (!durableRecorded) {
+            const observed = await observeRemoteMerged(deps, taskId, options);
+            if (observed) {
+              const observedMergeSha = recordMergeFromObserved(deps, observed, expectedMergeSha);
+              if (observedMergeSha) {
+                expectedMergeSha = observedMergeSha;
+                durableRecorded = true;
+              }
+            }
+          }
+        } catch (error) {
+          const result: MergeReconcileResult = {
+            localState: "merged-but-local-stale",
+            cleanedUp: false,
+            canonicalRefresh,
+            error: error instanceof Error ? error.message : String(error),
+          };
+          recordReconcileAudit(
+            deps,
+            taskId,
+            { remoteMerged: true, durableReceipt: false, prNumber: envelope.data.prNumber ?? null },
+            result,
+            task.worktreePath,
+          );
+          return reconciliationEnvelope(taskId, envelope.data, result, false);
+        }
+
         const result = reconcileMergedTaskFromRefresh(
           deps,
           task,
           canonicalRefresh,
-          expectedMergeSha,
+          durableRecorded ? expectedMergeSha : null,
           expectedTaskHead,
         );
         recordReconcileAudit(
           deps,
           taskId,
-          { remoteMerged: true, observedAfterWriteFailure: false, prNumber: envelope.data.prNumber ?? null },
+          {
+            remoteMerged: true,
+            observedAfterWriteFailure: false,
+            durableReceipt: durableRecorded,
+            prNumber: envelope.data.prNumber ?? null,
+          },
           result,
           task.worktreePath,
         );
-        return reconciliationEnvelope(taskId, envelope.data, result, false);
+        return reconciliationEnvelope(
+          taskId,
+          {
+            ...envelope.data,
+            ...(expectedMergeSha ? { mergeSha: expectedMergeSha } : {}),
+          },
+          result,
+          false,
+        );
       }
 
       if (envelope.ok !== false) return response;
+      // Reconciliation may recover an already-started authorized execution, but must
+      // never turn an authorization rejection into an alternate path to GitHub.
+      if (getExplicitDeliveryTarget(deps.db, taskId) === "deploy") {
+        const active = activeAuthorizationForTask(deps.db, taskId);
+        if (!active || active.kind !== "delivery" || active.status !== "EXECUTING") return response;
+      }
 
-      // A write response may have been lost after GitHub accepted the merge. Query
-      // by the trusted task branch and exact local head before any future retry.
+      // A write response may have been lost after GitHub accepted the merge, or a PR may
+      // have been merged externally. Query by the trusted task branch and exact local head.
       const observed = await observeRemoteMerged(deps, taskId, options);
       if (!observed) return response;
+      let mergeSha: string | null = null;
+      try {
+        mergeSha = recordMergeFromObserved(deps, observed);
+      } catch (error) {
+        const toolError = toToolError(error);
+        toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+        return { structuredContent: err({ ...toolError, taskId }) };
+      }
       const result = reconcileObservedMergedTask(
         deps,
         observed.task,
         observed.pr.baseRef,
-        null,
+        mergeSha,
         observed.pr.headSha,
         canonicalRefresher,
       );
-      const mergeSha = result.canonicalRefresh?.after ?? null;
-      // Task 5：deploy 任务的 reconcile 结果必须过 exact 证据检查；不符即 UNCERTAIN。
-      const evidenceError = reconcileAuthorizedDeployEvidence(deps, observed.task, result);
+      // Keep the observed merge identity; canonical may already contain later commits.
+      const evidenceError = reconcileAuthorizedDeployEvidence(deps, observed.task, result, mergeSha);
       if (evidenceError) {
         const toolError = toToolError(evidenceError);
         toolError.message = redact(toolError.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
@@ -258,6 +377,7 @@ export function wrapPrMergeToolD2(
         {
           remoteMerged: true,
           observedAfterWriteFailure: true,
+          durableReceipt: mergeSha !== null,
           prNumber: observed.pr.number,
           expectedHeadSha: observed.pr.headSha,
         },

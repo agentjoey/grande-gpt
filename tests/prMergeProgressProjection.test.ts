@@ -6,6 +6,7 @@ import { beginAudit } from "../src/audit.ts";
 import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { projectTaskProgress } from "../src/taskProgress.ts";
+import { recordTaskPrMerged } from "../src/taskPrReceipt.ts";
 import { createTask } from "../src/tasks.ts";
 
 let ws: string;
@@ -38,7 +39,7 @@ function succeeded(db: ReturnType<typeof openDb>, tool: string): void {
 }
 
 describe("host verifier vs merge progress projection", () => {
-  it("successful host-verification dispatch keeps merged pending until the real merge audit succeeds", () => {
+  it("host dispatch and legacy merge audit cannot replace a durable exact merge receipt", () => {
     const layout = loadLayout();
     const db = openDb(layout);
     const task = createTask(db, {
@@ -49,31 +50,34 @@ describe("host verifier vs merge progress projection", () => {
       worktreePath: join(ws, "fake-worktree"),
       state: "READY",
     });
-
-    succeeded(db, "grande_pr_open");
-    succeeded(db, "grande_pr_merge_host_verification");
-
-    const beforeMerge = projectTaskProgress(db, task, {
-      readHead: () => "head1",
+    const head = "1".repeat(40);
+    const options = {
+      readHead: () => head,
       filesChanged: () => 1,
       workingTreeDirty: () => false,
       worktreeExists: () => true,
       deployConfigured: () => false,
-    });
+    };
+
+    succeeded(db, "grande_pr_open");
+    succeeded(db, "grande_pr_merge_host_verification");
+    const beforeMerge = projectTaskProgress(db, task, options);
     expect(beforeMerge.stages.pr.state).toBe("done");
     expect(beforeMerge.stages.merged.state).toBe("pending");
     expect(beforeMerge.completed).toBe(false);
 
     succeeded(db, "grande_pr_merge");
-    const afterMerge = projectTaskProgress(db, task, {
-      readHead: () => "head1",
-      filesChanged: () => 1,
-      workingTreeDirty: () => false,
-      worktreeExists: () => true,
-      deployConfigured: () => false,
-    });
-    expect(afterMerge.stages.merged.state).toBe("done");
+    const auditOnly = projectTaskProgress(db, task, options);
+    expect(auditOnly.stages.merged.state).toBe("unknown");
+    expect(auditOnly.completed).toBe(false);
 
+    recordTaskPrMerged(db, {
+      taskId: task.taskId, prNumber: 8, prUrl: "https://github.com/example/demo/pull/8",
+      headSha: head, baseRef: "main", baseSha: "2".repeat(40), mergeSha: "3".repeat(40),
+    });
+    const afterMerge = projectTaskProgress(db, task, options);
+    expect(afterMerge.stages.merged.state).toBe("done");
+    expect(afterMerge.completed).toBe(true);
     db.close();
   });
 });

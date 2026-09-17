@@ -34,6 +34,7 @@ import type { Layout } from "./layout.ts";
 import { inspectCurrentHostVerification, manualOuterTestCommand } from "./prHostVerification.ts";
 import { parseGithubRemote, readGithubRemoteUrl } from "./prOpen.ts";
 import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
+import { readTaskPrReceipt } from "./taskPrReceipt.ts";
 import { getTask, type TaskRow } from "./tasks.ts";
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
 
@@ -225,6 +226,23 @@ interface LifecycleState {
   attested: boolean;
 }
 
+function assertDurablePrIdentity(deps: ToolDeps, state: LifecycleState): void {
+  const receipt = readTaskPrReceipt(deps.db, state.task.taskId);
+  if (!receipt) return;
+  if (
+    receipt.prNumber !== state.pr.number ||
+    receipt.prUrl !== state.pr.url ||
+    state.pr.headRef !== state.task.branch ||
+    receipt.baseRef === null ||
+    receipt.baseRef !== state.pr.baseRef
+  ) {
+    throw new StateError(
+      "STALE_STATE",
+      `任务 ${state.task.taskId} 的当前 PR number/url/head branch/base 与 durable task_pr_receipt identity 不一致；拒绝 merge mutation。`,
+    );
+  }
+}
+
 async function inspectLifecycle(
   deps: ToolDeps,
   taskId: string,
@@ -375,6 +393,8 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
             );
           }
         }
+
+        assertDurablePrIdentity(deps, state);
 
         if (state.pr.merged) {
           if (authorized) {

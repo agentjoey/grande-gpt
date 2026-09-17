@@ -32,7 +32,7 @@ import { buildTools, type ToolDeps } from "../src/tools.ts";
 
 const git = (cwd: string, ...args: string[]) => execFileSync(
   "git",
-  ["-c", "core.hooksPath=/dev/null", ...args],
+  ["-c", "core.hooksPath=/dev/null", "-c", "user.name=GrandeGPT Test", "-c", "user.email=grande-test@example.com", ...args],
   { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 );
 

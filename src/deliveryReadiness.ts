@@ -1,5 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { beginAudit } from "./audit.ts";
+import { expireAuthorizationIfDue, reconcileExpiredAuthorizations } from "./authorizationExpiry.ts";
 import {
   APPROVAL_TTL_MS,
   activeAuthorizationForTask,
@@ -287,6 +288,7 @@ export async function prepareDeliveryAuthorization(
 ): Promise<PreparedDeliveryAuthorization> {
   const evidence = await readBindingEvidence(db, taskId, deps);
   await assertReady(db, taskId, deps, evidence);
+  reconcileExpiredAuthorizations(db);
   if (activeAuthorizationForTask(db, taskId)) {
     blocked(
       "STALE_STATE",
@@ -386,7 +388,8 @@ function markTerminal(
  *
  * - 一致：返回 durable binding，状态不变；
  * - 任何字段漂移：CAS 置为 STALE（规格 §11，零执行）并抛 STALE_STATE；
- * - 已过审批有效期：CAS 置为 EXPIRED 并抛 AUTH_EXPIRED；
+ * - READY/APPROVED 已过审批有效期：原子 CAS 置为 EXPIRED 并抛 AUTH_EXPIRED；
+ * - EXECUTING 不受 approval TTL 自动过期，继续使用独立 execution deadline；
  * - 终态行不可再复核（STALE_STATE）。
  */
 export async function revalidateDeliveryBinding(
@@ -401,8 +404,14 @@ export async function revalidateDeliveryBinding(
       `authorization ${authorizationId} 已处于终态 ${row.status}，不能再复核。`,
     );
   }
-  if (row.binding.expiresAt <= Date.now()) {
-    markTerminal(db, row, authorizationId, "EXPIRED", "审批有效期已过（expiresAt 到达）。");
+  const now = Date.now();
+  if ((row.status === "READY" || row.status === "APPROVED") && row.binding.expiresAt <= now) {
+    if (!expireAuthorizationIfDue(db, authorizationId, now, "grande_delivery_revalidate")) {
+      throw new StateError(
+        "STALE_STATE",
+        `authorization ${authorizationId} 到期收敛时状态已变化，本次复核零执行。`,
+      );
+    }
     throw new StateError(
       "AUTH_EXPIRED",
       `authorization ${authorizationId} 已过审批有效期，已置为 EXPIRED；需要新审批。`,

@@ -8,6 +8,7 @@ import { openDb } from "../src/db.ts";
 import type { GithubApi, GithubPullRequestCreateArgs } from "../src/githubApi.ts";
 import { ensureLayout, loadLayout, type Layout } from "../src/layout.ts";
 import { createPrOpenTool, type RemoteGithubState } from "../src/prOpen.ts";
+import { readTaskPrReceipt } from "../src/taskPrReceipt.ts";
 import { createTask } from "../src/tasks.ts";
 import { buildTools, type ToolDeps } from "../src/tools.ts";
 
@@ -134,6 +135,13 @@ describe("grande_pr_open", () => {
     expect(result.ok).toBe(true);
     expect(api.created).toHaveLength(1);
     expect(api.created[0]?.draft).toBe(false);
+    expect(readTaskPrReceipt(deps.db, taskId)).toMatchObject({
+      prNumber: 42,
+      prUrl: "https://github.com/fake-owner/fake-repo/pull/42",
+      headSha: currentCommit,
+      baseRef: "main",
+      mergeSha: null,
+    });
   });
 
   it("AC-S3-10：剥掉模型伪造尾注，再追加唯一可信尾注", async () => {
@@ -170,6 +178,14 @@ describe("grande_pr_open", () => {
     expect(api.calls.map((call) => call.name)).toEqual(["find"]);
     expect(order).toEqual(["url", "find"]);
     expect(listAudit(deps.db, taskId).filter((row) => row.tool === "grande_pr_open")).toEqual([]);
+    expect(readTaskPrReceipt(deps.db, taskId)).toMatchObject({
+      prNumber: 7,
+      prUrl: existing.url,
+      headSha: null,
+      baseRef: null,
+      baseSha: null,
+      mergeSha: null,
+    });
   });
 
   it("行为顺序是 URL 解析 → 幂等查询 → remote state → create", async () => {

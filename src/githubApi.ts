@@ -27,6 +27,8 @@ export interface GithubPullRequestDetail {
    * readiness 侧会对缺失/非 SHA 形状 fail closed。
    */
   baseSha?: string;
+  /** GitHub merged PR 的 exact merge_commit_sha；未 merged / fake 可缺失。 */
+  mergeCommitSha?: string;
 }
 
 export interface GithubCheckRun {
@@ -199,6 +201,7 @@ function pullRequestDetail(value: unknown, token: string): GithubPullRequestDeta
     baseRef: requiredString(base, "ref", "PR.base"),
     // 真实 API 恒有 base.sha；缺失时不抛错、由 readiness 的 SHA 形状校验 fail closed。
     ...(typeof base.sha === "string" ? { baseSha: base.sha } : {}),
+    ...(typeof record.merge_commit_sha === "string" ? { mergeCommitSha: record.merge_commit_sha } : {}),
   };
 }
 

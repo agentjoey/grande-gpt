@@ -12,12 +12,13 @@ import { wrapPrMergeToolD2 } from "../src/prMergeD2.ts";
 import { createPrOpenTool } from "../src/prOpen.ts";
 import { pushTask } from "../src/push.ts";
 import { saveRegistry } from "../src/registry.ts";
+import { readTaskPrReceipt } from "../src/taskPrReceipt.ts";
 import { createTask, getTask } from "../src/tasks.ts";
 import type { ToolDeps } from "../src/tools.ts";
 
 const git = (cwd: string, ...args: string[]) => execFileSync(
   "git",
-  ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", ...args],
+  ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-c", "user.name=GrandeGPT Test", "-c", "user.email=grande-test@example.com", ...args],
   { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 ).trim();
 
@@ -104,20 +105,22 @@ function pr(overrides: Partial<GithubPullRequestDetail> = {}): GithubPullRequest
     headSha: headCommit,
     headRef: branch,
     baseRef: "main",
+    baseSha: baseCommit,
     ...overrides,
   };
 }
 
-function lifecycleApi(options: {
-  afterMergeError?: GithubPullRequestDetail;
-  canonicalMergeSha?: string;
-} = {}): GithubLifecycleApi & { readonly mergeCalls: number; readonly getCalls: number } {
+function lifecycleApi(options: { loseResponse?: boolean } = {}): GithubLifecycleApi & {
+  readonly mergeCalls: number; readonly getCalls: number; readonly mergeSha: string | null;
+} {
   let mergeCalls = 0;
   let getCalls = 0;
+  let mergeSha: string | null = null;
   let current = pr();
   return {
     get mergeCalls() { return mergeCalls; },
     get getCalls() { return getCalls; },
+    get mergeSha() { return mergeSha; },
     async findPullRequest() { return { number: current.number, url: current.url }; },
     async createPullRequest() { throw new Error("not used"); },
     async getPullRequest() { getCalls += 1; return current; },
@@ -125,13 +128,11 @@ function lifecycleApi(options: {
     async listCommitStatuses() { return []; },
     async mergePullRequest() {
       mergeCalls += 1;
-      if (options.afterMergeError) {
-        current = options.afterMergeError;
-        throw new Error("simulated merge response loss");
-      }
-      const sha = options.canonicalMergeSha ?? "merge-sha";
-      current = pr({ state: "closed", merged: true, mergeable: null });
-      return { merged: true, sha, message: "merged" };
+      git(canonical, "merge", "--no-ff", "-q", "-m", "merge task", headCommit);
+      mergeSha = git(canonical, "rev-parse", "HEAD");
+      current = pr({ state: "closed", merged: true, mergeable: null, mergeCommitSha: mergeSha });
+      if (options.loseResponse) throw new Error("simulated merge response loss");
+      return { merged: true, sha: mergeSha, message: "merged" };
     },
   };
 }
@@ -230,11 +231,12 @@ describe("D2 observe-before-retry external writes", () => {
 
   it("after a confirmed merge with no deploy spec, refreshes once then removes task worktree/branch and closes the task", async () => {
     attest(headCommit);
-    const api = lifecycleApi({ canonicalMergeSha: "merge-sha" });
+    const api = lifecycleApi();
     let refreshCalls = 0;
     const tool = wrappedMergeTool(api, () => {
       refreshCalls += 1;
-      return { action: "fast-forward", relation: "remote_ahead", branch: "main", before: baseCommit, after: "merge-sha", remoteHead: "merge-sha" };
+      const after = git(canonical, "rev-parse", "HEAD");
+      return { action: "fast-forward", relation: "remote_ahead", branch: "main", before: baseCommit, after, remoteHead: after };
     });
     const envelope = (await tool.handler({ taskId })).structuredContent as Record<string, any>;
 
@@ -244,23 +246,23 @@ describe("D2 observe-before-retry external writes", () => {
     expect(existsSync(worktree)).toBe(false);
     expect(git(canonical, "branch", "--list", branch)).toBe("");
     expect(getTask(deps.db, taskId)?.state).toBe("CLOSED");
+    expect(readTaskPrReceipt(deps.db, taskId)?.mergeSha).toBe(api.mergeSha);
   });
 
   it("observes a lost merge response before any retry, then performs local reconciliation without a second merge call", async () => {
     attest(headCommit);
-    const mergeSha = "observed-merge-sha";
-    const api = lifecycleApi({
-      afterMergeError: pr({ state: "closed", merged: true, mergeable: null }),
-    });
+    const api = lifecycleApi({ loseResponse: true });
     let refreshCalls = 0;
     const tool = wrappedMergeTool(api, () => {
       refreshCalls += 1;
-      return { action: "fast-forward", relation: "remote_ahead", branch: "main", before: baseCommit, after: mergeSha, remoteHead: mergeSha };
+      const after = git(canonical, "rev-parse", "HEAD");
+      return { action: "fast-forward", relation: "remote_ahead", branch: "main", before: baseCommit, after, remoteHead: after };
     });
     const envelope = (await tool.handler({ taskId })).structuredContent as Record<string, any>;
 
     expect(envelope.ok).toBe(true);
-    expect(envelope.data).toMatchObject({ merged: true, mergeSha, observedAfterWriteFailure: true, localState: "clean" });
+    expect(api.mergeSha).toMatch(/^[0-9a-f]{40}$/u);
+    expect(envelope.data).toMatchObject({ merged: true, mergeSha: api.mergeSha, observedAfterWriteFailure: true, localState: "clean" });
     expect(api.mergeCalls).toBe(1);
     expect(api.getCalls).toBeGreaterThanOrEqual(2);
     expect(refreshCalls).toBe(2);
@@ -268,7 +270,7 @@ describe("D2 observe-before-retry external writes", () => {
 
   it("returns remote merged truth with merged-but-local-stale when post-merge canonical refresh fails", async () => {
     attest(headCommit);
-    const api = lifecycleApi({ canonicalMergeSha: "merge-sha" });
+    const api = lifecycleApi();
     let refreshCalls = 0;
     const tool = wrappedMergeTool(api, () => {
       refreshCalls += 1;
@@ -281,6 +283,7 @@ describe("D2 observe-before-retry external writes", () => {
     expect(envelope.data).toMatchObject({ merged: true, localState: "merged-but-local-stale", cleanedUp: false });
     expect(existsSync(worktree)).toBe(true);
     expect(getTask(deps.db, taskId)?.state).toBe("READY");
+    expect(readTaskPrReceipt(deps.db, taskId)?.mergeSha).toBe(api.mergeSha);
     const reconcileAudit = listAudit(deps.db, taskId).find(
       (row) => row.tool === "grande_pr_merge" && row.state === "FAILED" && /merged-but-local-stale/.test(row.reason ?? ""),
     );

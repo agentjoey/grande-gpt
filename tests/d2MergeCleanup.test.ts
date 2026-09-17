@@ -7,6 +7,7 @@ import { openDb } from "../src/db.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
 import { reconcileMergedTaskFromRefresh } from "../src/mergeReconcile.ts";
 import { saveRegistry } from "../src/registry.ts";
+import { recordTaskPrOpened, recordTaskPrMerged } from "../src/taskPrReceipt.ts";
 import { createTask, getTask } from "../src/tasks.ts";
 
 const roots: string[] = [];
@@ -43,10 +44,19 @@ describe("D2 post-merge cleanup safety", () => {
     git(worktree, "add", "tracked.txt");
     git(worktree, "-c", "user.name=GrandeGPT", "-c", "user.email=grande@example.com", "commit", "-q", "-m", "task");
     const head = git(worktree, "rev-parse", "HEAD");
+    git(canonical, "merge", "--ff-only", head);
 
     const db = openDb(layout);
     try {
       createTask(db, { taskId, repoId: "demo", branch, baseCommit: base, worktreePath: worktree, state: "READY" });
+      recordTaskPrOpened(db, {
+        taskId, prNumber: 1, prUrl: "https://github.com/example/demo/pull/1",
+        headSha: head, baseRef: "main", baseSha: base,
+      });
+      recordTaskPrMerged(db, {
+        taskId, prNumber: 1, prUrl: "https://github.com/example/demo/pull/1",
+        headSha: head, baseRef: "main", baseSha: base, mergeSha: head,
+      });
       writeFileSync(join(worktree, "human-uncommitted.txt"), "do not delete\n", "utf8");
       const result = reconcileMergedTaskFromRefresh(
         { db, layout, defaultRepoId: "demo" },
