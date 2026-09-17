@@ -58,14 +58,24 @@ export async function startTaskLifecycleReconciler(
     if (running || stopped) return;
     running = true;
     try {
-      const taskResult = await reconcile(db, layout);
-      const authorizationResult = reconcileAuthorizations(db);
-      options.onResult?.(phase, {
-        ...taskResult,
-        authorizationsExpired: authorizationResult.expired,
-      });
-    } catch (error) {
-      options.onError?.(phase, error);
+      let taskResult: TaskLifecycleRecoveryResult | undefined;
+      try {
+        taskResult = await reconcile(db, layout);
+      } catch (error) {
+        options.onError?.(phase, error);
+      }
+      // Task recovery failure must not suppress the independent approval-TTL sweep.
+      try {
+        const authorizationResult = reconcileAuthorizations(db);
+        if (taskResult) {
+          options.onResult?.(phase, {
+            ...taskResult,
+            authorizationsExpired: authorizationResult.expired,
+          });
+        }
+      } catch (error) {
+        options.onError?.(phase, error);
+      }
     } finally {
       running = false;
     }

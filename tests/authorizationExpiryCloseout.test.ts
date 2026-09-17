@@ -5,6 +5,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listAudit } from "../src/audit.ts";
+import { reconcileExpiredAuthorizations } from "../src/authorizationExpiry.ts";
 import { openDb } from "../src/db.ts";
 import {
   APPROVAL_TTL_MS,
@@ -16,6 +17,7 @@ import {
   type DeliveryAuthorizationBinding,
 } from "../src/deliveryAuthorization.ts";
 import { ensureLayout, loadLayout } from "../src/layout.ts";
+import { startTaskLifecycleReconciler } from "../src/taskLifecycleScheduler.ts";
 import { createTask } from "../src/tasks.ts";
 
 const NOW = 1_900_000_000_000;
@@ -180,4 +182,95 @@ describe("authorization expiry closeout", () => {
       await Promise.all(workers.map((worker) => worker.terminate()));
     }
   }, 15_000);
+
+  it.each(["startup", "periodic"] as const)(
+    "task recovery failure at %s does not skip durable authorization expiry",
+    async (failurePhase) => {
+      const old = existing("APPROVED");
+      const failure = new Error("task recovery unavailable");
+      let phase: "startup" | "periodic" = "startup";
+      let now = failurePhase === "startup" ? old.expiresAt : NOW + 3;
+      let periodic: (() => void) | undefined;
+      const errors: Array<{ phase: string; error: unknown }> = [];
+      const successfulPhases: string[] = [];
+      const controller = await startTaskLifecycleReconciler(db, loadLayout(), {
+        reconcile: async () => {
+          if (phase === failurePhase) throw failure;
+          return { creatingReady: 0, creatingClosed: 0, closingClosed: 0, unresolved: 0 };
+        },
+        reconcileAuthorizations: (connection) => reconcileExpiredAuthorizations(connection, now),
+        onError: (atPhase, error) => { errors.push({ phase: atPhase, error }); },
+        onResult: (atPhase) => { successfulPhases.push(atPhase); },
+        setIntervalFn: (callback) => {
+          periodic = callback;
+          return {} as ReturnType<typeof setInterval>;
+        },
+        clearIntervalFn: () => {},
+      });
+      try {
+        if (failurePhase === "periodic") {
+          expect(storedStatus(old.authorizationId)).toBe("APPROVED");
+          phase = "periodic";
+          now = old.expiresAt;
+          periodic!();
+          await Promise.resolve();
+        }
+        expect(storedStatus(old.authorizationId)).toBe("EXPIRED");
+        expect(activeAuthorizationForTask(db, TASK)).toBeUndefined();
+        expect(expiryAudits()).toHaveLength(1);
+        expect(expiryAudits()[0]).toMatchObject({ state: "SUCCEEDED", decision: "ALLOWED" });
+        expect(errors).toEqual([{ phase: failurePhase, error: failure }]);
+        expect(successfulPhases).not.toContain(failurePhase);
+      } finally {
+        controller.stop();
+      }
+    },
+  );
+
+  it("expiry audit failure leaves recovery running and allows the next periodic retry", async () => {
+    const old = existing("APPROVED");
+    db.exec(`
+      CREATE TRIGGER fail_scheduler_expiry_audit
+      BEFORE UPDATE OF state ON audit
+      WHEN NEW.tool='grande_authorization_expiry_reconcile' AND NEW.state='SUCCEEDED'
+      BEGIN
+        SELECT RAISE(ABORT, 'scheduler expiry audit failure');
+      END
+    `);
+    let recoveryCalls = 0;
+    let periodic: (() => void) | undefined;
+    const errors: unknown[] = [];
+    const results: Array<{ phase: string; expired: number }> = [];
+    const controller = await startTaskLifecycleReconciler(db, loadLayout(), {
+      reconcile: async () => {
+        recoveryCalls++;
+        return { creatingReady: 0, creatingClosed: 0, closingClosed: 0, unresolved: 0 };
+      },
+      reconcileAuthorizations: (connection) => reconcileExpiredAuthorizations(connection, old.expiresAt),
+      onError: (_phase, error) => { errors.push(error); },
+      onResult: (phase, result) => { results.push({ phase, expired: result.authorizationsExpired }); },
+      setIntervalFn: (callback) => {
+        periodic = callback;
+        return {} as ReturnType<typeof setInterval>;
+      },
+      clearIntervalFn: () => {},
+    });
+    try {
+      expect(recoveryCalls).toBe(1);
+      expect(errors).toHaveLength(1);
+      expect(String(errors[0])).toContain("scheduler expiry audit failure");
+      expect(storedStatus(old.authorizationId)).toBe("APPROVED");
+      expect(expiryAudits()).toHaveLength(0);
+      expect(results).toHaveLength(0);
+      db.exec("DROP TRIGGER fail_scheduler_expiry_audit");
+      periodic!();
+      await Promise.resolve();
+      expect(recoveryCalls).toBe(2);
+      expect(storedStatus(old.authorizationId)).toBe("EXPIRED");
+      expect(expiryAudits()).toHaveLength(1);
+      expect(results).toEqual([{ phase: "periodic", expired: 1 }]);
+    } finally {
+      controller.stop();
+    }
+  });
 });
