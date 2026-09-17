@@ -1,4 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
+import {
+  reconcileExpiredAuthorizations,
+  type AuthorizationExpiryReconciliationResult,
+} from "./authorizationExpiry.ts";
 import type { Layout } from "./layout.ts";
 import {
   reconcileTaskLifecycleWithRepoWriteLocks,
@@ -12,14 +16,23 @@ type ReconcileFn = (
   layout: Layout,
 ) => Promise<TaskLifecycleRecoveryResult>;
 
+type AuthorizationReconcileFn = (
+  db: DatabaseSync,
+) => AuthorizationExpiryReconciliationResult;
+
 type IntervalHandle = ReturnType<typeof setInterval>;
+
+export interface LifecycleReconciliationResult extends TaskLifecycleRecoveryResult {
+  authorizationsExpired: number;
+}
 
 export interface TaskLifecycleReconcilerOptions {
   intervalMs?: number;
   reconcile?: ReconcileFn;
+  reconcileAuthorizations?: AuthorizationReconcileFn;
   setIntervalFn?: (callback: () => void, ms: number) => IntervalHandle;
   clearIntervalFn?: (timer: IntervalHandle) => void;
-  onResult?: (phase: "startup" | "periodic", result: TaskLifecycleRecoveryResult) => void;
+  onResult?: (phase: "startup" | "periodic", result: LifecycleReconciliationResult) => void;
   onError?: (phase: "startup" | "periodic", error: unknown) => void;
 }
 
@@ -27,13 +40,14 @@ export interface TaskLifecycleReconcilerController {
   stop(): void;
 }
 
-/** Run one startup reconciliation, then repeat at a bounded fixed interval without overlap. */
+/** Run startup reconciliation, then repeat at a bounded fixed interval without overlap. */
 export async function startTaskLifecycleReconciler(
   db: DatabaseSync,
   layout: Layout,
   options: TaskLifecycleReconcilerOptions = {},
 ): Promise<TaskLifecycleReconcilerController> {
   const reconcile = options.reconcile ?? reconcileTaskLifecycleWithRepoWriteLocks;
+  const reconcileAuthorizations = options.reconcileAuthorizations ?? reconcileExpiredAuthorizations;
   const setIntervalFn = options.setIntervalFn ?? setInterval;
   const clearIntervalFn = options.clearIntervalFn ?? clearInterval;
   const intervalMs = options.intervalMs ?? DEFAULT_INTERVAL_MS;
@@ -44,8 +58,12 @@ export async function startTaskLifecycleReconciler(
     if (running || stopped) return;
     running = true;
     try {
-      const result = await reconcile(db, layout);
-      options.onResult?.(phase, result);
+      const taskResult = await reconcile(db, layout);
+      const authorizationResult = reconcileAuthorizations(db);
+      options.onResult?.(phase, {
+        ...taskResult,
+        authorizationsExpired: authorizationResult.expired,
+      });
     } catch (error) {
       options.onError?.(phase, error);
     } finally {

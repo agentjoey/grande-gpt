@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
+import { expireAuthorizationIfDue } from "./authorizationExpiry.ts";
 import { StateError } from "./errors.ts";
 
 /**
@@ -266,6 +267,12 @@ export function createAuthorization(
   const now = input.now ?? Date.now();
   if (binding.expiresAt <= now) {
     throw new StateError("AUTH_EXPIRED", "authorization proposal 创建时已过期（expired）。");
+  }
+  // Converge only this task before admission. The insert transaction below rechecks
+  // the active slot after any competing expiry, execution, or proposal creation.
+  const previous = activeAuthorizationForTask(db, input.taskId);
+  if (previous && (previous.status === "READY" || previous.status === "APPROVED") && previous.expiresAt <= now) {
+    expireAuthorizationIfDue(db, previous.authorizationId, now);
   }
   const digest = bindingDigestOf(binding);
   const authorizationId = `authz_${randomUUID()}`;
