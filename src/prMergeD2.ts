@@ -1,4 +1,5 @@
 import type { ToolDef, ToolDeps } from "./toolsCore.ts";
+import { reconcileClosedTask } from "./closedTaskReconcile.ts";
 import { readTaskPrReceipt, recordTaskPrMerged } from "./taskPrReceipt.ts";
 import { getTask } from "./tasks.ts";
 import {
@@ -12,8 +13,8 @@ const SHA_RE = /^[0-9a-f]{40}$/u;
 
 /**
  * Persist the exact merge milestone even when the base merge path already performed
- * safe cleanup and CLOSED the task before D2 gets control back. This is evidence-only:
- * the core wrapper is skipped for CLOSED tasks so cleanup/reconciliation cannot run twice.
+ * safe cleanup and CLOSED the task before D2 gets control back. Historical CLOSED tasks
+ * enter evidence-only reconciliation before any worktree-dependent base handler runs.
  */
 export function wrapPrMergeToolD2(
   deps: ToolDeps,
@@ -24,12 +25,14 @@ export function wrapPrMergeToolD2(
   return {
     ...core,
     handler: async (args) => {
+      const taskId = args.taskId as string;
+      const before = getTask(deps.db, taskId);
+      if (before?.state === "CLOSED") return reconcileClosedTask(deps, before, options);
       const response = await base.handler(args);
       const envelope = response.structuredContent as {
         ok?: unknown;
         data?: Record<string, unknown>;
       };
-      const taskId = args.taskId as string;
       const task = getTask(deps.db, taskId);
       if (envelope.ok === true && envelope.data?.merged === true && task?.state === "CLOSED") {
         const receipt = readTaskPrReceipt(deps.db, taskId);
