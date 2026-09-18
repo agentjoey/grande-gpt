@@ -71,9 +71,11 @@ export function normalizeTaskBrief(value: unknown): TaskBrief {
 
 export function saveTaskBrief(db: DatabaseSync, taskId: string, value: unknown): TaskBrief {
   const brief = normalizeTaskBrief(value);
+  // Monotonic revision prevents mixing brief chunks across same-millisecond updates.
   db.prepare(
     `INSERT INTO task_brief (taskId,briefJson,updatedAt) VALUES (?,?,?)
-     ON CONFLICT(taskId) DO UPDATE SET briefJson=excluded.briefJson, updatedAt=excluded.updatedAt`,
+     ON CONFLICT(taskId) DO UPDATE SET briefJson=excluded.briefJson,
+       updatedAt=MAX(task_brief.updatedAt+1,excluded.updatedAt)`,
   ).run(taskId, JSON.stringify(brief), Date.now());
   return brief;
 }

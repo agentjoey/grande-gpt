@@ -1,11 +1,10 @@
 import { lstatSync } from "node:fs";
 import type { DatabaseSync } from "node:sqlite";
-import { getAttestations } from "./attestation.ts";
 import { assertTaskBranch } from "./commit.ts";
 import { safeGit } from "./gitExec.ts";
-import { listJobs, TERMINAL } from "./jobs.ts";
 import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
 import { readTaskPrReceipt } from "./taskPrReceipt.ts";
+import { readTaskProgressEvidence } from "./taskProgressEvidence.ts";
 import type { TaskRow } from "./tasks.ts";
 import {
   compactTaskProgress as compactCoreTaskProgress,
@@ -78,14 +77,26 @@ function cleanupEligibility(
   return { eligible: false, reason: "缺少匹配当前 HEAD 的完整 durable completion/cleanup evidence" };
 }
 
-/** Read-only projection. Share actual observations with the core instead of assuming safe defaults. */
+/** Read-only projection. Share one constant-size evidence read and actual filesystem observations. */
 export function projectTaskProgress(db: DatabaseSync, task: TaskRow, options: TaskProgressOptions = {}): TaskProgress {
   let exists: boolean | undefined;
   let dirty: boolean | undefined;
+  let head = "";
+  let headError: unknown;
   try { exists = (options.worktreeExists ?? existingWorktree)(task.worktreePath); } catch { /* unknown, not removed */ }
+  if (exists === false) {
+    headError = new Error("task worktree is absent");
+  } else {
+    try { head = (options.readHead ?? ((path) => assertTaskBranch(path, task.branch)))(task.worktreePath); }
+    catch (error) { headError = error; }
+  }
+  const receipt = readTaskPrReceipt(db, task.taskId);
+  const evidence = options.evidence ?? readTaskProgressEvidence(db, task,
+    head || (task.state === "CLOSED" && exists === false ? receipt?.headSha ?? "" : ""));
   const core = projectCoreTaskProgress(db, task, {
     ...options,
-    readHead: options.readHead ?? ((path) => assertTaskBranch(path, task.branch)),
+    evidence,
+    readHead: () => { if (headError) throw headError; return head; },
     worktreeExists: () => exists !== false,
     workingTreeDirty: (path) => {
       dirty = options.workingTreeDirty
@@ -94,12 +105,11 @@ export function projectTaskProgress(db: DatabaseSync, task: TaskRow, options: Ta
       return dirty;
     },
   });
-  const hasLiveJob = listJobs(db, task.taskId).some((job) => !TERMINAL.has(job.state));
+  const hasLiveJob = evidence.hasRunningJob;
   const archived = core.completed && task.state === "CLOSED" && exists === false && !hasLiveJob;
   if (archived) {
     core.stages.code = { state: "unknown", detail: "worktree 已归档；不再读取或重新验证本地代码" };
-    const receipt = readTaskPrReceipt(db, task.taskId);
-    const attestation = getAttestations(db, task.taskId).find((row) => row.exitCode === 0 && row.commit === receipt?.headSha);
+    const attestation = evidence.attestation?.commit === receipt?.headSha ? evidence.attestation : null;
     core.stages.tests = attestation
       ? { state: "done", detail: `已归档 exact head 的历史 attestation (${attestation.profile})；非本次重跑` }
       : { state: "unknown", detail: "已归档；缺少 exact head 的历史验证证据，不补写 PASS" };

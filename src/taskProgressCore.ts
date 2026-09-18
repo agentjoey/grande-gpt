@@ -1,16 +1,15 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
-import { getAttestations } from "./attestation.ts";
-import { listAudit } from "./audit.ts";
 import { safeGit } from "./gitExec.ts";
 import { isHostVerificationApplicable } from "./hostVerificationApplicability.ts";
 import type { HostVerifierFailureClass } from "./hostVerifierFailure.ts";
 import type { HostVerificationLevel } from "./hostVerification.ts";
-import { listJobs, TERMINAL } from "./jobs.ts";
+import { getJob, TERMINAL } from "./jobs.ts";
 import { inspectCurrentHostVerification, type CurrentHostVerification } from "./prHostVerification.ts";
 import { getExplicitDeliveryTarget } from "./taskDeliveryTarget.ts";
 import { readTaskPrReceipt } from "./taskPrReceipt.ts";
+import { readTaskProgressEvidence, type TaskProgressEvidence } from "./taskProgressEvidence.ts";
 import type { TaskRow } from "./tasks.ts";
 
 export type ProgressState = "done" | "pending" | "running" | "blocked" | "unknown" | "not-applicable";
@@ -111,6 +110,8 @@ export interface TaskProgressOptions {
   worktreeExists?: (worktreePath: string) => boolean;
   hostVerificationMode?: HostVerificationMode;
   inspectHostVerification?: (db: DatabaseSync, task: TaskRow, head: string) => CurrentHostVerification;
+  /** Internal request-local evidence, never accepted from a tool argument or mutation gate. */
+  evidence?: TaskProgressEvidence;
   now?: () => number;
   stallAfterMs?: number;
 }
@@ -182,8 +183,8 @@ function stageFromJob(
   role: "deploy" | "verify",
 ): ProgressStage {
   if (!jobId) return { state: "pending", detail: `${role} 尚未启动` };
-  const job = listJobs(db, taskId).find((candidate) => candidate.jobId === jobId);
-  if (!job) return { state: "blocked", detail: `${role} receipt 引用了不存在的 job ${jobId}` };
+  const job = getJob(db, jobId);
+  if (!job || job.taskId !== taskId) return { state: "blocked", detail: `${role} receipt 引用了不存在的 job ${jobId}` };
   if (!TERMINAL.has(job.state)) return { state: "running", detail: `${role} job ${jobId} 仍在运行` };
   if (job.state === "passed" && job.exitCode === 0) {
     return { state: "pending", detail: `${role} job 已通过，等待 grande_deploy_verify 固化 receipt` };
@@ -442,21 +443,6 @@ function hostBlocker(host: HostVerificationProgress, taskId: string): { blocker:
   return null;
 }
 
-function latestMeaningfulProgressAt(
-  task: TaskRow,
-  jobs: ReturnType<typeof listJobs>,
-  audits: ReturnType<typeof listAudit>,
-): number {
-  let latest = task.updatedAt;
-  for (const job of jobs) {
-    latest = Math.max(latest, job.startedAt, job.endedAt ?? job.startedAt);
-  }
-  for (const audit of audits) {
-    if (audit.state === "SUCCEEDED") latest = Math.max(latest, audit.updatedAt);
-  }
-  return latest;
-}
-
 /**
  * S10/D3: project daily lifecycle + host-verification status only from existing trusted
  * Task/job/audit/attestation/receipt state. No database writes or new lifecycle state machine.
@@ -483,11 +469,9 @@ export function projectTaskProgress(
     // status projection 不应把单个损坏 worktree 变成整个 task_status 的异常；用 blocked 信号表达。
   }
 
-  const attestations = getAttestations(db, task.taskId);
-  const headAttested = head.length > 0 && attestations.some((candidate) => candidate.commit === head);
-  const jobs = listJobs(db, task.taskId);
-  const latestJob = jobs[0];
-  const audits = listAudit(db, task.taskId, 500);
+  const evidence = options.evidence ?? readTaskProgressEvidence(db, task, head);
+  const headAttested = head.length > 0 && evidence.attestation?.commit === head;
+  const latestJob = evidence.latestJob;
   const prReceipt = readTaskPrReceipt(db, task.taskId);
   const durablePrOpened = prReceipt !== null;
   const durableMerged = prReceipt?.mergeSha !== null && prReceipt?.mergeSha !== undefined;
@@ -531,8 +515,7 @@ export function projectTaskProgress(
   if (dirty) {
     tests = { state: "pending", detail: "worktree 有未提交变化；当前 HEAD 的旧 attestation 不能覆盖这些改动" };
   } else if (headAttested) {
-    const attestation = attestations.find((candidate) => candidate.commit === head)!;
-    tests = { state: "done", detail: `当前 HEAD 有 attestation (${attestation.profile})` };
+    tests = { state: "done", detail: `当前 HEAD 有 attestation (${evidence.attestation!.profile})` };
   } else if (latestJob && !TERMINAL.has(latestJob.state)) {
     tests = { state: "running", detail: `最近 job ${latestJob.jobId}/${latestJob.profile} 仍在运行` };
   } else if (latestJob && latestJob.state !== "passed") {
@@ -660,15 +643,14 @@ export function projectTaskProgress(
   else if (DEPLOY_UNSETTLED.has(verify.state)) phase = "verify";
   else phase = "completed";
 
-  const progressAt = Math.max(latestMeaningfulProgressAt(task, jobs, audits), prReceipt?.updatedAt ?? 0);
+  const progressAt = Math.max(evidence.progressAt, prReceipt?.updatedAt ?? 0);
   const deliveryAuthorization = projectDeliveryAuthorization(db, task.taskId);
   const now = options.now?.() ?? Date.now();
   const stallAfterMs = options.stallAfterMs ?? DEFAULT_TASK_STALL_AFTER_MS;
   const inactiveForMs = Math.max(0, now - progressAt);
-  const hasRunningJob = jobs.some((job) => !TERMINAL.has(job.state));
   const stalled = task.state === "READY"
     && blocker === null
-    && !hasRunningJob
+    && !evidence.hasRunningJob
     && !completed
     && !cleanupRequired
     && inactiveForMs >= stallAfterMs;

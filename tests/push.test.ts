@@ -224,13 +224,13 @@ describe("grande_push", () => {
     expect(row?.pathsTouched).toContain(worktree);
   });
 
-  it("AC-S3-12：grande_push 打开网络面，task_open fetch 计入后有 14 个本地工具禁网", () => {
+  it("AC-S3-12：grande_push 打开网络面，新增本地取消后有 15 个工具禁网", () => {
     const tools = buildTools(deps);
     expect(tools.find((candidate) => candidate.name === "grande_push")?.annotations).toEqual({
       readOnlyHint: false,
       destructiveHint: false,
       openWorldHint: true,
     });
-    expect(tools.filter((candidate) => candidate.annotations.openWorldHint === false)).toHaveLength(14);
+    expect(tools.filter((candidate) => candidate.annotations.openWorldHint === false)).toHaveLength(15);
   });
 });

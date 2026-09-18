@@ -92,7 +92,7 @@ export const MCP_WRITE_TOOLS = [
   "grande_task_open", "grande_repo_edit", "grande_run", "grande_task_close",
   "grande_rollback", "grande_commit", "grande_sync_base", "grande_push", "grande_pr_open",
   "grande_capability_invoke", "grande_pr_merge", "grande_deploy", "grande_deploy_verify",
-  "grande_deploy_rollback", "grande_repo_add_apply",
+  "grande_deploy_rollback", "grande_repo_add_apply", "grande_job_cancel",
 ] as const;
 
 /** 控制台经 Gateway 执行的操作（方案 A）。它们同样进账本。 */
@@ -103,19 +103,14 @@ export const CONSOLE_TOOLS = [
 export type AuditedTool = (typeof MCP_WRITE_TOOLS)[number] | (typeof CONSOLE_TOOLS)[number];
 
 // ─────────────────────────────────────────────────────────────────────────
-// 公开 toolset epoch（Task 7 closeout）
+// 公开 toolset epoch
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
- * 正式 public toolset epoch 的**唯一** source of truth。
- *
- * Minimal V2 delivery 的唯一 intentional public contract delta 是
- * `grande_task_open` 的可选 `deliveryTarget` 字段；Task 7 closeout 把它正式
- * 结算为 epoch 3。toolsDigest 只覆盖 name+schema+annotations，不含 epoch，
- * 因此 digest 不因本次 bump 变化。
- *
- * `src/toolsetIdentity.ts` 的 `TOOLSET_EPOCH` 直接等于本常量（单向引用，
- * contract.ts 保持零 import）；gatewayCli、src/tools.ts、server
- * （withToolsetIdentity）与 selfcheck 读到的是同一个值，不存在第二份。
+ * Public toolset epoch has one source of truth. Batch 2 publishes status pagination
+ * and the narrowly bound grande_job_cancel together as epoch 4 (26 tools).
+ * Job states and SQLite schema are unchanged. Deployment/approval surfaces are unchanged.
+ * The new digest is computed from actual name/schema/annotations, never inferred from epoch.
+ * Activation and client refresh are separate release gates, not consequences of a commit.
  */
-export const PUBLIC_TOOLSET_EPOCH = 3;
+export const PUBLIC_TOOLSET_EPOCH = 4;

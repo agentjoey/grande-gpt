@@ -21,8 +21,7 @@ const base = {
   httpStatus: 200,
   bytes: 11326,
   gatewayBuild: "build-test-abc",
-  // Task 7 closeout：正式 epoch 3 / stabilized digest（grande_task_open 可选
-  // deliveryTarget 是本 feature 唯一 public contract delta，digest 已含它）。
+  // Historical epoch-3 wire evidence remains unchanged when the local candidate advances.
   toolsetEpoch: 3,
   toolsCount: 4,
   toolsDigest: "sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496",
@@ -209,18 +208,13 @@ describe("失败路径必须给出可照做的下一步", () => {
   });
 });
 
-/**
- * Task 7 closeout：selfcheck/contract 面的正式身份。
- *
- * RED 锚点：当前 src/toolsetIdentity.ts 的 TOOLSET_EPOCH 仍是 2；closeout 要求
- * 自检报告（与真实 server identity 同源）进入正式 epoch 3。
- */
-describe("Task 7 closeout：公开契约身份", () => {
-  it("自检报告的正式 toolset epoch 是 3（deliveryTarget 是本 feature 唯一 public contract delta）", () => {
-    expect(TOOLSET_EPOCH).toBe(3);
+/** Current candidate identity is distinct from the historical wire fixtures above. */
+describe("Batch 2：公开契约身份", () => {
+  it("候选 epoch 是 4；status 分页和 job cancel 集中发布", () => {
+    expect(TOOLSET_EPOCH).toBe(4);
   });
 
-  it("渲染输出报告正式 epoch/digest，grande_task_open 的 deliveryTarget 保持可选（不进 requiredParams）", () => {
+  it("渲染历史 epoch/digest，不用本机版本覆盖远端身份；deliveryTarget 保持可选", () => {
     const t = text(base);
     expect(t).toContain("toolsetEpoch  3");
     expect(t).toContain("sha256:d5243888");

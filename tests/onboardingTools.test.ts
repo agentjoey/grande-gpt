@@ -84,10 +84,10 @@ describe("ChatGPT repository onboarding tools", () => {
     expect(Object.keys(apply.inputSchema.properties).sort()).toEqual(["proposalDigest", "repoId"]);
     expect(apply.annotations).toEqual({ readOnlyHint: false, destructiveHint: false, openWorldHint: false });
 
-    expect(tools).toHaveLength(25);
-    expect(TOOLSET_EPOCH).toBe(3);
+    expect(tools).toHaveLength(26);
+    expect(TOOLSET_EPOCH).toBe(4);
     const identity = toolsetIdentity(tools, "test-build");
-    expect(identity.toolsCount).toBe(25);
+    expect(identity.toolsCount).toBe(26);
     expect(identity.toolsDigest).toMatch(/^sha256:[0-9a-f]{64}$/);
     expect(identity.toolsDigest).not.toBe("sha256:55b20104f7a00770cd6ea0f33ec948fcabd602ce397ec534f5a7699e912e287a");
   });
@@ -227,8 +227,8 @@ describe("ChatGPT repository onboarding tools", () => {
     const proposal = await call("grande_repo_add_propose", { repoId: "fresh" });
     expect(proposal.ok).toBe(true);
     expect(proposal.data.readyToRegister).toBe(false);
-    expect(proposal.data.git.detached).toBe(true);
     const reposBeforeApply = fileOrMissing(layout.reposConfig);
+    expect(proposal.data.git.detached).toBe(true);
 
     const applied = await call("grande_repo_add_apply", {
       repoId: "fresh",

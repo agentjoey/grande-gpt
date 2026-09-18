@@ -9,6 +9,7 @@ import { toToolError, redact, StateError } from "./errors.ts";
 import { addFlowSimplification } from "./flowSimplification.ts";
 import { loadGuidance } from "./guidance.ts";
 import { projectHostVerifierOperationalStatus } from "./hostVerifierStatus.ts";
+import { createJobCancellationTool } from "./jobCancellationTool.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
 import { addOnboardingTools } from "./onboardingTools.ts";
 import { createPrMergeTool, createPrStatusTool, type PrLifecycleOptions } from "./prLifecycle.ts";
@@ -19,6 +20,7 @@ import { assertDiskHeadroom } from "./resourcePolicy.ts";
 import { withStatusReadScope, withoutStatusReads } from "./statusReadScope.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
 import { addTaskLifecycleCrashRecovery } from "./taskLifecycleToolWiring.ts";
+import { createTaskStatusTool } from "./taskStatus.ts";
 import { getTask } from "./tasks.ts";
 import { stableToolDefinitions, toolsetIdentity } from "./toolsetIdentity.ts";
 import {
@@ -100,7 +102,7 @@ function lockRunPreparation(deps: ToolDeps, tools: ToolDef[]): void {
 
 /**
  * 生产工具列表的唯一组装点。Task 始终是中心：
- * core → lifecycle crash recovery → local loop → Phase 8 flow projection → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
+ * core → lifecycle crash recovery → local loop → Phase 8 flow projection → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → bounded status/cancel → S9 onboarding → S7 deploy → S5 capability → arg check。
  *
  * S7 的 handler 运行时需要复用 S5 capability tools，而 S5 的 native discovery 又应该
  * 看见 S7 deployment tools。这里用一个共享的 `deploymentDeps` 数组解决这个接线顺序：
@@ -190,7 +192,12 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
   const githubBase = [...simplified, createPrStatusTool(deps), createPrMergeTool(deps, options)];
   const github = addPrMergeD2Reconciliation(deps, githubBase);
   const withBrief = addTaskBriefSupport(deps, github);
-  const withOnboarding = addOnboardingTools(deps, withBrief);
+  // Replace the eager status chain instead of running it and truncating its result.
+  // Cancellation is a distinct write tool; result/status remain strictly read-only.
+  const withStatus = withBrief.map((tool) => tool.name === "grande_task_status"
+    ? createTaskStatusTool(deps, options.hostVerificationMode) : tool);
+  withStatus.push(createJobCancellationTool(deps));
+  const withOnboarding = addOnboardingTools(deps, withStatus);
 
   const deploymentDeps = [...withOnboarding];
   const withDeployment = addDeploymentTools(deps, deploymentDeps, options.deployment);
@@ -215,8 +222,8 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
  * capability：invoke 后直接 DONE）。对 repoId=grande-gpt，这一步之前必须存在
  * durable activation receipt/readback（activationReceipt.ts 的单例表，由
  * grande activate 的 trusted read probe 落账）；缺失时在 inner handler【之前】
- * fail closed——authorization 保持 EXECUTING、verify 证据不落账。补齐 receipt
- * 后重入同一 durable evidence 可正常 DONE；verifyComplete 的重入观察始终放行。
+ * fail closed——authorization 保持 EXECUTING、verify 证据不落账。
+ * 后补齐 receipt 后重入同一 durable evidence 可正常 DONE；verifyComplete 的重入观察始终放行。
  * 其他 repo 完全不经此门禁。
  */
 function withSelfRepoActivationGate(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {

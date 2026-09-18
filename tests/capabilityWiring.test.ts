@@ -46,11 +46,12 @@ describe("Phase 4 capability wiring", () => {
     expect(names).toContain("grande_deploy_rollback");
     expect(names).toContain("grande_repo_add_propose");
     expect(names).toContain("grande_repo_add_apply");
+    expect(names).toContain("grande_job_cancel");
     expect(names).not.toContain("grande_capability_list");
     expect(names).not.toContain("grande_capability_invoke");
   });
 
-  it("selfhost-safe manifest 精确钉住 25 tools / 10 open-world / 5 destructive", () => {
+  it("selfhost-safe manifest 精确钉住 26 tools / 11 open-world / 6 destructive", () => {
     const tools = buildTools(deps);
     const names = tools.map((tool) => tool.name).sort();
     expect(names).toEqual([
@@ -62,6 +63,7 @@ describe("Phase 4 capability wiring", () => {
       "grande_deploy_rollback",
       "grande_deploy_verify",
       "grande_diff",
+      "grande_job_cancel",
       "grande_pr_merge",
       "grande_pr_open",
       "grande_pr_status",
@@ -98,6 +100,7 @@ describe("Phase 4 capability wiring", () => {
       "grande_capability_invoke",
       "grande_deploy",
       "grande_deploy_rollback",
+      "grande_job_cancel",
       "grande_pr_merge",
       "grande_task_close",
     ]);

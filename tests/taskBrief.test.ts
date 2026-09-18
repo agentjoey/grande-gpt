@@ -84,7 +84,7 @@ describe("TaskBrief", () => {
     expect(getTaskBrief(deps.db, "task_brief01")).toEqual(savedBrief);
   });
 
-  it("grande_task_open 接受 brief，grande_task_status 在后续调用中恢复同一份 plan/AC", async () => {
+  it("grande_task_open 接受 brief，后续显式 brief view 可恢复同一份 plan/AC", async () => {
     const tools = buildTools(deps);
     const open = tools.find((tool) => tool.name === "grande_task_open")!;
     const status = tools.find((tool) => tool.name === "grande_task_status")!;
@@ -100,10 +100,17 @@ describe("TaskBrief", () => {
 
     const statusEnvelope = (await status.handler({ taskId: "task_s4brief01" })).structuredContent as {
       ok: boolean;
-      data?: { brief?: unknown };
+      data?: { brief?: unknown; briefAvailable?: boolean };
     };
     expect(statusEnvelope.ok).toBe(true);
-    expect(statusEnvelope.data?.brief).toEqual(normalizeTaskBrief(BRIEF));
+    expect(statusEnvelope.data?.brief).toBeUndefined();
+    expect(statusEnvelope.data?.briefAvailable).toBe(true);
+    const briefEnvelope = (await status.handler({ taskId: "task_s4brief01", view: "brief" })).structuredContent as {
+      ok: boolean; nextCursor: string | null; data: { content: string };
+    };
+    expect(briefEnvelope.ok).toBe(true);
+    expect(briefEnvelope.nextCursor).toBeNull();
+    expect(JSON.parse(briefEnvelope.data.content)).toEqual(normalizeTaskBrief(BRIEF));
   });
 
   it("invalid brief 在任何 task/worktree 副作用之前被拒绝", async () => {

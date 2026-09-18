@@ -1,12 +1,13 @@
 import type { DatabaseSync } from "node:sqlite";
 import { readHostVerifierFailureClass, type HostVerifierFailureClass } from "./hostVerifierFailure.ts";
-import { listJobs, TERMINAL, type JobRow } from "./jobs.ts";
+import { getJob, TERMINAL, type JobRow } from "./jobs.ts";
 import { HOST_VERIFIER_POLICY_VERSION } from "./hostVerifierSandbox.ts";
 
 export type HostVerifierOperationalState = "idle" | "running" | "blocked";
 export type HostVerifierOperationalResult =
   | "running"
   | "passed"
+  | "cancelled"
   | "candidate_failed"
   | "infrastructure_failed"
   | "integrity_failed";
@@ -44,64 +45,39 @@ function summarySha(job: JobRow): string | null {
 }
 
 function resultFor(job: JobRow): ClassifiedResult {
-  if (!TERMINAL.has(job.state)) {
-    return { result: "running", failureClass: null, reason: null };
-  }
-
+  if (!TERMINAL.has(job.state)) return { result: "running", failureClass: null, reason: null };
+  if (job.state === "cancelled") return { result: "cancelled", failureClass: null, reason: "cancellation_requested" };
   const summary = job.summary ?? {};
   if (job.state === "passed" && summary.kind === "host-verifier-v2") {
     return { result: "passed", failureClass: null, reason: null };
   }
   if (summary.kind === "host-verifier-v2-stale") {
-    return {
-      result: "integrity_failed",
-      failureClass: "integrity",
-      reason: typeof summary.staleReason === "string" ? summary.staleReason : "sha_mismatch",
-    };
+    return { result: "integrity_failed", failureClass: "integrity",
+      reason: typeof summary.staleReason === "string" ? summary.staleReason : "sha_mismatch" };
   }
-
   const explicit = readHostVerifierFailureClass(summary.failureClass);
   if (explicit) {
-    return {
-      result: `${explicit}_failed` as Exclude<HostVerifierOperationalResult, "running" | "passed">,
-      failureClass: explicit,
-      reason: typeof summary.reason === "string" ? summary.reason : `${explicit}_failure`,
-    };
+    return { result: `${explicit}_failed`, failureClass: explicit,
+      reason: typeof summary.reason === "string" ? summary.reason : `${explicit}_failure` };
   }
   if (summary.testFailure === true && summary.infrastructureFailure !== true) {
     return { result: "candidate_failed", failureClass: "candidate", reason: "test_failed" };
   }
   if (summary.infrastructureFailure === true || job.state === "timeout" || job.state === "killed") {
-    return {
-      result: "infrastructure_failed",
-      failureClass: "infrastructure",
-      reason: typeof summary.reason === "string" ? summary.reason : job.state === "timeout" ? "timeout" : "infrastructure_failure",
-    };
+    return { result: "infrastructure_failed", failureClass: "infrastructure",
+      reason: typeof summary.reason === "string" ? summary.reason : job.state === "timeout" ? "timeout" : "infrastructure_failure" };
   }
-
-  // A terminal host-verifier row that is not a trusted V2 pass and cannot be
-  // classified as a known candidate/infra failure is an integrity signal. Do
-  // not guess it into a retryable bucket.
   return { result: "integrity_failed", failureClass: "integrity", reason: "unrecognized_verifier_result" };
 }
 
 function durationMs(job: JobRow): number | null {
-  if (job.endedAt === null) return null;
-  return Math.max(0, job.endedAt - job.startedAt);
+  return job.endedAt === null ? null : Math.max(0, job.endedAt - job.startedAt);
 }
 
-function consecutiveInfrastructureFailures(jobs: readonly JobRow[], sha: string | null): number {
-  if (!sha) return 0;
-  let count = 0;
-  for (const job of jobs) {
-    if (summarySha(job) !== sha) continue;
-    const classified = resultFor(job);
-    if (classified.failureClass !== "infrastructure") break;
-    count += 1;
-  }
-  return count;
-}
+const COMMIT = "CASE WHEN json_valid(summary) THEN json_extract(summary,'$.commit') ELSE NULL END";
+const KIND = "CASE WHEN json_valid(summary) THEN json_extract(summary,'$.kind') ELSE NULL END";
 
+/** Constant-size latest/current observations. Never materialize every repository job for a status page. */
 export function projectHostVerifierOperationalStatus(
   db: DatabaseSync,
   options: {
@@ -111,34 +87,41 @@ export function projectHostVerifierOperationalStatus(
     currentTaskId?: string | null;
   },
 ): HostVerifierOperationalStatus {
-  const jobs = listJobs(db).filter((job) => job.profile === "host-verifier");
-  const latest = jobs[0] ?? null;
+  const fetched = new Map<string, JobRow>();
+  const select = (condition: string, parameters: string[] = [], limit = 1): JobRow[] => {
+    const rows = db.prepare(`SELECT jobId FROM job WHERE profile='host-verifier' AND (${condition})
+      ORDER BY startedAt DESC,rowid DESC LIMIT ?`).all(...parameters, limit) as { jobId: string }[];
+    return rows.map(({ jobId }) => {
+      let row = fetched.get(jobId);
+      if (!row) { row = getJob(db, jobId)!; fetched.set(jobId, row); }
+      return row;
+    });
+  };
+  const latest = select("1")[0] ?? null;
   const latestClassified = latest ? resultFor(latest) : null;
-  const active = jobs.find((job) => !TERMINAL.has(job.state)) ?? null;
-  const success = jobs.find((job) => resultFor(job).result === "passed") ?? null;
-  const failure = jobs.find((job) => resultFor(job).failureClass !== null) ?? null;
+  const active = select("state NOT IN ('passed','failed','timeout','killed','cancelled')")[0] ?? null;
+  const success = select(`state='passed' AND ${KIND}='host-verifier-v2'`)[0] ?? null;
+  const failure = select(`state IN ('passed','failed','timeout','killed') AND NOT (state='passed' AND COALESCE(${KIND},'')='host-verifier-v2')`)[0] ?? null;
   const failureClassified = failure ? resultFor(failure) : null;
   const latestSha = latest ? summarySha(latest) : null;
-  const infraFailures = latestClassified?.failureClass === "infrastructure"
-    ? consecutiveInfrastructureFailures(jobs, latestSha)
-    : 0;
-
+  // The retry policy stops at two failures; older history cannot change that decision.
+  let infraFailures = 0;
+  if (latestSha && latestClassified?.failureClass === "infrastructure") {
+    for (const job of select(`${COMMIT}=?`, [latestSha], 2)) {
+      if (resultFor(job).failureClass !== "infrastructure") break;
+      infraFailures++;
+    }
+  }
   let state: HostVerifierOperationalState = "idle";
   if (active) state = "running";
-  else if (
-    latestClassified?.failureClass === "candidate"
-    || latestClassified?.failureClass === "integrity"
-    || infraFailures >= 2
-  ) state = "blocked";
-
+  else if (latestClassified?.failureClass === "candidate" || latestClassified?.failureClass === "integrity" || infraFailures >= 2) {
+    state = "blocked";
+  }
   const currentSha = options.currentSha ?? null;
-  const current = currentSha === null
-    ? null
-    : jobs.find((job) => (
-        summarySha(job) === currentSha
-        && (options.currentTaskId == null || job.taskId === options.currentTaskId)
-      )) ?? null;
-
+  const current = currentSha === null ? null : select(
+    `${COMMIT}=?${options.currentTaskId == null ? "" : " AND taskId=?"}`,
+    options.currentTaskId == null ? [currentSha] : [currentSha, options.currentTaskId],
+  )[0] ?? null;
   return {
     mode: options.mode,
     enabled: options.mode === "auto",
