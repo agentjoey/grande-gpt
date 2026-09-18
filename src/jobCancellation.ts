@@ -66,7 +66,12 @@ export interface JobCancellationResult {
 }
 
 /** Atomically record a cancellation request before notifying its actual owning supervisor. */
-export function requestJobCancellation(db: DatabaseSync, taskId: string, jobId: string): JobCancellationResult {
+export function requestJobCancellation(
+  db: DatabaseSync,
+  taskId: string,
+  jobId: string,
+  options: { auditTool?: "grande_job_cancel" | "console_kill_job" } = {},
+): JobCancellationResult {
   if (!getTask(db, taskId)) throw new StateError("TASK_NOT_FOUND", "取消请求的 task 不存在。");
   let live: LiveControl | undefined;
   let result: JobCancellationResult;

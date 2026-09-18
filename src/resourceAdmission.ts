@@ -7,7 +7,7 @@ import { assertDiskHeadroom, loadResourcePolicy } from "./resourcePolicy.ts";
 import { getTaskCloseIntent } from "./taskCloseIntent.ts";
 import { getTask } from "./tasks.ts";
 
-export type ManagedJobKind = "sandbox" | "dependency-bootstrap" | "dependency-cache-materialize" | "host-verifier";
+export type ManagedJobKind = "sandbox" | "dependency-bootstrap" | "dependency-cache-materialize" | "host-verifier" | "deployment-host";
 const OWNER_INSTANCE = randomUUID();
 
 /** Reserve the existing job row atomically. Preparing jobs consume capacity before any spawn/copy. */
