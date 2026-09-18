@@ -16,6 +16,7 @@ import { addPrMergeD2Reconciliation } from "./prMergeD2.ts";
 import { registeredIds } from "./registry.ts";
 import { withRepoWriteLock } from "./repoWriteLock.ts";
 import { assertDiskHeadroom } from "./resourcePolicy.ts";
+import { withStatusReadScope, withoutStatusReads } from "./statusReadScope.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
 import { addTaskLifecycleCrashRecovery } from "./taskLifecycleToolWiring.ts";
 import { getTask } from "./tasks.ts";
@@ -269,7 +270,7 @@ function withToolsetIdentity(
   if (!status) return tools;
 
   const inner = status.handler;
-  status.handler = async (args) => {
+  status.handler = async (args) => withStatusReadScope(async () => {
     const response = await inner(args);
     const envelope = response.structuredContent as { ok?: unknown; data?: Record<string, unknown> };
     if (envelope.ok === true && envelope.data) {
@@ -287,7 +288,7 @@ function withToolsetIdentity(
       });
     }
     return response;
-  };
+  });
   return tools;
 }
 
@@ -308,7 +309,7 @@ function withArgCheck(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
           }),
         };
       }
-      return inner(args);
+      return tool.name === "grande_task_status" ? inner(args) : withoutStatusReads(() => inner(args));
     };
   }
   return tools;
