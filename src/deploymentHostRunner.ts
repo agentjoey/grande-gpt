@@ -6,10 +6,11 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Layout } from "./layout.ts";
 import { readProfileDeliveryEvidence } from "./deliveryEvidence.ts";
 import { StateError } from "./errors.ts";
-import { createJob, finishJob, type JobState } from "./jobs.ts";
+import { finishJob, setRunningJobPgid, type JobState } from "./jobs.ts";
 import { assertTaskId, resolveRepoPath } from "./paths.ts";
 import { getDeploymentProfile } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
+import { markManagedJobLaunching, reserveManagedJob } from "./resourceAdmission.ts";
 import { defaultExecRoots } from "./sandbox.ts";
 
 export class DeploymentHostRunnerError extends Error {
@@ -195,101 +196,108 @@ export function startDeploymentHostJob(
     resolveRepoPath(deps.layout, args.repoId, registeredIds(deps.layout)),
   );
   const jobId = `job_${randomUUID()}`;
+
+  reserveManagedJob(deps.db, deps.layout, {
+    jobId,
+    taskId: args.taskId,
+    profile: profile.name,
+    argv: [...profile.argv],
+    kind: "deployment-host",
+  }, [canonicalRepo]);
+
   const artifactDir = join(deps.layout.artifactsDir, args.taskId, jobId);
   const artifactPath = join(artifactDir, "output.log");
-  // 受控证据通道：每个 job 一个固定路径，只有 deployment-host 执行会注入该 env。
-  // 证据只从这个有界 JSON 文件读取，stdout/stderr 永远不作为证据来源。
   const evidencePath = join(artifactDir, "delivery-evidence.json");
-  mkdirSync(artifactDir, { recursive: true });
-
-  const env: NodeJS.ProcessEnv = {
-    PATH: defaultExecRoots().join(":"),
-    HOME: process.env.HOME ?? dirname(deps.layout.controlRoot),
-    LANG: process.env.LANG ?? "en_US.UTF-8",
-    TMPDIR: process.env.TMPDIR ?? "/tmp",
-    GRANDE_WORKSPACE: deps.layout.workspaceRoot,
-    GRANDE_CONTROL: deps.layout.controlRoot,
-    GRANDE_DELIVERY_EVIDENCE_FILE: evidencePath,
-  };
-
-  let pgid: number | null = null;
-  const run = runHostProcess({
-    argv: profile.argv,
-    cwd: canonicalRepo,
-    env,
-    timeoutMs: profile.timeoutSeconds * 1000,
-    maxOutputBytes: profile.maxOutputBytes,
-    maxRssMb: profile.maxRssMb,
-    onSpawn: (pid) => { pgid = pid; },
-  });
-
-  const settled = run
-    .then((result) => {
-      safeWrite(artifactPath, `${result.stdout}\n--- stderr ---\n${result.stderr}\n`);
-      const state: Exclude<JobState, "running"> =
-        result.killedBy === "timeout" ? "timeout"
-        : result.killedBy === "rss" ? "killed"
-        : result.exitCode === 0 ? "passed"
-        : "failed";
-      let evidenceField: { evidence: unknown } | { evidenceError: { code: string; message: string } };
-      try {
-        evidenceField = { evidence: readProfileDeliveryEvidence(evidencePath) };
-      } catch (error) {
-        evidenceField = {
-          evidenceError: error instanceof StateError
-            ? { code: error.code, message: error.message }
-            : { code: "EVIDENCE_INVALID", message: (error as Error).message },
-        };
-      }
-      safeFinish(deps.db, jobId, {
-        state,
-        exitCode: result.exitCode,
-        artifactPath,
-        summary: {
-          execution: "deployment-host",
-          truncated: result.truncated,
-          killedBy: result.killedBy,
-          durationMs: result.durationMs,
-          peakRssMb: result.peakRssMb,
-          ...evidenceField,
-        },
-      });
-    })
-    .catch((error: unknown) => {
-      safeWrite(artifactPath, `deployment-host runner 内部错误：${(error as Error).message}\n`);
-      safeFinish(deps.db, jobId, {
-        state: "killed",
-        exitCode: null,
-        artifactPath,
-        summary: { execution: "deployment-host", error: (error as Error).message },
-      });
-    })
-    .finally(() => {
-      inFlight.delete(jobId);
-    });
 
   try {
-    createJob(deps.db, {
-      jobId,
-      taskId: args.taskId,
-      profile: profile.name,
-      argv: [...profile.argv],
-      pgid,
+    markManagedJobLaunching(deps.db, jobId);
+    mkdirSync(artifactDir, { recursive: true });
+
+    const env: NodeJS.ProcessEnv = {
+      PATH: defaultExecRoots().join(":"),
+      HOME: process.env.HOME ?? dirname(deps.layout.controlRoot),
+      LANG: process.env.LANG ?? "en_US.UTF-8",
+      TMPDIR: process.env.TMPDIR ?? "/tmp",
+      GRANDE_WORKSPACE: deps.layout.workspaceRoot,
+      GRANDE_CONTROL: deps.layout.controlRoot,
+      GRANDE_DELIVERY_EVIDENCE_FILE: evidencePath,
+    };
+
+    const run = runHostProcess({
+      argv: profile.argv,
+      cwd: canonicalRepo,
+      env,
+      timeoutMs: profile.timeoutSeconds * 1000,
+      maxOutputBytes: profile.maxOutputBytes,
+      maxRssMb: profile.maxRssMb,
+      onSpawn: (pid) => {
+        try {
+          if (!setRunningJobPgid(deps.db, jobId, pid)) {
+            throw new StateError("STALE_STATE", "deployment-host reservation lost before pgid persistence");
+          }
+        } catch (error) {
+          try { process.kill(-pid, "SIGKILL"); } catch { /* already exited */ }
+          throw error;
+        }
+      },
     });
+
+    const settled = run
+      .then((result) => {
+        safeWrite(artifactPath, `${result.stdout}\n--- stderr ---\n${result.stderr}\n`);
+        const state: Exclude<JobState, "running"> =
+          result.killedBy === "timeout" ? "timeout"
+          : result.killedBy === "rss" ? "killed"
+          : result.exitCode === 0 ? "passed"
+          : "failed";
+        let evidenceField: { evidence: unknown } | { evidenceError: { code: string; message: string } };
+        try {
+          evidenceField = { evidence: readProfileDeliveryEvidence(evidencePath) };
+        } catch (error) {
+          evidenceField = {
+            evidenceError: error instanceof StateError
+              ? { code: error.code, message: error.message }
+              : { code: "EVIDENCE_INVALID", message: (error as Error).message },
+          };
+        }
+        safeFinish(deps.db, jobId, {
+          state,
+          exitCode: result.exitCode,
+          artifactPath,
+          summary: {
+            execution: "deployment-host",
+            truncated: result.truncated,
+            killedBy: result.killedBy,
+            durationMs: result.durationMs,
+            peakRssMb: result.peakRssMb,
+            ...evidenceField,
+          },
+        });
+      })
+      .catch((error: unknown) => {
+        safeWrite(artifactPath, `deployment-host runner 内部错误：${(error as Error).message}\n`);
+        safeFinish(deps.db, jobId, {
+          state: "killed",
+          exitCode: null,
+          artifactPath,
+          summary: { execution: "deployment-host", error: (error as Error).message },
+        });
+      })
+      .finally(() => {
+        inFlight.delete(jobId);
+      });
+
+    inFlight.set(jobId, settled);
+    return { jobId, state: "running", pollAfterSeconds: pollHint(profile.timeoutSeconds) };
   } catch (error) {
-    if (pgid) {
-      try {
-        process.kill(-pgid, "SIGKILL");
-      } catch {
-        // already exited
-      }
-    }
-    void settled;
+    safeFinish(deps.db, jobId, {
+      state: "failed",
+      exitCode: null,
+      artifactPath: null,
+      summary: { execution: "deployment-host", reason: "launch_preparation_failed" },
+    });
     throw error;
   }
-
-  inFlight.set(jobId, settled);
-  return { jobId, state: "running", pollAfterSeconds: pollHint(profile.timeoutSeconds) };
 }
 
 export function awaitDeploymentHostJobSettled(jobId: string): Promise<void> {

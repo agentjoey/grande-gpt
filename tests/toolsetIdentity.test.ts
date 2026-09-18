@@ -146,21 +146,11 @@ describe("toolset identity", () => {
   });
 });
 
-/**
- * Task 7 closeout：正式 public contract identity。
- *
- * 本 feature 唯一 intentional public contract delta 是 grande_task_open 的可选
- * deliveryTarget 字段（Task 1 已进 schema，digest d5243888… 已含它）。closeout
- * 把这个 delta 正式结算为 TOOLSET_EPOCH=3；contract 本身不再变化——不新增
- * public argv/approval/nonce 工具，也不移除 grande_deploy_verify——所以
- * stabilized digest 与 toolsCount 保持 Task 1 之后的值。
- *
- * RED 锚点：当前 src/toolsetIdentity.ts 的 TOOLSET_EPOCH 仍是 2。
- */
-describe("Task 7 closeout：正式 toolset epoch/digest 与 public surface", () => {
-  const CLOSEOUT_EPOCH = 3;
-  const CLOSEOUT_DIGEST = "sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496";
-  const CLOSEOUT_TOOLS_COUNT = 25;
+/** Batch 2 deliberately changes only status inputs and the new task/job-bound cancellation tool. */
+describe("Batch 2 candidate epoch/digest and public surface", () => {
+  const CLOSEOUT_EPOCH = 4;
+  const CLOSEOUT_DIGEST = "sha256:59cac26abfb8a571d321e00bc5a7d6c7bd5d4950ef686235a51a70eb635fa387";
+  const CLOSEOUT_TOOLS_COUNT = 26;
 
   let root: string;
   let layout: Layout;
@@ -188,10 +178,10 @@ describe("Task 7 closeout：正式 toolset epoch/digest 与 public surface", () 
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("assembled toolset 的正式 closeout identity：epoch 3 + Task 1 之后的 stabilized digest", () => {
-    const identity = toolsModule.toolsetIdentity(toolsModule.buildTools(deps), "task7-closeout-build");
+  it("pins the assembled epoch-4 candidate contract independently of activation", () => {
+    const identity = toolsModule.toolsetIdentity(toolsModule.buildTools(deps), "batch2-candidate-build");
     expect(identity).toEqual({
-      gatewayBuild: "task7-closeout-build",
+      gatewayBuild: "batch2-candidate-build",
       toolsetEpoch: CLOSEOUT_EPOCH,
       toolsCount: CLOSEOUT_TOOLS_COUNT,
       toolsDigest: CLOSEOUT_DIGEST,
@@ -199,7 +189,7 @@ describe("Task 7 closeout：正式 toolset epoch/digest 与 public surface", () 
     expect(toolsModule.TOOLSET_EPOCH).toBe(CLOSEOUT_EPOCH);
   });
 
-  it("grande_task_open 的可选 deliveryTarget 是唯一 intentional delta；无 public argv/approval/nonce 工具", () => {
+  it("preserves deliveryTarget and exposes no public argv/approval/nonce tools", () => {
     const tools = toolsModule.buildTools(deps);
     const open = tools.find((t) => t.name === "grande_task_open")!;
     const deliveryTarget = open.inputSchema.properties.deliveryTarget as
@@ -213,5 +203,17 @@ describe("Task 7 closeout：正式 toolset epoch/digest 与 public surface", () 
     for (const name of names) {
       expect(name).not.toMatch(/argv|nonce|approv/i);
     }
+  });
+
+  it("reconstructs the exact epoch-3 contract by removing only the two approved public deltas", () => {
+    const previous = toolsModule.buildTools(deps).filter((tool) => tool.name !== "grande_job_cancel")
+      .map((tool) => tool.name === "grande_task_status" ? { ...tool, inputSchema: {
+        type: "object" as const, properties: {
+          taskId: { type: "string", description: "任务ID。不传则返回已注册仓库 + 活跃任务总览" },
+        },
+      } } : tool);
+    const identity = toolsModule.toolsetIdentity(previous, "historical-contract-fixture");
+    expect(identity.toolsCount).toBe(25);
+    expect(identity.toolsDigest).toBe("sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496");
   });
 });

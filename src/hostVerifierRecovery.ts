@@ -2,7 +2,7 @@ import { existsSync, realpathSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { assertDisposableVerifierRoot } from "./hostVerifier.ts";
-import { finishJob, getJob, listJobs, TERMINAL, type JobRow } from "./jobs.ts";
+import { finishJob, getJob, hasUnsettledResourceOwner, listNonterminalJobs, TERMINAL, type JobRow } from "./jobs.ts";
 import type { Layout } from "./layout.ts";
 import { resolveRepoPath } from "./paths.ts";
 import { registeredIds } from "./registry.ts";
@@ -32,8 +32,9 @@ function processGroupAlive(pgid: number): boolean {
   try {
     process.kill(-pgid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // Permission/unknown probe errors do not prove process extinction.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
 }
 
@@ -80,21 +81,14 @@ async function cleanupRecoveredDisposable(
     rmSync(root, { recursive: true, force: true });
     return { cleaned: true };
   } catch (error) {
-    return {
-      cleaned: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
+    return { cleaned: false, error: error instanceof Error ? error.message : String(error) };
   }
 }
 
 /**
- * Startup-only reconciliation for one-shot host verifier jobs.
- *
- * It intentionally ignores ordinary runner jobs. A live verifier is killed only
- * through its recorded detached process group; after that, its disposable root is
- * guarded and cleaned, then the existing job row is CAS-finished as an
- * infrastructure interruption. If the recorded live group cannot be killed, this
- * function throws so Gateway startup fails closed before write tools are exposed.
+ * Startup recovery for verifier jobs. Managed reservations keep their live supervisor;
+ * ambiguous launch windows or old live pgids are not proof of kill authority. Legacy
+ * verifier records retain their existing trusted recovery path. No TTL releases capacity.
  */
 export async function reconcileHostVerifierJobsAtStartup(
   deps: HostVerifierRecoveryDeps,
@@ -106,21 +100,19 @@ export async function reconcileHostVerifierJobsAtStartup(
     ?? ((job, root) => cleanupRecoveredDisposable(deps, job, root));
   let reconciled = 0;
 
-  for (const snapshot of listJobs(deps.db)) {
-    if (snapshot.profile !== "host-verifier" || TERMINAL.has(snapshot.state)) continue;
-
+  for (const snapshot of listNonterminalJobs(deps.db)) {
+    if (snapshot.profile !== "host-verifier") continue;
+    if (hasUnsettledResourceOwner(snapshot)) continue;
     if (snapshot.pgid !== null && isAlive(snapshot.pgid)) {
+      // A dead owner's recorded integer is not sufficient to signal a potentially reused pgid.
+      if (snapshot.summary?.resourceOwner !== undefined) continue;
       await killGroup(snapshot.pgid);
     }
 
-    // The old process may have won the terminal CAS between our snapshot and kill/probe.
     const current = getJob(deps.db, snapshot.jobId);
-    if (!current || TERMINAL.has(current.state)) continue;
-
+    if (!current || TERMINAL.has(current.state) || hasUnsettledResourceOwner(current)) continue;
     const previous = current.summary ?? {};
-    const disposableRoot = typeof previous.disposableRoot === "string"
-      ? previous.disposableRoot
-      : null;
+    const disposableRoot = typeof previous.disposableRoot === "string" ? previous.disposableRoot : null;
     const cleanup = disposableRoot === null
       ? { cleaned: false, error: "running host verifier job has no trusted disposableRoot" }
       : await cleanupDisposable(current, disposableRoot);

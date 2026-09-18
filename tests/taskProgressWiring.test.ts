@@ -117,7 +117,7 @@ describe("grande_task_status S10/D3 progress wiring", () => {
     expect(overviewEnvelope.ok).toBe(true);
     expect(overviewEnvelope.data).toMatchObject(expected);
 
-    expect(tools).toHaveLength(25);
+    expect(tools).toHaveLength(26);
     expect(tools.map((tool) => tool.name)).not.toContain("grande_toolset_identity");
 
     // src/server.ts 直接按 buildTools() 返回顺序 registerTool；这里钉住真实 production

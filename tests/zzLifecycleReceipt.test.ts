@@ -61,11 +61,18 @@ describe("durable PR lifecycle projection", () => {
       baseSha: "2".repeat(40),
       mergeSha: "3".repeat(40),
     });
-    for (let i = 0; i < 520; i += 1) {
-      const audit = beginAudit(db, { taskId: task.taskId, tool: `noise_${i}`, input: { i } });
-      audit.allowed();
-      audit.executing();
-      audit.succeeded();
+    db.exec("BEGIN");
+    try {
+      for (let i = 0; i < 520; i += 1) {
+        const audit = beginAudit(db, { taskId: task.taskId, tool: `noise_${i}`, input: { i } });
+        audit.allowed();
+        audit.executing();
+        audit.succeeded();
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* preserve original failure */ }
+      throw error;
     }
 
     const progress = projectTaskProgress(db, task, {

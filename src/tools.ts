@@ -9,14 +9,18 @@ import { toToolError, redact, StateError } from "./errors.ts";
 import { addFlowSimplification } from "./flowSimplification.ts";
 import { loadGuidance } from "./guidance.ts";
 import { projectHostVerifierOperationalStatus } from "./hostVerifierStatus.ts";
+import { createJobCancellationTool } from "./jobCancellationTool.ts";
 import { addLocalLoopTools } from "./localLoopTools.ts";
 import { addOnboardingTools } from "./onboardingTools.ts";
 import { createPrMergeTool, createPrStatusTool, type PrLifecycleOptions } from "./prLifecycle.ts";
 import { addPrMergeD2Reconciliation } from "./prMergeD2.ts";
 import { registeredIds } from "./registry.ts";
 import { withRepoWriteLock } from "./repoWriteLock.ts";
+import { assertDiskHeadroom } from "./resourcePolicy.ts";
+import { withStatusReadScope, withoutStatusReads } from "./statusReadScope.ts";
 import { addTaskBriefSupport } from "./taskBrief.ts";
 import { addTaskLifecycleCrashRecovery } from "./taskLifecycleToolWiring.ts";
+import { createTaskStatusTool } from "./taskStatus.ts";
 import { getTask } from "./tasks.ts";
 import { stableToolDefinitions, toolsetIdentity } from "./toolsetIdentity.ts";
 import {
@@ -77,9 +81,28 @@ function withTaskRepoWriteLocks(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
   return tools;
 }
 
+/** Admission and dependency materialization share the close/merge lock, not the later bounded wait. */
+function lockRunPreparation(deps: ToolDeps, tools: ToolDef[]): void {
+  const run = tools.find((tool) => tool.name === "grande_run");
+  if (!run) return;
+  const launch = run.handler;
+  run.handler = async (args) => {
+    const taskId = typeof args.taskId === "string" ? args.taskId : null;
+    const task = taskId ? getTask(deps.db, taskId) : undefined;
+    if (!task) return launch(args);
+    try {
+      return await withRepoWriteLock(task.repoId, () => launch(args), deps.layout);
+    } catch (error) {
+      const failure = toToolError(error);
+      failure.message = redact(failure.message, [deps.layout.workspaceRoot, deps.layout.controlRoot]);
+      return { structuredContent: err({ ...failure, taskId }) };
+    }
+  };
+}
+
 /**
  * 生产工具列表的唯一组装点。Task 始终是中心：
- * core → lifecycle crash recovery → local loop → Phase 8 flow projection → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → S9 onboarding → S7 deploy → S5 capability → arg check。
+ * core → lifecycle crash recovery → local loop → Phase 8 flow projection → S6 GitHub lifecycle → D2 merge reconciliation → S4 brief → bounded status/cancel → S9 onboarding → S7 deploy → S5 capability → arg check。
  *
  * S7 的 handler 运行时需要复用 S5 capability tools，而 S5 的 native discovery 又应该
  * 看见 S7 deployment tools。这里用一个共享的 `deploymentDeps` 数组解决这个接线顺序：
@@ -123,6 +146,7 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
           return { structuredContent: err({ ...toolError, taskId }) };
         }
         try {
+          assertDiskHeadroom(deps.layout);
           canonicalRefresh = refreshCanonical(deps.layout, repoId);
           refreshAudit.succeeded([]);
         } catch (error) {
@@ -141,7 +165,7 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
           return {
             structuredContent: err({
               ...toolError,
-              taskId: typeof args.taskId === "string" ? args.taskId : null,
+              taskId: typeof taskId === "string" ? taskId : null,
             }),
           };
         }
@@ -163,11 +187,17 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
   const local = addLocalLoopTools(deps, tools, {
     hostVerificationMode: options.hostVerificationMode,
   });
+  lockRunPreparation(deps, local);
   const simplified = addFlowSimplification(deps, local);
   const githubBase = [...simplified, createPrStatusTool(deps), createPrMergeTool(deps, options)];
   const github = addPrMergeD2Reconciliation(deps, githubBase);
   const withBrief = addTaskBriefSupport(deps, github);
-  const withOnboarding = addOnboardingTools(deps, withBrief);
+  // Replace the eager status chain instead of running it and truncating its result.
+  // Cancellation is a distinct write tool; result/status remain strictly read-only.
+  const withStatus = withBrief.map((tool) => tool.name === "grande_task_status"
+    ? createTaskStatusTool(deps, options.hostVerificationMode) : tool);
+  withStatus.push(createJobCancellationTool(deps));
+  const withOnboarding = addOnboardingTools(deps, withStatus);
 
   const deploymentDeps = [...withOnboarding];
   const withDeployment = addDeploymentTools(deps, deploymentDeps, options.deployment);
@@ -192,8 +222,8 @@ export function buildTools(deps: ToolDeps, options: BuildToolsOptions = {}): Too
  * capability：invoke 后直接 DONE）。对 repoId=grande-gpt，这一步之前必须存在
  * durable activation receipt/readback（activationReceipt.ts 的单例表，由
  * grande activate 的 trusted read probe 落账）；缺失时在 inner handler【之前】
- * fail closed——authorization 保持 EXECUTING、verify 证据不落账。补齐 receipt
- * 后重入同一 durable evidence 可正常 DONE；verifyComplete 的重入观察始终放行。
+ * fail closed——authorization 保持 EXECUTING、verify 证据不落账。
+ * 后补齐 receipt 后重入同一 durable evidence 可正常 DONE；verifyComplete 的重入观察始终放行。
  * 其他 repo 完全不经此门禁。
  */
 function withSelfRepoActivationGate(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
@@ -209,7 +239,7 @@ function withSelfRepoActivationGate(deps: ToolDeps, tools: ToolDef[]): ToolDef[]
 
     const row = deps.db
       .prepare("SELECT receiptJson FROM deployment_receipt WHERE taskId=?")
-      .get(task.taskId) as { receiptJson: string } | undefined;
+      .get(taskId) as { receiptJson: string } | undefined;
     let deployComplete = false;
     let verifyComplete = true;
     if (row) {
@@ -218,12 +248,9 @@ function withSelfRepoActivationGate(deps: ToolDeps, tools: ToolDef[]): ToolDef[]
         deployComplete = receipt.deployComplete === true;
         verifyComplete = receipt.verifyComplete === true;
       } catch {
-        // receipt 损坏交给 inner handler 的既有 fail-closed 路径报告。
         return inner(args);
       }
     }
-    // 只在「本次调用可能进入 DONE」时拦截：未 deployComplete 的调用仍在
-    // deploy 观察/启动 verify job 阶段；已 verifyComplete 的是幂等重入观察。
     if (!deployComplete || verifyComplete) return inner(args);
 
     const error = new StateError(
@@ -239,11 +266,7 @@ function withSelfRepoActivationGate(deps: ToolDeps, tools: ToolDef[]): ToolDef[]
   return tools;
 }
 
-/**
- * 通过现有 grande_task_status 暴露 server-side toolset identity、最小 Host Verifier
- * operational snapshot 与最近 production activation receipt；不新增额外 MCP tool。
- * 这些都只包装 response，handler 包装不进入 tool contract digest。
- */
+/** Runtime identity/activation status does not change the public input contract. */
 function withToolsetIdentity(
   deps: ToolDeps,
   tools: ToolDef[],
@@ -254,7 +277,7 @@ function withToolsetIdentity(
   if (!status) return tools;
 
   const inner = status.handler;
-  status.handler = async (args) => {
+  status.handler = async (args) => withStatusReadScope(async () => {
     const response = await inner(args);
     const envelope = response.structuredContent as { ok?: unknown; data?: Record<string, unknown> };
     if (envelope.ok === true && envelope.data) {
@@ -272,14 +295,11 @@ function withToolsetIdentity(
       });
     }
     return response;
-  };
+  });
   return tools;
 }
 
-/**
- * 给**每一个**工具的 handler 前置一道入参校验（遗留表 #13）。
- * 必须在所有 add*Tools/support 之后包，否则后加工具没有统一信封式参数错误。
- */
+/** All public handlers validate arguments after final tool assembly. */
 function withArgCheck(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
   for (const tool of tools) {
     const inner = tool.handler;
@@ -296,7 +316,7 @@ function withArgCheck(deps: ToolDeps, tools: ToolDef[]): ToolDef[] {
           }),
         };
       }
-      return inner(args);
+      return tool.name === "grande_task_status" ? inner(args) : withoutStatusReads(() => inner(args));
     };
   }
   return tools;

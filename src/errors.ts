@@ -5,6 +5,7 @@ import { ProfileError } from "./profiles.ts";
 import { EditError } from "./repoFile.ts";
 import { SearchError } from "./repoSearch.ts";
 import { MapError } from "./repoMap.ts";
+import { RepoProcessLockError } from "./repoProcessLock.ts";
 import { RunnerError } from "./runner.ts";
 import { GitError } from "./worktree.ts";
 import { SbplError } from "./sbpl.ts";
@@ -47,6 +48,9 @@ const MAP: Record<string, { code: ToolErrorCode; retryable: boolean }> = {
   FILE_EXISTS:            { code: "INVALID_INPUT",       retryable: false },
   PROFILE_NOT_FOUND:      { code: "PROFILE_NOT_FOUND",   retryable: false },
   CANONICAL_BUSY:         { code: "CANONICAL_BUSY",      retryable: true  },
+  REPO_BUSY:              { code: "CANONICAL_BUSY",      retryable: true  },
+  LOCK_METADATA_INVALID: { code: "POLICY_DENIED",       retryable: false },
+  LOCK_OWNERSHIP_LOST:   { code: "POLICY_DENIED",       retryable: false },
   CANONICAL_DIRTY:        { code: "CANONICAL_DIRTY",     retryable: false },
   CANONICAL_DIVERGED:     { code: "CANONICAL_DIVERGED", retryable: false },
   GIT_FAILED:             { code: "INVALID_INPUT",       retryable: false },
@@ -56,18 +60,16 @@ const MAP: Record<string, { code: ToolErrorCode; retryable: boolean }> = {
   JOB_NOT_FOUND:          { code: "INVALID_INPUT",       retryable: false },
   TASK_NOT_FOUND:         { code: "TASK_NOT_FOUND",      retryable: true  },
   JOB_RUNNING:            { code: "INVALID_INPUT",       retryable: true  },
+  RESOURCE_EXHAUSTED:     { code: "RESOURCE_EXHAUSTED",  retryable: false },
   STALE_STATE:            { code: "INVALID_INPUT",       retryable: true  },
   PATH_SPELLING_MISMATCH: { code: "POLICY_DENIED",       retryable: false },
 };
 
-/**
- * 我们自己的错误类。只有这些类的实例参与映射；仓库数据不能靠伪造 code 字段
- * 冒充一次可信的策略或状态决定。
- */
+/** Only trusted error classes participate; repo data cannot spoof policy decisions. */
 const KNOWN = [
   ArgError,
   PathSecurityError, PolicyError, ProfileError, EditError,
-  SearchError, MapError, RunnerError, GitError,
+  SearchError, MapError, RunnerError, GitError, RepoProcessLockError,
   SbplError, SandboxError, StateError,
 ] as const;
 
@@ -89,12 +91,7 @@ export function toToolError(e: unknown): ToolError {
       details: {},
     };
   }
-  return {
-    code: hit.code,
-    message: (e as Error).message,
-    retryable: hit.retryable,
-    details: {},
-  };
+  return { code: hit.code, message: (e as Error).message, retryable: hit.retryable, details: {} };
 }
 
 /** 抹掉错误消息里的宿主绝对路径前缀。 */

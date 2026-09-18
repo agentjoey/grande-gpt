@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { basicCredential, redactToken } from "./githubAuth.ts";
+import { invalidateStatusReads, observeStatusRead, withoutStatusReads } from "./statusReadScope.ts";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_TIMEOUT_MS = 60_000;
@@ -54,20 +55,9 @@ function redactDetail(detail: string, cwd: string, token?: string): string {
 function safeEnvForGithub(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
   for (const key of [
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-    "SSH_AUTH_SOCK",
-    "GIT_SSH",
-    "GIT_SSH_COMMAND",
-    "GITHUB_TOKEN",
-    "GH_TOKEN",
-    "GIT_TRACE",
-    "GIT_TRACE2",
-    "GIT_TRACE2_EVENT",
-    "GIT_TRACE_CURL",
-    "GIT_TRACE_CURL_NO_DATA",
-    "GIT_TRACE_PACKET",
-    "GIT_CURL_VERBOSE",
+    "GIT_ASKPASS", "SSH_ASKPASS", "SSH_AUTH_SOCK", "GIT_SSH", "GIT_SSH_COMMAND",
+    "GITHUB_TOKEN", "GH_TOKEN", "GIT_TRACE", "GIT_TRACE2", "GIT_TRACE2_EVENT",
+    "GIT_TRACE_CURL", "GIT_TRACE_CURL_NO_DATA", "GIT_TRACE_PACKET", "GIT_CURL_VERBOSE",
   ]) {
     delete env[key];
   }
@@ -80,23 +70,17 @@ function runGit(cwd: string, argv: string[], options: RunOptions = {}): string {
   const maxBuffer = Math.max(MIN_CAPTURE_BUFFER, Math.min(MAX_OUTPUT_BYTES, maxOutputBytes * 4));
   try {
     const stdout = execFileSync("git", argv, {
-      cwd,
-      encoding: "utf8",
+      cwd, encoding: "utf8",
       stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       input: options.input,
       env: options.env ?? process.env,
-      timeout,
-      killSignal: "SIGKILL",
-      maxBuffer,
+      timeout, killSignal: "SIGKILL", maxBuffer,
     });
     return truncateUtf8(stdout, maxOutputBytes);
   } catch (error) {
     const e = error as {
-      status?: unknown;
-      stdout?: Buffer | string;
-      stderr?: Buffer | string;
-      message?: string;
-      code?: string;
+      status?: unknown; stdout?: Buffer | string; stderr?: Buffer | string;
+      message?: string; code?: string;
     };
     const status = typeof e.status === "number" ? e.status : null;
     const stdout = e.stdout === undefined ? "" : String(e.stdout);
@@ -105,9 +89,7 @@ function runGit(cwd: string, argv: string[], options: RunOptions = {}): string {
     }
     const raw = e.stderr !== undefined && String(e.stderr).trim().length > 0
       ? String(e.stderr).trim()
-      : stdout.trim().length > 0
-        ? stdout.trim()
-        : (e.message ?? e.code ?? "git failed");
+      : stdout.trim().length > 0 ? stdout.trim() : (e.message ?? e.code ?? "git failed");
     const detail = truncateUtf8(redactDetail(raw, cwd, options.token), maxOutputBytes);
     throw new GitExecError("GIT_FAILED", `git failed: ${detail}`, status);
   }
@@ -118,64 +100,77 @@ function localArgv(args: readonly string[]): string[] {
 }
 
 function assertExpectedState(cwd: string, options: SafeGitOptions): void {
-  if (options.expectedBranch !== undefined) {
-    let actual: string;
-    try {
-      actual = runGit(cwd, localArgv(["symbolic-ref", "-q", "--short", "HEAD"]), {
-        timeoutMs: options.timeoutMs,
-        maxOutputBytes: options.maxOutputBytes,
+  // Preconditions always read current state, even if accidentally invoked within a status scope.
+  withoutStatusReads(() => {
+    if (options.expectedBranch !== undefined) {
+      let actual: string;
+      try {
+        actual = runGit(cwd, localArgv(["symbolic-ref", "-q", "--short", "HEAD"]), {
+          timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes,
+        }).trim();
+      } catch {
+        throw new GitExecError("STALE_STATE", `git branch check failed; expected ${options.expectedBranch}.`);
+      }
+      if (actual !== options.expectedBranch) {
+        throw new GitExecError("STALE_STATE", `git branch mismatch: expected ${options.expectedBranch}, actual ${actual}.`);
+      }
+    }
+    if (options.expectedHead !== undefined) {
+      const actual = runGit(cwd, localArgv(["rev-parse", "HEAD"]), {
+        timeoutMs: options.timeoutMs, maxOutputBytes: options.maxOutputBytes,
       }).trim();
-    } catch {
-      throw new GitExecError("STALE_STATE", `git branch check failed; expected ${options.expectedBranch}.`);
+      if (actual !== options.expectedHead) {
+        throw new GitExecError("STALE_STATE", `git HEAD mismatch: expected ${options.expectedHead}, actual ${actual}.`);
+      }
     }
-    if (actual !== options.expectedBranch) {
-      throw new GitExecError(
-        "STALE_STATE",
-        `git branch mismatch: expected ${options.expectedBranch}, actual ${actual}.`,
-      );
-    }
-  }
-  if (options.expectedHead !== undefined) {
-    const actual = runGit(cwd, localArgv(["rev-parse", "HEAD"]), {
-      timeoutMs: options.timeoutMs,
-      maxOutputBytes: options.maxOutputBytes,
-    }).trim();
-    if (actual !== options.expectedHead) {
-      throw new GitExecError("STALE_STATE", `git HEAD mismatch: expected ${options.expectedHead}, actual ${actual}.`);
-    }
-  }
+  });
+}
+
+function readOnlyArgs(args: readonly string[]): boolean {
+  if (args.some((arg) => arg === "--output" || arg.startsWith("--output="))) return false;
+  const command = args[0];
+  if (["rev-parse", "rev-list", "status", "ls-files", "merge-base", "ls-tree"].includes(command ?? "")) return true;
+  if (command === "remote") return args.length === 3 && args[1] === "get-url" && args[2] === "origin";
+  // Only existing symbolic-ref read flags are admitted; --delete and a replacement ref are writes.
+  return command === "symbolic-ref" && args.at(-1) === "HEAD"
+    && args.slice(1, -1).every((arg) => ["-q", "--quiet", "--short"].includes(arg));
 }
 
 function local(cwd: string, args: readonly string[], options: SafeGitOptions = {}): string {
   assertExpectedState(cwd, options);
-  return runGit(cwd, localArgv(args), options);
+  const read = () => runGit(cwd, localArgv(args), options);
+  if (readOnlyArgs(args) && options.input === undefined
+      && options.expectedBranch === undefined && options.expectedHead === undefined) {
+    return observeStatusRead(JSON.stringify(["git-local", cwd, args, options]), read);
+  }
+  invalidateStatusReads();
+  return read();
 }
 
 function github(cwd: string, args: readonly string[], token: string, options: SafeGitOptions = {}): string {
+  invalidateStatusReads();
   assertExpectedState(cwd, options);
   const argv = [
-    "-c", "core.hooksPath=/dev/null",
-    "-c", "credential.helper=",
-    "-c", `http.extraHeader=Authorization: Basic ${basicCredential(token)}`,
-    ...args,
+    "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=",
+    "-c", `http.extraHeader=Authorization: Basic ${basicCredential(token)}`, ...args,
   ];
   return runGit(cwd, argv, { ...options, token, env: safeEnvForGithub() });
 }
 
 function diff(cwd: string, args: readonly string[], options: SafeGitOptions = {}): string {
-  if (args[0] !== "diff") {
-    throw new GitExecError("GIT_FAILED", "safeGit.diff only accepts the git diff subcommand.");
-  }
+  if (args[0] !== "diff") throw new GitExecError("GIT_FAILED", "safeGit.diff only accepts the git diff subcommand.");
   const argv = localArgv(["diff", "--no-ext-diff", "--no-textconv", ...args.slice(1)]);
-  return runGit(cwd, argv, {
-    ...options,
-    allowExitOneWithStdout: args.includes("--no-index"),
-  });
+  const read = () => runGit(cwd, argv, { ...options, allowExitOneWithStdout: args.includes("--no-index") });
+  if (options.input !== undefined || args.some((arg) => arg === "--output" || arg.startsWith("--output="))) {
+    invalidateStatusReads();
+    return read();
+  }
+  return observeStatusRead(JSON.stringify(["git-diff", cwd, args, options]), read);
 }
 
 function tryRelation(cwd: string, ancestor: string, descendant: string): boolean {
   try {
-    runGit(cwd, localArgv(["merge-base", "--is-ancestor", ancestor, descendant]));
+    local(cwd, ["merge-base", "--is-ancestor", ancestor, descendant]);
     return true;
   } catch (error) {
     if (error instanceof GitExecError && error.status === 1) return false;

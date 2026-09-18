@@ -35,14 +35,14 @@ afterEach(() => {
 });
 
 describe("GG-BL-019 activation evidence status projection", () => {
-  it("exposes the latest activation receipt through grande_task_status without changing the 25-tool contract", async () => {
+  it("exposes historical activation evidence unchanged through the current 26-tool contract", async () => {
     const layout = loadLayout();
     ensureLayout(layout);
     const db = openDb(layout);
     try {
       const receipt = recordActivationReceipt(db, evidence, 1_787_409_600_000);
       const tools = buildTools({ db, layout });
-      expect(tools).toHaveLength(25);
+      expect(tools).toHaveLength(26);
       const status = tools.find((tool) => tool.name === "grande_task_status");
       if (!status) throw new Error("grande_task_status missing");
 

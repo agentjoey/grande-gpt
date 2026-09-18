@@ -82,9 +82,16 @@ describe("durable merge projection does not invent delivery evidence", () => {
     const audit = beginAudit(db, { taskId: TASK, tool: "grande_pr_merge", input: {} });
     audit.allowed(); audit.executing(); audit.succeeded();
     db.prepare("UPDATE audit SET at=1, updatedAt=1 WHERE opId=?").run(audit.opId);
-    for (let i = 0; i < 520; i++) {
-      const noise = beginAudit(db, { taskId: TASK, tool: "grande_repo_read", input: { i } });
-      noise.allowed(); noise.executing(); noise.succeeded();
+    db.exec("BEGIN");
+    try {
+      for (let i = 0; i < 520; i++) {
+        const noise = beginAudit(db, { taskId: TASK, tool: "grande_repo_read", input: { i } });
+        noise.allowed(); noise.executing(); noise.succeeded();
+      }
+      db.exec("COMMIT");
+    } catch (error) {
+      try { db.exec("ROLLBACK"); } catch { /* preserve original failure */ }
+      throw error;
     }
     const progress = project();
     expect(progress.stages.merged.state).toBe("unknown");

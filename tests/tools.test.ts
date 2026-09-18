@@ -133,10 +133,11 @@ const DESTRUCTIVE = [
   "grande_pr_merge",
   "grande_deploy",
   "grande_deploy_rollback",
+  "grande_job_cancel",
 ] as const;
 
 describe("工具注解", () => {
-  it("当前 contract 恰好注册 25 个工具：10 只读 + 15 写；onboarding 只新增 propose/apply 两只本地工具", () => {
+  it("当前 contract 恰好注册 26 个工具：10 只读 + 16 写；B2 只新增受控 job cancel", () => {
     const names = buildTools(deps).map((t) => t.name).sort();
     expect(names.filter((n) => READ_ONLY.includes(n as typeof READ_ONLY[number]))).toEqual([...READ_ONLY].sort());
     for (const name of [
@@ -144,10 +145,10 @@ describe("工具注解", () => {
       "grande_commit", "grande_sync_base", "grande_push", "grande_pr_open",
       "grande_capability_invoke", "grande_pr_merge",
       "grande_deploy", "grande_deploy_verify", "grande_deploy_rollback",
-      "grande_repo_add_apply",
+      "grande_repo_add_apply", "grande_job_cancel",
     ]) expect(names).toContain(name);
-    expect(names).toHaveLength(25);
-    expect(names.length - READ_ONLY.length).toBe(15);
+    expect(names).toHaveLength(26);
+    expect(names.length - READ_ONLY.length).toBe(16);
   });
 
   it("共享 MCP_WRITE_TOOLS 与运行时全部写工具严格一致，审计/控制台不会漏掉后加工具", () => {
@@ -166,7 +167,7 @@ describe("工具注解", () => {
     }
   });
 
-  it("destructiveHint=true 的工具必须严格等于五个高风险动作，不能悄悄扩散", () => {
+  it("destructiveHint=true 的工具必须严格等于六个高风险动作，不能悄悄扩散", () => {
     const actual = buildTools(deps)
       .filter((tool) => tool.annotations.destructiveHint)
       .map((tool) => tool.name)
@@ -192,25 +193,25 @@ describe("工具注解", () => {
     expect(haystack).toMatch(/\bok\b|\bslow\b|curl-probe|\bfail\b/);
   });
 
-  it("repo_read/repo_search 描述明确给出默认值、硬上限与搜索结果字节预算，且 epoch 已为 3", () => {
+  it("repo_read/repo_search 描述明确给出默认值、硬上限与搜索结果字节预算，且候选 epoch 已为 4", () => {
     const tools = buildTools(deps);
     const read = tools.find((t) => t.name === "grande_repo_read")!;
     const search = tools.find((t) => t.name === "grande_repo_search")!;
 
     expect(read.description).toMatch(/16\s*KiB.*24\s*KiB/s);
     expect(search.description).toMatch(/20.*25.*16\s*KiB/s);
-    // Task 7 closeout：正式 epoch 3（唯一 delta 是 grande_task_open 可选 deliveryTarget）。
-    expect(TOOLSET_EPOCH).toBe(3);
+    // Batch 2 publishes status pagination and task/job-bound cancellation together.
+    expect(TOOLSET_EPOCH).toBe(4);
   });
 
-  it("assembled tool contract 保持 GG-BL-028 stabilized contract digest", () => {
+  it("assembled tool contract 保持 B2 候选 stabilized contract digest", () => {
     const assembled = buildTools(deps);
-    // Minimal V2 Task 1：grande_task_open 增加可选 deliveryTarget 字段，digest 随合同变化更新。
-    const pinnedDigest = "sha256:d5243888a58a440b05147d8e5baeb3713e92833720c5dd403901493ff555b496";
+    // Intentional epoch-4 status/cancel schema delta; all other tool contracts stay unchanged.
+    const pinnedDigest = "sha256:59cac26abfb8a571d321e00bc5a7d6c7bd5d4950ef686235a51a70eb635fa387";
     expect(toolsetIdentity(assembled, "db5d020-test-build")).toEqual({
       gatewayBuild: "db5d020-test-build",
-      toolsetEpoch: 3,
-      toolsCount: 25,
+      toolsetEpoch: 4,
+      toolsCount: 26,
       toolsDigest: pinnedDigest,
     });
 
@@ -647,7 +648,7 @@ describe("D18：grande_task_status 的无参数发现形式（注册表可见性
     expect(r.data.registeredRepos).toEqual(["demo", "other"]);
     expect(Array.isArray(r.data.activeTasks)).toBe(true);
     expect(r.data.activeTasks.some((t: { taskId: string }) => t.taskId === "task_abcd")).toBe(true);
-    expect(r.hint).toContain("demo");
+    expect(r.hint).toContain("nextCursor");
   });
 
   it("带 taskId 时行为与此前一致（详情，不是总览）", async () => {
@@ -792,6 +793,7 @@ describe("工具注解必须逐字匹配当前 contract", () => {
     grande_deploy:            { readOnly: false, destructive: true,  openWorld: true },
     grande_deploy_verify:     { readOnly: false, destructive: false, openWorld: true },
     grande_deploy_rollback:   { readOnly: false, destructive: true,  openWorld: true },
+    grande_job_cancel:        { readOnly: false, destructive: true },
   };
 
   it("每个工具的注解与规格逐项一致，且工具总数与规格表严格相等", () => {

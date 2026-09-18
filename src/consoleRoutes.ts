@@ -11,7 +11,8 @@ import {
   type DeliveryAuthorizationRow,
 } from "./deliveryAuthorization.ts";
 import { StateError } from "./errors.ts";
-import { getJob, finishJob, TERMINAL } from "./jobs.ts";
+import { requestJobCancellation } from "./jobCancellation.ts";
+import { getJob, TERMINAL } from "./jobs.ts";
 import { loadLayout } from "./layout.ts";
 import { bumpEpoch, currentEpoch } from "./tokenEpoch.ts";
 
@@ -97,12 +98,11 @@ export function mountConsoleRoutes(app: Hono, deps: ConsoleDeps): void {
   });
 
   /**
-   * 杀掉一个在跑的 job。
+   * 请求取消一个受当前 Gateway supervisor 管理的 job。
    *
-   * 这是控制台**净增**的能力：此前只能手工 `kill -TERM -<pgid>`，没有工具也没有 CLI。
-   *
-   * 语义：向**进程组**发 TERM（runner 用 `detached` 起的进程，pgid == pid），
-   * 然后把 job 置为 `cancelled`。不动任何文件，所以不是破坏性操作。
+   * Console 与 MCP 共用同一 ownership-bound cancellation primitive：这里只接受现有
+   * jobId，绝不按数据库里残留的 pgid 直接发信号，也不提前写 terminal state。
+   * 真正进程退出、artifact 持久化与容量释放仍由 owning supervisor 的 settlement 完成。
    */
   app.post("/console/jobs/:jobId/kill", async (c) => {
     const denied = await gate(c.req.raw.headers);
@@ -114,48 +114,18 @@ export function mountConsoleRoutes(app: Hono, deps: ConsoleDeps): void {
       const f = fail("not_found", `job ${jobId} 不存在。`, 404);
       return c.json(f.body, f.status);
     }
-    // 遗留 #1（同源）：判据是「已进终态」，不是「不等于 running」。
-    // 这里说反了的后果比别处重——一个非终态的新状态会被当成「已经结束了」
-    // 而拒绝杀，于是控制台上那颗「杀掉」按钮对它永远不生效。
     if (TERMINAL.has(job.state)) {
-      // 幂等的失败：已经结束了就说清楚，不假装成功也不当作错误重试。
-      const f = fail("not_running", `job ${jobId} 当前是 ${job.state}，已经结束，无需杀。`, 409);
-      return c.json(f.body, f.status);
-    }
-    if (job.pgid === null || job.pgid === undefined) {
-      const f = fail("no_pgid", `job ${jobId} 没有记录 pgid，无法定位进程组。`, 409);
+      const f = fail("not_running", `job ${jobId} 当前是 ${job.state}，已经结束，无需取消。`, 409);
       return c.json(f.body, f.status);
     }
 
-    const audit = beginAudit(deps.db, {
-      taskId: job.taskId, tool: "console_kill_job", input: { jobId },
-    });
-    audit.allowed();
-    if (!audit.executing()) {
-      const f = fail("stale_state", `job ${jobId} 的审计句柄无法推进到 EXECUTING。`, 409);
-      return c.json(f.body, f.status);
-    }
     try {
-      // 负号 = 整个进程组。与 runner 的超时兜底同一路径。
-      process.kill(-job.pgid, "SIGTERM");
-      finishJob(deps.db, jobId, {
-        state: "cancelled", exitCode: null, artifactPath: null,
-        summary: { cancelledBy: "console", note: "由控制台手工终止" },
-      });
-      audit.succeeded([]);
-      return c.json({ ok: true, data: { jobId, pgid: job.pgid, state: "cancelled" } });
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      audit.failed(msg);
-      // ESRCH = 进程已经不在了。库里还写着 running 说明是漏对账，顺手修正。
-      if ((e as NodeJS.ErrnoException).code === "ESRCH") {
-        finishJob(deps.db, jobId, {
-          state: "cancelled", exitCode: null, artifactPath: null,
-          summary: { cancelledBy: "console", note: "进程组已不存在，对账修正" },
-        });
-        return c.json({ ok: true, data: { jobId, pgid: job.pgid, state: "cancelled", note: "进程组已不存在，已修正库状态" } });
-      }
-      const f = fail("kill_failed", `向进程组 ${job.pgid} 发送 TERM 失败：${msg}`, 500);
+      const result = requestJobCancellation(deps.db, job.taskId, jobId, { auditTool: "console_kill_job" });
+      return c.json({ ok: true, data: result });
+    } catch (error) {
+      const code = error instanceof StateError ? error.code : "cancel_failed";
+      const status = code === "JOB_NOT_FOUND" ? 404 : code === "POLICY_DENIED" || code === "STALE_STATE" ? 409 : 500;
+      const f = fail(code.toLowerCase(), error instanceof Error ? error.message : String(error), status);
       return c.json(f.body, f.status);
     }
   });
