@@ -48,12 +48,21 @@ async function status(args: Record<string, unknown> = {}) {
 }
 
 function history(count: number) {
-  for (let i = 0; i < count; i++) {
-    const id = `job_history_${String(i).padStart(4, "0")}`;
-    deps.db.prepare(`INSERT INTO job (jobId,taskId,profile,argv,state,exitCode,startedAt,endedAt,hostToolchain)
-      VALUES (?,?,'unit','[]','passed',0,?,?,?)`).run(id, TASK, 100 + i, 200 + i, toolchain);
-    deps.db.prepare(`INSERT INTO attestation (attestationId,taskId,"commit",profile,jobId,exitCode,startedAt,endedAt,hostToolchain)
-      VALUES (?, ?, ?, 'unit', ?, 0, ?, ?, ?)`).run(`att_${i}`, TASK, HEAD, id, 100 + i, 200 + i, toolchain);
+  const insertJob = deps.db.prepare(`INSERT INTO job (jobId,taskId,profile,argv,state,exitCode,startedAt,endedAt,hostToolchain)
+    VALUES (?,?,'unit','[]','passed',0,?,?,?)`);
+  const insertAttestation = deps.db.prepare(`INSERT INTO attestation (attestationId,taskId,"commit",profile,jobId,exitCode,startedAt,endedAt,hostToolchain)
+    VALUES (?, ?, ?, 'unit', ?, 0, ?, ?, ?)`);
+  deps.db.exec("BEGIN");
+  try {
+    for (let i = 0; i < count; i++) {
+      const id = `job_history_${String(i).padStart(4, "0")}`;
+      insertJob.run(id, TASK, 100 + i, 200 + i, toolchain);
+      insertAttestation.run(`att_${i}`, TASK, HEAD, id, 100 + i, 200 + i, toolchain);
+    }
+    deps.db.exec("COMMIT");
+  } catch (error) {
+    try { deps.db.exec("ROLLBACK"); } catch { /* preserve original failure */ }
+    throw error;
   }
 }
 
