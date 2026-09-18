@@ -91,7 +91,7 @@ export function requestJobCancellation(
     }
     const alreadyRequested = typeof owner.cancelRequestedAt === "number";
     if (!alreadyRequested) {
-      const audit = beginAudit(db, { taskId, tool: "grande_job_cancel",
+      const audit = beginAudit(db, { taskId, tool: options.auditTool ?? "grande_job_cancel",
         input: { jobId, phase: "cancellation_request", kind: owner.kind } });
       if (!audit.allowed() || !audit.executing()) throw new StateError("STALE_STATE", "取消审计无法进入执行状态。");
       const changed = db.prepare(`UPDATE job SET summary=json_set(summary,'$.resourceOwner.cancelRequestedAt',?)

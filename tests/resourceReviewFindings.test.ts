@@ -1,8 +1,9 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Hono } from "hono";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { listAudit } from "../src/audit.ts";
 import { openDb } from "../src/db.ts";
 import { awaitDeploymentHostJobSettled, startDeploymentHostJob } from "../src/deploymentHostRunner.ts";
 import { registerJobCancellation } from "../src/jobCancellation.ts";
@@ -19,6 +20,18 @@ vi.mock("../src/accessGate.ts", async (importOriginal) => {
     ...actual,
     createAccessGate: () => async () => ({ email: "owner@example.test", sub: "owner" }),
   };
+  it("rejects continuation when a previously expanded pending sibling directory changes", () => {
+    const tree = join(root, "stale-tree");
+    mkdirSync(join(tree, "a"), { recursive: true });
+    mkdirSync(join(tree, "a!"), { recursive: true });
+    writeFileSync(join(tree, "a", "z"), "x");
+    const first = repoMap(tree, { maxEntries: 2 });
+    expect(first.entries.map((entry) => entry.path)).toEqual(["a", "a!"]);
+    expect(first.nextCursor).toBeTruthy();
+    renameSync(join(tree, "a", "z"), join(tree, "a", "y"));
+    expect(() => repoMap(tree, { cursor: first.nextCursor })).toThrow(/STALE_STATE|changed|stale|变化/i);
+  });
+
 });
 
 import { mountConsoleRoutes } from "../src/consoleRoutes.ts";
@@ -88,6 +101,8 @@ describe("review blocker: Console cancellation", () => {
     expect(response.status).toBe(200);
     expect(control.signal.aborted).toBe(true);
     expect(getJob(db, "job_console_owned")?.state).toBe("running");
+    expect(listAudit(db, TASK, 20).filter((entry) => entry.tool === "console_kill_job")).toHaveLength(1);
+    expect(listAudit(db, TASK, 20).filter((entry) => entry.tool === "grande_job_cancel")).toHaveLength(0);
     control.dispose();
   });
 });
@@ -141,5 +156,17 @@ describe("review blocker: repo_map bounded cursor", () => {
     } while (cursor);
     expect(actual).toEqual(expected.sort());
     expect(new Set(actual).size).toBe(expected.length);
+  });
+
+  it("rejects continuation when a previously expanded pending sibling directory changes", () => {
+    const tree = join(root, "stale-tree");
+    mkdirSync(join(tree, "a"), { recursive: true });
+    mkdirSync(join(tree, "a!"), { recursive: true });
+    writeFileSync(join(tree, "a", "z"), "x");
+    const first = repoMap(tree, { maxEntries: 2 });
+    expect(first.entries.map((entry) => entry.path)).toEqual(["a", "a!"]);
+    expect(first.nextCursor).toBeTruthy();
+    renameSync(join(tree, "a", "z"), join(tree, "a", "y"));
+    expect(() => repoMap(tree, { cursor: first.nextCursor })).toThrow(/STALE_STATE|changed|stale|变化/i);
   });
 });

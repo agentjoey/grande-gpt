@@ -49,6 +49,7 @@ interface Cursor {
   after: string;
   afterDirectory: boolean;
   chainDigest: string;
+  frontierDigest: string;
 }
 interface Directory { names: string[]; signature: string }
 interface Candidate { path: string; parent: string; name: string }
@@ -70,7 +71,8 @@ function decodeCursor(value: string, root: string): Cursor {
     const state = JSON.parse(Buffer.from(value.slice(5), "base64url").toString("utf8")) as Cursor;
     if (state.version !== 2 || state.root !== root || typeof state.after !== "string" || !state.after
         || typeof state.afterDirectory !== "boolean"
-        || typeof state.chainDigest !== "string" || !/^[0-9a-f]{64}$/u.test(state.chainDigest)) {
+        || typeof state.chainDigest !== "string" || !/^[0-9a-f]{64}$/u.test(state.chainDigest)
+        || typeof state.frontierDigest !== "string" || !/^[0-9a-f]{64}$/u.test(state.frontierDigest)) {
       throw new Error("cursor identity mismatch");
     }
     relativeParts(state.after);
@@ -227,6 +229,14 @@ export function repoMap(root: string, opts: MapOptions = {}): MapResult {
   };
   seedDirectory("", 0);
 
+  const frontierDigest = (): string => {
+    const parents = [...new Set(heap.map((candidate) => candidate.parent))].sort();
+    return hash(parents.map((parent) => [parent, readDirectory(parent).signature]));
+  };
+  if (cursor && frontierDigest() !== cursor.frontierDigest) {
+    throw new MapError("STALE_STATE", "pending directory changed; restart pagination");
+  }
+
   const entries: MapEntry[] = [];
   const keyFiles: string[] = [];
   const skippedDirectories: string[] = [];
@@ -254,6 +264,7 @@ export function repoMap(root: string, opts: MapOptions = {}): MapResult {
       after: lastVisited,
       afterDirectory: lastVisitedDirectory,
       chainDigest: chainDigest(lastVisited, lastVisitedDirectory),
+      frontierDigest: frontierDigest(),
     };
   };
   const output = (): MapResult => ({
