@@ -15,6 +15,7 @@ import type { Layout } from "./layout.ts";
 import type { HostToolchainIdentity } from "./outerTestReceipt.ts";
 import { capturePackageManagerIdentity } from "./packageManagerIdentity.ts";
 import { resolveRepoPath } from "./paths.ts";
+import { ProcessSupervisionError, superviseOwnedProcess, type TerminationReason } from "./processSupervision.ts";
 import { loadDepDirs } from "./profiles.ts";
 import { registeredIds } from "./registry.ts";
 import { safeGit } from "./gitExec.ts";
@@ -35,7 +36,7 @@ export interface HostVerifierExecutionResult {
   stdout: string;
   stderr: string;
   truncated: boolean;
-  killedBy: null | "timeout" | "rss";
+  killedBy: TerminationReason | null;
   durationMs: number;
   peakRssMb: number;
 }
@@ -46,10 +47,12 @@ export interface HostVerifierRuntimeAdapter {
     plan: HostVerifierStaticPlan;
     jobId: string;
     disposableRoot: string;
+    signal?: AbortSignal;
   }): Promise<HostVerifierPreparedRun>;
   execute(
     prepared: HostVerifierPreparedRun,
     onSpawn: (pgid: number) => void,
+    signal?: AbortSignal,
   ): Promise<HostVerifierExecutionResult>;
   readCurrentHeads(request: HostVerifierRequest): Promise<{ taskHead: string | null; prHead: string | null }>;
   cleanup(prepared: HostVerifierPreparedRun): Promise<void>;
@@ -109,11 +112,13 @@ async function prepareTrustedDependencies(
   canonicalRepo: string,
   sourceRoot: string,
   jobTmp: string,
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const depDirs = [...loadDepDirs(layout, repoId)];
   if (depDirs.length === 0) throw new Error(`host verifier has no trusted dependency roots for ${repoId}`);
   const roots: string[] = [];
   for (const relative of depDirs) {
+    signal?.throwIfAborted();
     assertTrustedDepPath(relative);
     const destination = join(sourceRoot, relative);
     if (relative === "node_modules") {
@@ -122,7 +127,9 @@ async function prepareTrustedDependencies(
         repoId,
         worktreePath: sourceRoot,
         jobTmp: join(jobTmp, "dependency-bootstrap"),
+        signal,
       });
+      signal?.throwIfAborted();
       if (!existsSync(destination)) throw new Error("dependency bootstrap completed without node_modules");
       roots.push(realpathSync(destination));
       continue;
@@ -169,22 +176,12 @@ function cleanTaskHead(taskWorktree: string): string | null {
   return safeGit.local(taskWorktree, ["rev-parse", "HEAD"]).trim();
 }
 
-function groupRssMb(pgid: number): number {
-  if (!Number.isInteger(pgid) || pgid <= 0) return 0;
-  try {
-    const out = execFileSync("/bin/ps", ["-o", "rss=", "-g", String(pgid)], { encoding: "utf8" });
-    const kb = out.split("\n").reduce((sum, line) => sum + (Number(line.trim()) || 0), 0);
-    return Math.round(kb / 1024);
-  } catch {
-    return 0;
-  }
-}
-
 async function executePreparedVerifier(
   details: DefaultPreparedDetails,
   onSpawn: (pgid: number) => void,
+  signal?: AbortSignal,
 ): Promise<HostVerifierExecutionResult> {
-  const started = Date.now();
+  signal?.throwIfAborted();
   const child = spawn(
     "/usr/bin/sandbox-exec",
     ["-f", details.profilePath, details.nodePath, details.vitestEntry, "run", "--config", details.configPath],
@@ -195,71 +192,15 @@ async function executePreparedVerifier(
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
-  const pgid = child.pid ?? 0;
-  if (!pgid) throw new Error("host verifier spawn produced no process group id");
-  try {
-    onSpawn(pgid);
-  } catch (error) {
-    try { process.kill(-pgid, "SIGKILL"); } catch { /* already exited */ }
-    throw error;
-  }
-
-  let stdout = "";
-  let stderr = "";
-  let bytes = 0;
-  let truncated = false;
-  let killedBy: HostVerifierExecutionResult["killedBy"] = null;
-  let peakRssMb = 0;
-  let hardKillTimer: NodeJS.Timeout | undefined;
-
-  const killGroup = (reason: NonNullable<HostVerifierExecutionResult["killedBy"]>) => {
-    if (killedBy !== null) return;
-    killedBy = reason;
-    try { process.kill(-pgid, "SIGTERM"); } catch { /* already exited */ }
-    hardKillTimer = setTimeout(() => {
-      try { process.kill(-pgid, "SIGKILL"); } catch { /* already exited */ }
-    }, 5000);
-    hardKillTimer.unref?.();
-  };
-
-  const collect = (chunk: Buffer, target: "stdout" | "stderr") => {
-    if (truncated) return;
-    const remaining = details.plan.resourceLimits.maxOutputBytes - bytes;
-    if (remaining <= 0) {
-      truncated = true;
-      return;
-    }
-    const slice = chunk.subarray(0, remaining);
-    bytes += slice.byteLength;
-    if (target === "stdout") stdout += slice.toString("utf8");
-    else stderr += slice.toString("utf8");
-    if (bytes >= details.plan.resourceLimits.maxOutputBytes) truncated = true;
-  };
-  child.stdout.on("data", (chunk: Buffer) => collect(chunk, "stdout"));
-  child.stderr.on("data", (chunk: Buffer) => collect(chunk, "stderr"));
-
-  const timeout = setTimeout(() => killGroup("timeout"), details.plan.resourceLimits.wallTimeoutMs);
-  const rssPoll = setInterval(() => {
-    const current = groupRssMb(pgid);
-    if (current > peakRssMb) peakRssMb = current;
-    if (current > details.plan.resourceLimits.maxRssMb) killGroup("rss");
-  }, 2000);
-
-  const exitCode = await new Promise<number | null>((resolve) => {
-    let settled = false;
-    const done = (code: number | null) => {
-      if (settled) return;
-      settled = true;
-      resolve(code);
-    };
-    child.once("close", (code) => done(code));
-    child.once("error", () => done(null));
+  // Share ownership-bound termination with ordinary sandbox jobs. The launcher must
+  // retain its reservation and source tree when extinction cannot be proved.
+  return superviseOwnedProcess(child, {
+    timeoutMs: details.plan.resourceLimits.wallTimeoutMs,
+    maxRssMb: details.plan.resourceLimits.maxRssMb,
+    maxOutputBytes: details.plan.resourceLimits.maxOutputBytes,
+    onSpawn,
+    signal,
   });
-  clearTimeout(timeout);
-  clearInterval(rssPoll);
-  if (hardKillTimer) clearTimeout(hardKillTimer);
-
-  return { exitCode, stdout, stderr, truncated, killedBy, durationMs: Date.now() - started, peakRssMb };
 }
 
 /** Real host adapter. All executable and filesystem choices remain behind the trusted boundary. */
@@ -270,7 +211,8 @@ export function createDefaultHostVerifierRuntimeAdapter(
   const detailsByRoot = new Map<string, DefaultPreparedDetails>();
 
   return {
-    async prepare({ request, plan, disposableRoot }) {
+    async prepare({ request, plan, disposableRoot, signal }) {
+      signal?.throwIfAborted();
       const task = getTask(deps.db, request.taskId);
       if (!task || task.repoId !== request.repoId) throw new Error("host verifier task/repo binding changed");
       const taskWorktree = realpathSync(task.worktreePath);
@@ -290,6 +232,7 @@ export function createDefaultHostVerifierRuntimeAdapter(
       const sourceRoot = join(root, "source");
       let worktreeAdded = false;
       try {
+        signal?.throwIfAborted();
         safeGit.local(canonicalRepo, ["worktree", "add", "--detach", sourceRoot, request.commit]);
         worktreeAdded = true;
         const checkedOut = safeGit.local(sourceRoot, ["rev-parse", "HEAD"]).trim();
@@ -300,12 +243,14 @@ export function createDefaultHostVerifierRuntimeAdapter(
           mkdirSync(dir, { recursive: true });
         }
         const dependencyRoots = await prepareTrustedDependencies(
-          deps.layout, request.repoId, canonicalRepo, sourceRoot, jobTmp,
+          deps.layout, request.repoId, canonicalRepo, sourceRoot, jobTmp, signal,
         );
+        signal?.throwIfAborted();
         const canonicalSource = realpathSync(sourceRoot);
         const canonicalJobTmp = realpathSync(jobTmp);
         const productionPort = Number(process.env.PORT ?? "8787");
         const loopbackPorts = [await allocateLoopbackPort(productionPort)];
+        signal?.throwIfAborted();
         const nodePath = realpathSync(process.execPath);
         const gitPath = exactGitExecutable();
         const shPath = realpathSync("/bin/sh");
@@ -345,6 +290,7 @@ export function createDefaultHostVerifierRuntimeAdapter(
           nodePath, vitestEntry, env: policy.env });
         return prepared;
       } catch (error) {
+        if (error instanceof ProcessSupervisionError && !error.safeToFinalize) throw error;
         if (worktreeAdded) {
           try { safeGit.local(canonicalRepo, ["worktree", "remove", "--force", sourceRoot]); }
           catch { /* surfaced by original error */ }
@@ -353,10 +299,10 @@ export function createDefaultHostVerifierRuntimeAdapter(
       }
     },
 
-    async execute(prepared, onSpawn) {
+    async execute(prepared, onSpawn, signal) {
       const details = detailsByRoot.get(prepared.disposableRoot);
       if (!details) throw new Error("unknown trusted prepared verifier run");
-      return executePreparedVerifier(details, onSpawn);
+      return executePreparedVerifier(details, onSpawn, signal);
     },
 
     async readCurrentHeads(request) {

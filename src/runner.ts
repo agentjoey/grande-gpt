@@ -4,7 +4,9 @@ import { join, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { truncateText } from "./envelope.ts";
 import type { Layout } from "./layout.ts";
+import { registerJobCancellation, type JobCancellationControl } from "./jobCancellation.ts";
 import { finishJob, getJob, setRunningJobPgid, TERMINAL, type JobState } from "./jobs.ts";
+import { ProcessSupervisionError } from "./processSupervision.ts";
 import { markManagedJobLaunching, reserveManagedJob } from "./resourceAdmission.ts";
 import { assertTaskId, resolveRepoPath } from "./paths.ts";
 import { getProfile } from "./profiles.ts";
@@ -67,13 +69,9 @@ function pollHint(timeoutSeconds: number): number {
   return Math.min(20, Math.max(3, Math.round(timeoutSeconds / 10)));
 }
 
-/**
- * 后台收尾 promise，按 jobId 索引（C-7）。生产路径不 await 它——`grande_run` 必须
- * < 1s 返回，等它跑完就不是异步 job 了。测试与优雅关停用 `awaitJobSettled` 等它落地。
- */
+/** Settlement promises are shared with bootstrap/verifier shutdown handling. */
 const inFlight = new Map<string, Promise<void>>();
 
-/** Register non-runner asynchronous jobs with the same shutdown wait/rejection boundary. */
 export function trackJobSettlement(jobId: string, settlement: Promise<void>): void {
   const tracked = settlement
     .catch((error: unknown) => {
@@ -85,14 +83,11 @@ export function trackJobSettlement(jobId: string, settlement: Promise<void>): vo
   inFlight.set(jobId, tracked);
 }
 
-/** 等某个 job 的后台收尾跑完。未知或已收尾的 jobId 立即返回。 */
 export function awaitJobSettled(jobId: string): Promise<void> {
   return inFlight.get(jobId) ?? Promise.resolve();
 }
 
-/**
- * 等所有在途 job 收尾，最多等 timeoutMs。超时不伪造终态；重启后继续从 durable job 对账。
- */
+/** A bounded shutdown wait is not proof that every process has terminated. */
 export async function awaitAllJobsSettled(timeoutMs: number): Promise<number> {
   const pending = [...inFlight.values()];
   if (pending.length === 0) return 0;
@@ -115,7 +110,6 @@ function safeWrite(path: string, body: string): void {
   }
 }
 
-/** @returns 这次收尾真的落库了吗。false = CAS 输了或库已关闭。 */
 function safeFinish(
   db: DatabaseSync,
   jobId: string,
@@ -134,7 +128,7 @@ function safeFinish(
   }
 }
 
-/** Validate, atomically reserve a job, then allocate/spawn. The supervisor owns settlement. */
+/** Validate, atomically reserve, then allocate/spawn. Only the supervisor can settle cancellation. */
 export function startJob(
   deps: RunnerDeps,
   a: { taskId: string; repoId: string; worktreePath: string; profileName: string },
@@ -143,6 +137,7 @@ export function startJob(
   const { db, layout } = deps;
   let reserved: string | undefined;
   let supervised = false;
+  let cancellation: JobCancellationControl | undefined;
   try {
     const { profile, canonicalGit, worktree, worktreesRoot } = preflightJob(deps, a);
     if (!audit.executing()) {
@@ -153,11 +148,12 @@ export function startJob(
       jobId, taskId: a.taskId, profile: profile.name, argv: [...profile.argv], kind: "sandbox",
     }, [worktree]);
     reserved = jobId;
+    const control = registerJobCancellation(db, jobId);
+    cancellation = control;
 
     const jobTmp = join(layout.derivedRoot, "tmp", jobId);
     const artifactDir = join(layout.artifactsDir, a.taskId, jobId);
     const artifactPath = join(artifactDir, "output.log");
-    // No process exists if directory preparation fails; the reserved row can safely settle.
     mkdirSync(join(jobTmp, "home"), { recursive: true });
     mkdirSync(artifactDir, { recursive: true });
     const execRoots = defaultExecRoots();
@@ -165,16 +161,10 @@ export function startJob(
     const run = (deps.jobSandboxRunner ?? runSandboxed)({
       argv: [...profile.argv],
       cwd: worktree,
+      signal: control.signal,
       onSpawn: (pgid) => {
-        try {
-          if (!setRunningJobPgid(db, jobId, pgid)) throw new Error("job reservation is no longer running");
-        } catch (error) {
-          // Only the pgid just received from this spawn is eligible for this emergency cleanup.
-          if (Number.isInteger(pgid) && pgid > 0) {
-            try { process.kill(-pgid, "SIGKILL"); } catch { /* already exited */ }
-          }
-          throw error;
-        }
+        // The process supervisor handles callback failure and confirms extinction before rejecting.
+        if (!setRunningJobPgid(db, jobId, pgid)) throw new Error("job reservation is no longer running");
       },
       paths: {
         worktree, canonicalGit, jobTmp: realpathSync(jobTmp),
@@ -191,18 +181,28 @@ export function startJob(
       const state: Exclude<JobState, "running"> =
         r.killedBy === "timeout" ? "timeout"
         : r.killedBy === "rss" ? "killed"
+        : control.signal.aborted || r.killedBy === "cancel" ? "cancelled"
         : r.exitCode === 0 ? "passed" : "failed";
       if (!safeFinish(db, jobId, {
         state, exitCode: r.exitCode, artifactPath,
-        summary: { truncated: r.truncated, killedBy: r.killedBy ?? null, durationMs: r.durationMs, peakRssMb: r.peakRssMb },
+        summary: { truncated: r.truncated, killedBy: r.killedBy ?? (state === "cancelled" ? "cancel" : null),
+          ...(state === "cancelled" ? { reason: "cancellation_requested" } : {}),
+          durationMs: r.durationMs, peakRssMb: r.peakRssMb },
       })) {
         console.error(`[runner] ${jobId} 的真实结果（${state}, exit=${r.exitCode}）晚于收敛写入、已被丢弃；完整日志仍在 ${artifactPath}`);
       }
     }).catch((error: unknown) => {
       const message = error instanceof Error ? error.message : String(error);
       safeWrite(artifactPath, `runner 内部错误：${message}\n`);
-      safeFinish(db, jobId, { state: "killed", exitCode: null, artifactPath, summary: { error: message } });
-    }).finally(() => { inFlight.delete(jobId); });
+      if (error instanceof ProcessSupervisionError && !error.safeToFinalize) {
+        control.quarantine();
+        return;
+      }
+      safeFinish(db, jobId, {
+        state: control.signal.aborted ? "cancelled" : "killed", exitCode: null, artifactPath,
+        summary: { error: message, ...(control.signal.aborted ? { reason: "cancellation_requested", killedBy: "cancel" } : {}) },
+      });
+    }).finally(() => { control.dispose(); inFlight.delete(jobId); });
     inFlight.set(jobId, settled);
     supervised = true;
     audit.succeeded();
@@ -211,6 +211,7 @@ export function startJob(
     if (reserved && !supervised) {
       safeFinish(db, reserved, { state: "failed", exitCode: null, artifactPath: null,
         summary: { reason: "launch_failed", error: error instanceof Error ? error.message : String(error) } });
+      cancellation?.dispose();
     }
     audit.failed(error instanceof Error ? error.message : String(error));
     throw error;
@@ -229,7 +230,7 @@ export interface JobReport {
   packageManager: string | null;
   exitCode: number | null;
   outputTruncated: boolean;
-  killedBy: "timeout" | "rss" | null;
+  killedBy: "timeout" | "rss" | "cancel" | null;
   durationMs: number | null;
   peakRssMb: number | null;
   artifactPath: string | null;
@@ -237,7 +238,6 @@ export interface JobReport {
   networkDenied: boolean;
 }
 
-/** jobReport 的终态 → 工具错误码。这一层不经过 toToolError：它不是异常，是 job 结果。 */
 export function jobStateToError(r: JobReport): ToolError | null {
   if (r.state === "timeout") {
     return { code: "JOB_TIMEOUT", message: "作业超过 profile 的 timeoutSeconds。", retryable: false, details: { killedBy: r.killedBy } };
@@ -248,15 +248,10 @@ export function jobStateToError(r: JobReport): ToolError | null {
   return null;
 }
 
-/** 摘要给模型看的尾部行数（规格 §5.4②：失败用例名 + 关键堆栈 + 尾部 40 行） */
 const TAIL_LINES = 40;
 const SUMMARY_MAX_BYTES = 8 * 1024;
 
-/**
- * 启发式检测网络被 Seatbelt `(deny network*)` 规则拦截。
- * 非权威信号——Seatbelt 不提供"因为网络被拒"的明确标记，只能从
- * 进程输出中匹配常见特征。不要依赖它为唯一判定依据。
- */
+/** A diagnostic hint, never authority to grant network access. */
 function detectNetworkDenied(artifactContent: string): boolean {
   return (
     /(?:^|\n)curl:\s*\(\s*[67]\d{0,1}\s*\)/m.test(artifactContent) ||
@@ -281,7 +276,9 @@ export function jobReport(db: DatabaseSync, jobId: string): JobReport {
       packageManager: (s?.packageManager as string | undefined) ?? null,
       exitCode: null, outputTruncated: false,
       killedBy: null, durationMs: null, peakRssMb: null, artifactPath: null,
-      summary: "仍在运行中。", networkDenied: false,
+      summary: s?.reason === "process_supervision_uncertain"
+        ? "执行终止尚未被证明；保留资源占位，需检查原 supervisor。" : "仍在运行中。",
+      networkDenied: false,
     };
   }
   let tail = "";

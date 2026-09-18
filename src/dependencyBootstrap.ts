@@ -276,7 +276,10 @@ export async function prepareDependenciesInWorktree(input: {
   jobTmp: string;
   onSpawn?: (pgid: number) => void;
   sandboxRunner?: DependencyBootstrapSandboxRunner;
+  /** Owned by the trusted job supervisor, never supplied by a repository/profile. */
+  signal?: AbortSignal;
 }): Promise<PreparedDependencyResult> {
+  input.signal?.throwIfAborted();
   const { layout, repoId } = input;
   const worktree = realpathSync(input.worktreePath);
   const identity = captureDependencyBootstrapIdentity(repoId, worktree);
@@ -292,6 +295,7 @@ export async function prepareDependenciesInWorktree(input: {
   }
 
   const canonicalRepo = resolveRepoPath(layout, repoId, registeredIds(layout));
+  input.signal?.throwIfAborted();
   mkdirSync(input.jobTmp, { recursive: true });
   const result = await (input.sandboxRunner ?? runSandboxed)({
     argv: dependencyInstallArgv(identity.packageManager),
@@ -309,6 +313,7 @@ export async function prepareDependenciesInWorktree(input: {
     maxOutputBytes: DEPENDENCY_BOOTSTRAP_MAX_OUTPUT_BYTES,
     maxRssMb: DEPENDENCY_BOOTSTRAP_MAX_RSS_MB,
     onSpawn: input.onSpawn,
+    signal: input.signal,
   });
 
   if (result.exitCode !== 0 || result.killedBy !== null) {
@@ -316,6 +321,8 @@ export async function prepareDependenciesInWorktree(input: {
     throw new DependencyBootstrapFailure(identity, result);
   }
 
+  // Cancellation accepted during installation must not publish a successful cache.
+  input.signal?.throwIfAborted();
   assertStableDependencyIdentity(repoId, worktree, identity);
   mkdirSync(nodeModules(worktree), { recursive: true });
   publishPreparedDependencies(layout, identity, worktree);

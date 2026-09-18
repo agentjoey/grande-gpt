@@ -17,8 +17,10 @@ import {
   type DependencyBootstrapIdentity,
 } from "./dependencyBootstrap.ts";
 import { StateError } from "./errors.ts";
+import { registerJobCancellation, type JobCancellationControl } from "./jobCancellation.ts";
 import { finishJob, listJobs, setRunningJobPgid, setRunningJobSummary, TERMINAL } from "./jobs.ts";
 import type { Layout } from "./layout.ts";
+import { ProcessSupervisionError } from "./processSupervision.ts";
 import { getProfile } from "./profiles.ts";
 import { markManagedJobLaunching, reserveManagedJob } from "./resourceAdmission.ts";
 import { trackJobSettlement } from "./runner.ts";
@@ -142,6 +144,7 @@ function launchBootstrap(
   const jobId = `job_${randomUUID()}`;
   const argv = dependencyInstallArgv(identity.packageManager);
   let reserved = false;
+  let control: JobCancellationControl;
   try {
     reserveManagedJob(deps.db, deps.layout, {
       jobId, taskId: task.taskId, profile: BOOTSTRAP_PROFILE, argv, kind: "dependency-bootstrap",
@@ -152,6 +155,7 @@ function launchBootstrap(
     });
     markManagedJobLaunching(deps.db, jobId);
     audit.succeeded([task.worktreePath]);
+    control = registerJobCancellation(deps.db, jobId);
   } catch (error) {
     if (reserved) finishJob(deps.db, jobId, { state: "failed", exitCode: null, artifactPath: null,
       summary: { kind: BOOTSTRAP_PROFILE, reason: "preparation_failed" } });
@@ -160,23 +164,20 @@ function launchBootstrap(
   }
 
   const jobTmp = join(deps.layout.derivedRoot, "tmp", jobId);
+  let safeToClean = true;
   const settlement = prepareDependenciesInWorktree({
     layout: deps.layout,
     repoId: task.repoId,
     worktreePath: task.worktreePath,
     jobTmp,
+    signal: control.signal,
     sandboxRunner: deps.dependencyBootstrapSandboxRunner,
     onSpawn: (pgid) => {
-      try {
-        if (!setRunningJobPgid(deps.db, jobId, pgid)) throw new Error("bootstrap reservation is no longer running");
-      } catch (error) {
-        if (Number.isInteger(pgid) && pgid > 0) {
-          try { process.kill(-pgid, "SIGKILL"); } catch { /* already exited */ }
-        }
-        throw error;
-      }
+      // The owning supervisor handles callback failure and proves extinction before rejection.
+      if (!setRunningJobPgid(deps.db, jobId, pgid)) throw new Error("bootstrap reservation is no longer running");
     },
   }).then((prepared) => {
+    control.signal.throwIfAborted();
     const run = prepared.runResult;
     const artifact = writeBootstrapArtifact(deps, task.taskId, jobId, run
       ? `${run.stdout}${run.stderr ? `\n--- stderr ---\n${run.stderr}` : ""}`
@@ -192,23 +193,33 @@ function launchBootstrap(
       },
     });
   }).catch((error: unknown) => {
+    if (error instanceof ProcessSupervisionError && !error.safeToFinalize) {
+      safeToClean = false;
+      control.quarantine();
+      return;
+    }
     const failure = error instanceof DependencyBootstrapFailure ? error : null;
     const drift = error instanceof DependencyBootstrapIdentityDrift ? error : null;
     const run = failure?.result;
+    const cancelled = control.signal.aborted || run?.killedBy === "cancel";
     const reason = run?.killedBy === "timeout" ? "bootstrap_timeout"
       : run?.killedBy === "rss" ? "bootstrap_resource_exhausted"
+      : cancelled ? "cancellation_requested"
       : drift ? "identity_drift" : failure ? "install_failed" : "preparation_failed";
     const artifact = writeBootstrapArtifact(deps, task.taskId, jobId, failure
       ? `${failure.message}\n${run!.stdout}${run!.stderr ? `\n--- stderr ---\n${run!.stderr}` : ""}`
       : `${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
-    const state = run?.killedBy === "timeout" ? "timeout" : run?.killedBy === "rss" ? "killed" : "failed";
+    const state = run?.killedBy === "timeout" ? "timeout" : run?.killedBy === "rss" ? "killed"
+      : cancelled ? "cancelled" : "failed";
     try {
       finishJob(deps.db, jobId, {
         state, exitCode: run?.exitCode ?? null, artifactPath: artifact,
         summary: {
-          kind: BOOTSTRAP_PROFILE, phase: "failed", failureClass: "dependency-bootstrap",
-          reason, requestedProfile, truncated: run?.truncated ?? false,
-          killedBy: run?.killedBy ?? null, durationMs: run?.durationMs ?? null, peakRssMb: run?.peakRssMb ?? null,
+          kind: BOOTSTRAP_PROFILE, phase: state === "cancelled" ? "cancelled" : "failed",
+          failureClass: "dependency-bootstrap", reason, requestedProfile,
+          truncated: run?.truncated ?? false,
+          killedBy: run?.killedBy ?? (cancelled ? "cancel" : null),
+          durationMs: run?.durationMs ?? null, peakRssMb: run?.peakRssMb ?? null,
           ...identitySummary(failure?.identity ?? drift?.expected ?? identity),
           ...(drift ? { actualDependencyIdentityKey: drift.actual.key } : {}),
         },
@@ -217,8 +228,11 @@ function launchBootstrap(
       // A shutdown/reconciler terminal CAS may already have won. Never create an unhandled rejection.
     }
   }).finally(() => {
-    try { rmSync(jobTmp, { recursive: true, force: true }); }
-    catch (error) { console.error(`[dependency-bootstrap] ${jobId} 临时目录清理失败：${error instanceof Error ? error.message : String(error)}`); }
+    control.dispose();
+    if (safeToClean) {
+      try { rmSync(jobTmp, { recursive: true, force: true }); }
+      catch (error) { console.error(`[dependency-bootstrap] ${jobId} 临时目录清理失败：${error instanceof Error ? error.message : String(error)}`); }
+    }
   });
   trackJobSettlement(jobId, settlement);
   return { jobId, state: "running", pollAfterSeconds: BOOTSTRAP_POLL_SECONDS };
