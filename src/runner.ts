@@ -283,7 +283,12 @@ export function jobReport(db: DatabaseSync, jobId: string): JobReport {
   }
   let tail = "";
   let networkDenied = false;
-  if (j.artifactPath !== null) {
+  const retention = s?.artifactRetention;
+  const pruned = retention !== null && typeof retention === "object"
+    && (retention as { state?: unknown }).state === "pruned";
+  if (pruned) {
+    tail = "诊断内容已按 retention 保留策略清理；job 结果与 durable verification identity 保留。";
+  } else if (j.artifactPath !== null) {
     try {
       const all = readFileSync(j.artifactPath, "utf8");
       networkDenied = detectNetworkDenied(all);

@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
+  futimesSync,
   mkdirSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -135,6 +140,16 @@ function markerMatches(root: string, identity: DependencyBootstrapIdentity): boo
   }
 }
 
+/** Actual cache use, not status inspection, refreshes the retention age of the owned directory. */
+function recordCacheUse(path: string): void {
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    if (!fstatSync(fd).isDirectory()) throw new Error("dependency cache root is not a directory");
+    const now = new Date();
+    futimesSync(fd, now, now);
+  } finally { closeSync(fd); }
+}
+
 function cloneDirectory(source: string, destination: string): void {
   copyDirectory(source, destination);
 }
@@ -161,7 +176,7 @@ export function publishPreparedDependencies(
   if (!sourceWasMarked) writeFileSync(markerPath(sourceRoot), markerBody(identity), "utf8");
 
   const finalDir = dependencyCacheDir(layout, identity);
-  if (markerMatches(finalDir, identity)) return finalDir;
+  if (markerMatches(finalDir, identity)) { recordCacheUse(finalDir); return finalDir; }
   const parent = join(layout.derivedRoot, "dependency-cache", identity.repoId);
   mkdirSync(parent, { recursive: true });
   const staging = `${finalDir}.tmp-${randomUUID()}`;
@@ -170,6 +185,7 @@ export function publishPreparedDependencies(
     cloneDirectory(sourceModules, nodeModules(staging));
     if (markerMatches(finalDir, identity)) {
       rmSync(staging, { recursive: true, force: true });
+      recordCacheUse(finalDir);
       return finalDir;
     }
     try {
@@ -180,6 +196,7 @@ export function publishPreparedDependencies(
       if (!markerMatches(finalDir, identity)) throw error;
       rmSync(staging, { recursive: true, force: true });
     }
+    recordCacheUse(finalDir);
     return finalDir;
   } catch (error) {
     rmSync(staging, { recursive: true, force: true });
@@ -207,6 +224,7 @@ export function materializePreparedDependencies(
     if (!markerMatches(stagingRoot, identity)) {
       throw new Error(`materialized dependency cache identity mismatch for ${identity.repoId}`);
     }
+    recordCacheUse(cacheRoot);
     if (existsSync(targetModules)) {
       renameSync(targetModules, backupModules);
       backedUp = true;
