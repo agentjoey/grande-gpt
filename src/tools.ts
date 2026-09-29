@@ -40,7 +40,11 @@ export {
   type ToolsetIdentity,
 } from "./toolsetIdentity.ts";
 
-export interface BuildToolsOptions extends Pick<PrLifecycleOptions, "hostVerificationMode" | "hostVerifierCoordinator"> {
+export interface BuildToolsOptions
+  extends Pick<
+    PrLifecycleOptions,
+    "hostVerificationMode" | "hostVerifierCoordinator" | "deliveryReadinessDeps"
+  > {
   /**
    * 透传给 addDeploymentTools 的既有 seam（如测试用 startHostProfile）。
    * 只影响 handler 运行时接线，不进入 public schema/digest。

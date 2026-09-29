@@ -8,6 +8,7 @@ import { ensureLayout, loadLayout } from "../src/layout.ts";
 const mocks = vi.hoisted(() => ({
   loadConfig: vi.fn(() => ({ mode: "manual" as const, concurrency: 1 as const })),
   createRuntime: vi.fn(() => ({ hostVerificationMode: "manual" as const, hostVerifierCoordinator: undefined })),
+  createReadiness: vi.fn(() => ({ marker: "trusted-delivery-readiness" })),
   buildTools: vi.fn((_deps: unknown, _options?: unknown) => []),
 }));
 
@@ -23,6 +24,11 @@ vi.mock("../src/hostVerificationConfig.ts", async (importOriginal) => {
 vi.mock("../src/hostVerificationProduction.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/hostVerificationProduction.ts")>();
   return { ...actual, createProductionHostVerification: mocks.createRuntime };
+});
+
+vi.mock("../src/deliveryReadinessProduction.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/deliveryReadinessProduction.ts")>();
+  return { ...actual, createProductionDeliveryReadiness: mocks.createReadiness };
 });
 
 vi.mock("../src/tools.ts", async (importOriginal) => {
@@ -42,6 +48,7 @@ async function serverModule(): Promise<Record<string, any>> {
 beforeEach(() => {
   mocks.loadConfig.mockClear();
   mocks.createRuntime.mockClear();
+  mocks.createReadiness.mockClear();
   mocks.buildTools.mockClear();
 
   root = mkdtempSync(join(tmpdir(), "host-verification-server-wiring-"));
@@ -87,6 +94,8 @@ describe("Gateway startup Host Verifier activation wiring", () => {
         { db, layout },
         { mode: "manual", concurrency: 1 },
       );
+      expect(mocks.createReadiness).toHaveBeenCalledTimes(1);
+      expect(mocks.createReadiness).toHaveBeenCalledWith({ db, layout });
     } finally {
       await gateway.close();
     }
@@ -98,9 +107,11 @@ describe("Gateway startup Host Verifier activation wiring", () => {
     if (typeof mod.buildGatewayTools !== "function") return;
 
     const sharedCoordinator = { marker: "one-gateway-coordinator" };
+    const sharedReadiness = { marker: "trusted-delivery-readiness" };
     const hostVerification = {
       hostVerificationMode: "auto",
       hostVerifierCoordinator: sharedCoordinator,
+      deliveryReadinessDeps: sharedReadiness,
     };
     mod.buildGatewayTools({ db, layout, hostVerification }, "grande-gpt");
     mod.buildGatewayTools({ db, layout, hostVerification }, undefined);
