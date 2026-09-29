@@ -16,7 +16,7 @@ import {
   verifyMergedCommit,
   type ExactMergeReceipt,
 } from "./deliveryMerge.ts";
-import { revalidateDeliveryBinding, type DeliveryReadinessDeps } from "./deliveryReadiness.ts";
+import { prepareDeliveryAuthorization, revalidateDeliveryBinding, type DeliveryReadinessDeps } from "./deliveryReadiness.ts";
 import { err, ok } from "./envelope.ts";
 import { redact, StateError, toToolError } from "./errors.ts";
 import {
@@ -148,6 +148,77 @@ interface AuthorizedMerge {
   taskId: string;
   binding: DeliveryAuthorizationBinding;
   stages: AuthorizationStages;
+}
+
+interface PendingDeliveryApproval {
+  state: "approval_required";
+  authorizationId: string;
+  bindingDigest: string;
+  expiresAt: number;
+}
+
+type DeliveryMergeGate =
+  | { state: "authorized"; authorized: AuthorizedMerge }
+  | PendingDeliveryApproval;
+
+function pendingApproval(
+  authorizationId: string,
+  bindingDigest: string,
+  expiresAt: number,
+): PendingDeliveryApproval {
+  return { state: "approval_required", authorizationId, bindingDigest, expiresAt };
+}
+
+async function gateDeliveryMerge(
+  deps: ToolDeps,
+  taskId: string,
+  options: PrLifecycleOptions,
+): Promise<DeliveryMergeGate> {
+  const readinessDeps = options.deliveryReadinessDeps;
+  if (!readinessDeps) {
+    throw new StateError(
+      "POLICY_DENIED",
+      `任务 ${taskId} 是 explicit deploy 任务，但 Gateway 未接入可信 readiness reader；fail closed，拒绝 merge。`,
+    );
+  }
+
+  const active = activeAuthorizationForTask(deps.db, taskId);
+  if (!active) {
+    const prepared = await prepareDeliveryAuthorization(deps.db, taskId, readinessDeps);
+    return pendingApproval(prepared.authorizationId, prepared.bindingDigest, prepared.expiresAt);
+  }
+  if (active.kind !== "delivery") {
+    throw new StateError(
+      "STALE_STATE",
+      `任务 ${taskId} 的 active authorization kind=${active.kind}；delivery merge 不得复用其他授权。`,
+    );
+  }
+
+  if (active.status === "READY") {
+    try {
+      await revalidateDeliveryBinding(deps.db, active.authorizationId, readinessDeps);
+      return pendingApproval(active.authorizationId, active.bindingDigest, active.expiresAt);
+    } catch (error) {
+      if (
+        error instanceof StateError
+        && (error.code === "STALE_STATE" || error.code === "AUTH_EXPIRED")
+        && !activeAuthorizationForTask(deps.db, taskId)
+      ) {
+        const prepared = await prepareDeliveryAuthorization(deps.db, taskId, readinessDeps);
+        return pendingApproval(prepared.authorizationId, prepared.bindingDigest, prepared.expiresAt);
+      }
+      throw error;
+    }
+  }
+
+  if (active.status === "APPROVED") {
+    return { state: "authorized", authorized: await reauthorizeForMerge(deps, taskId, options) };
+  }
+
+  throw new StateError(
+    "STALE_STATE",
+    `任务 ${taskId} 的 delivery authorization 已处于 ${active.status}；不能重复启动 merge side effect。`,
+  );
 }
 
 /**
@@ -370,9 +441,29 @@ export function createPrMergeTool(deps: ToolDeps, options: PrLifecycleOptions = 
         // Minimal V2 Task 5：explicit deploy 任务先复核 authorization（规格 §10.1），
         // 这一步发生在【任何 GitHub API 调用之前】——没有 APPROVED authorization、
         // binding 漂移或过期都直接抛错，零 GitHub 调用、零执行。
-        const authorized = getExplicitDeliveryTarget(deps.db, taskId) === "deploy"
-          ? await reauthorizeForMerge(deps, taskId, options)
+        const deliveryGate = getExplicitDeliveryTarget(deps.db, taskId) === "deploy"
+          ? await gateDeliveryMerge(deps, taskId, options)
           : null;
+        if (deliveryGate?.state === "approval_required") {
+          return {
+            structuredContent: ok({
+              taskId,
+              data: {
+                merged: false,
+                authorization: {
+                  state: "READY",
+                  authorizationId: deliveryGate.authorizationId,
+                  bindingDigest: deliveryGate.bindingDigest,
+                  expiresAt: deliveryGate.expiresAt,
+                },
+              },
+              hint:
+                "Delivery authorization 已准备并停在 Human approval gate；"
+                + "请在 Grande Console 审批后再次调用 grande_pr_merge。",
+            }),
+          };
+        }
+        const authorized = deliveryGate?.authorized ?? null;
         const state = await inspectLifecycle(deps, taskId, options);
         const canonicalRefresher = options.canonicalRefresher ?? refreshCanonical;
 
