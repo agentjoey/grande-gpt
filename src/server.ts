@@ -13,6 +13,7 @@ import { reconcileRunningJobs } from "./jobs.ts";
 import { reconcileHostVerifierJobsAtStartup } from "./hostVerifierRecovery.ts";
 import { loadHostVerificationConfig } from "./hostVerificationConfig.ts";
 import { createProductionHostVerification } from "./hostVerificationProduction.ts";
+import { createProductionDeliveryReadiness } from "./deliveryReadinessProduction.ts";
 import { buildTools, type BuildToolsOptions, type ToolDef } from "./tools.ts";
 import { createAccessGate, AccessDeniedError, type AccessConfig } from "./accessGate.ts";
 import { assertDistinctAudience, type ConsoleAccessConfig } from "./consoleAuth.ts";
@@ -506,10 +507,16 @@ export function createApp(cfg: AppConfig): Hono {
 
 export async function startGateway(cfg: AppConfig): Promise<{ app: Hono; close: () => Promise<void> }> {
   const hostVerificationConfig = loadHostVerificationConfig(cfg.layout);
-  const hostVerification = createProductionHostVerification(
-    { db: cfg.db, layout: cfg.layout },
-    hostVerificationConfig,
-  );
+  const hostVerification: BuildToolsOptions = {
+    ...createProductionHostVerification(
+      { db: cfg.db, layout: cfg.layout },
+      hostVerificationConfig,
+    ),
+    deliveryReadinessDeps: createProductionDeliveryReadiness({
+      db: cfg.db,
+      layout: cfg.layout,
+    }),
+  };
 
   await reconcileHostVerifierJobsAtStartup({ db: cfg.db, layout: cfg.layout });
   reconcileRunningJobs(cfg.db, (pgid) => {
