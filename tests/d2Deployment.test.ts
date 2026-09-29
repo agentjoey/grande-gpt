@@ -430,13 +430,20 @@ describe("Task 5 authorized merge response-loss reconciliation", () => {
     expect(readExactMergeReceipt(layout, authorizationId)).toBeNull();
   });
 
-  it("reconciliation does not make GitHub calls after a missing-authorization rejection", async () => {
+  it("missing authorization prepares READY approval state without GitHub merge/reconciliation calls", async () => {
     const api = lossyApi();
     const envelope = (await buildTool(api).handler({ taskId })).structuredContent as Record<string, any>;
-    expect(envelope.ok).toBe(false);
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data.merged).toBe(false);
+    expect(envelope.data.authorization).toMatchObject({ state: "READY" });
     expect(api.getCalls).toBe(0);
     expect(api.mergeCalls).toBe(0);
     expect(existsSync(worktree)).toBe(true);
+
+    const row = deps.db
+      .prepare("SELECT status FROM delivery_authorization WHERE taskId=?")
+      .get(taskId) as { status: string } | undefined;
+    expect(row?.status).toBe("READY");
   });
 
   it("pins the observed merge SHA rather than a later canonical HEAD on response-loss recovery", async () => {

@@ -320,7 +320,8 @@ describe("S6 PR lifecycle", () => {
 /**
  * Minimal V2 Task 5：explicit deploy 任务的 authorization-gated exact merge。
  * 规格 §10.1/§10.2/§14.3：
- * - 没有 APPROVED authorization（或 binding 漂移）→ 零 GitHub 调用；
+ * - 没有 active authorization → 先创建 READY proposal，零 GitHub mutation；
+ * - READY proposal 重复调用保持单例；可信证据漂移则旧票据 STALE 后生成新 proposal；
  * - APPROVED → EXECUTING 的 CAS 必须发生在 merge API 调用之前；
  * - merge 成功后必须验证 parents/tree，并钉住 pinned release source；
  * - 任何 exact 证据检查失败 → authorization 进 UNCERTAIN，无 receipt，不能 deploy。
@@ -521,7 +522,7 @@ describe("minimal V2 authorized merge (Task 5)", () => {
     attestFor(deployTaskId, headSha);
   });
 
-  it("没有 APPROVED authorization → 零 GitHub 调用，直接拒绝", async () => {
+  it("没有 active authorization → 创建唯一 READY proposal，零 GitHub merge 调用", async () => {
     let apiCreated = false;
     const tool = createPrMergeTool(deps, {
       apiFactory: () => {
@@ -532,9 +533,66 @@ describe("minimal V2 authorized merge (Task 5)", () => {
       deliveryReadinessDeps: deployReadinessDeps(),
     });
     const envelope = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
-    expect(envelope.ok).toBe(false);
-    expect(JSON.stringify(envelope)).toMatch(/authorization|授权/i);
+    expect(envelope.ok).toBe(true);
+    expect(envelope.data.merged).toBe(false);
+    expect(envelope.data.authorization).toMatchObject({ state: "READY" });
     expect(apiCreated).toBe(false);
+
+    const rows = deps.db
+      .prepare("SELECT authorizationId,bindingDigest,status FROM delivery_authorization WHERE taskId=?")
+      .all(deployTaskId) as Array<{ authorizationId: string; bindingDigest: string; status: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.status).toBe("READY");
+    expect(envelope.data.authorization.authorizationId).toBe(rows[0]?.authorizationId);
+    expect(envelope.data.authorization.bindingDigest).toBe(rows[0]?.bindingDigest);
+  });
+
+  it("READY proposal 重复调用保持单例，不生成第二条 authorization", async () => {
+    const tool = createPrMergeTool(deps, {
+      apiFactory: () => deployApi(),
+      readRemoteUrl: () => githubUrl,
+      deliveryReadinessDeps: deployReadinessDeps(),
+    });
+    const first = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    const second = (await tool.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect(second.data.authorization.authorizationId).toBe(first.data.authorization.authorizationId);
+    expect(second.data.authorization.bindingDigest).toBe(first.data.authorization.bindingDigest);
+    const count = deps.db
+      .prepare("SELECT count(*) AS n FROM delivery_authorization WHERE taskId=?")
+      .get(deployTaskId) as { n: number };
+    expect(count.n).toBe(1);
+  });
+
+  it("READY binding 因 runtime identity 漂移时旧票据置 STALE，并生成新的 READY proposal", async () => {
+    const initial = createPrMergeTool(deps, {
+      apiFactory: () => deployApi(),
+      readRemoteUrl: () => githubUrl,
+      deliveryReadinessDeps: deployReadinessDeps(),
+    });
+    const first = (await initial.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(first.ok).toBe(true);
+
+    const nextRuntime = `git:${"9".repeat(40)}`;
+    const refreshed = createPrMergeTool(deps, {
+      apiFactory: () => deployApi(),
+      readRemoteUrl: () => githubUrl,
+      deliveryReadinessDeps: deployReadinessDeps({
+        readRuntimeIdentity: () => ({ runtimeBuild: nextRuntime, toolsetEpoch: 4, toolsDigest: TOOLS_DIGEST }),
+      }),
+    });
+    const second = (await refreshed.handler({ taskId: deployTaskId })).structuredContent as Record<string, any>;
+    expect(second.ok).toBe(true);
+    expect(second.data.authorization.authorizationId).not.toBe(first.data.authorization.authorizationId);
+
+    const rows = deps.db
+      .prepare("SELECT authorizationId,status FROM delivery_authorization WHERE taskId=? ORDER BY createdAt")
+      .all(deployTaskId) as Array<{ authorizationId: string; status: string }>;
+    expect(rows.map((row) => row.status)).toEqual(["STALE", "READY"]);
+    expect(rows[0]?.authorizationId).toBe(first.data.authorization.authorizationId);
+    expect(rows[1]?.authorizationId).toBe(second.data.authorization.authorizationId);
   });
 
   it("未接入可信 readiness reader 时 fail closed，零 GitHub 调用", async () => {
